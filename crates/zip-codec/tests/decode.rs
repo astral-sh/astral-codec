@@ -329,3 +329,28 @@ async fn projects_appnote_unix_links_and_compares_redundant_targets() -> TestRes
     ));
     Ok(())
 }
+
+#[tokio::test]
+async fn validates_empty_deflate_streams_in_files_and_directories() -> TestResult {
+    let bytes = include_bytes!("fixtures/empty-deflate.zip");
+    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+    let Some(Member::File { payload, .. }) = archive.next_member().await? else {
+        return Err(io::Error::other("expected empty file").into());
+    };
+    assert!(contents(payload).await?.is_empty());
+    assert!(matches!(
+        archive.next_member().await?,
+        Some(Member::Directory { .. })
+    ));
+    assert!(archive.next_member().await?.is_none());
+
+    let position = archive.entries()[1].data_offset() as usize;
+    let mut corrupt = bytes.to_vec();
+    corrupt[position] = 0xff;
+    let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;
+    assert!(matches!(
+        archive.member(1).await,
+        Err(DecodeError::Integrity { .. })
+    ));
+    Ok(())
+}

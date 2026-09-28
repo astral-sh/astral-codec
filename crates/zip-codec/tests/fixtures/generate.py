@@ -58,3 +58,12 @@ with zipfile.ZipFile(output, "w") as archive:
         entry.extra = b"\x0d\x00\x12\x00" + bytes(12) + b"target"
         archive.writestr(entry, payload)
 (root / "unix-links.zip").write_bytes(output.getvalue())
+
+output = io.BytesIO()
+with zipfile.ZipFile(output, "w") as archive:
+    for name, mode in [("empty", 0o100644), ("directory/", 0o040755)]:
+        entry = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+        entry.compress_type = zipfile.ZIP_DEFLATED
+        entry.external_attr = mode << 16
+        archive.writestr(entry, b"")
+(root / "empty-deflate.zip").write_bytes(output.getvalue())

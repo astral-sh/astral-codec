@@ -268,7 +268,7 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
         }
     };
     if matches!(kind, Kind::Directory | Kind::Special(_))
-        && (entry.size() != 0 || entry.compressed_size() != 0 || entry.crc32() != 0)
+        && (entry.size() != 0 || entry.crc32() != 0)
     {
         return Err(DecodeError::Integrity {
             position: entry.position(),
