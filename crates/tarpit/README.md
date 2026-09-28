@@ -2,7 +2,7 @@
 
 A CLI for inspecting and extracting tar streams.
 
-This crate is a component of [tar-codec](https://github.com/astral-sh/tar-codec).
+This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
 
 ## Inspection
 
@@ -25,4 +25,4 @@ Archives whose names end in `.tar.gz` are decompressed automatically.
 > `tarpit` is **not** suitable for general-purpose use.
 > It is a low-level inspection tool that is primarily useful
 > for looking at the format of tar streams and for diagnosing
-> [tar-codec](https://github.com/astral-sh/tar-codec) itself.
+> [tar-codec](https://github.com/astral-sh/astral-codec/tree/main/crates/tar-codec) itself.
