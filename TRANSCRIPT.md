@@ -1,5 +1,18 @@
 # ZIP implementation
 
+## Sparse ZIP access
+
+- User approved buffering and lazy local-header validation for HTTP range inputs.
+- `ww/zip-index` builds on the merged framing layer in `ww/zip-codec`; it belongs
+  below decoder PR #123. Directory metadata and checked entries are distinct.
+- `Index::entry` resolves and caches one member; `validate_all` retains the full
+  metadata-validation path. Limits charge local metadata only after success.
+- Source reads use bounded windows: 64 KiB for directory records and 4 KiB for
+  selected local records. Declared record spans support explicit prefetching.
+- Framing tests: 16 pass, including a 2,000-member read-count test, deferred
+  local corruption, cached resolution, and metadata-budget retry behavior.
+- Remaining: decoder integration/prefetch access, documentation, and stack push.
+
 ## Scope and decisions
 
 - Target: PKWARE APPNOTE 6.3.3, stored and DEFLATE, UTF-8 paths, safe Rust,
@@ -16,7 +29,7 @@
 ## Stack
 
 1. `ww/zip-framing`: bounded indexing and physical record validation.
-2. Planned: ZIP decoding and `Archive` integration.
+2. `ww/zip-decode`: ZIP decoding and `Archive` integration.
 3. Planned: ZIP encoding and `ArchiveBuilder` integration.
 4. Planned: interoperability, adversarial coverage, and security documentation.
 
@@ -28,17 +41,9 @@
   local/central consistency, descriptors, and complete nonoverlapping coverage.
 - `cargo test -p zip-framing --test index`: 7 tests passed, including table-driven
   field mutations and every truncation of classic/ZIP64 descriptor fixtures.
-- Next: payload decoding, integrity checks, lending iteration, random access.
-
-## Sparse ZIP access
-
-- User approved buffering and lazy local-header validation for HTTP range inputs.
-- `ww/zip-index` builds on the merged framing layer in `ww/zip-codec`; it belongs
-  below decoder PR #123. Directory metadata and checked entries are distinct.
-- `Index::entry` resolves and caches one member; `validate_all` retains the full
-  metadata-validation path. Limits charge local metadata only after success.
-- Source reads use bounded windows: 64 KiB for directory records and 4 KiB for
-  selected local records. Declared record spans support explicit prefetching.
-- Framing tests: 16 pass, including a 2,000-member read-count test, deferred
-  local corruption, cached resolution, and metadata-budget retry behavior.
-- Remaining: decoder integration/prefetch access, documentation, and stack push.
+- Decoding implemented: raw DEFLATE via zlib-rs, CRC/exact-size/exact-stream
+  checks, 64 KiB processing, poisoned cancellation, lending/random access.
+- `cargo test -p zip-codec --test decode`: 6 tests passed against reproducible
+  Python fixtures, corruption, size lies, trailing streams, and partial-I/O
+  cancellation.
+- Next: audit Unix extra-field link metadata, then encoding.

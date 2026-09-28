@@ -1,0 +1,279 @@
+//! ZIP member projection and seekable archive access.
+
+use std::io::{self, SeekFrom};
+
+use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
+use zip_framing::{Entry, Index, Limits};
+
+use crate::payload::{CHUNK_SIZE, Payload};
+
+/// An indexed ZIP archive over an immutable, seekable source.
+pub struct ZipArchive<R> {
+    reader: R,
+    index: Index,
+    next: usize,
+    active: Option<Payload>,
+    poisoned: bool,
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
+    /// Opens and validates all archive metadata using default resource limits.
+    pub async fn open(reader: R) -> Result<Self, DecodeError> {
+        Self::open_with_limits(reader, Limits::default()).await
+    }
+
+    /// Opens and validates the archive using explicit resource limits.
+    pub async fn open_with_limits(mut reader: R, limits: Limits) -> Result<Self, DecodeError> {
+        let index = Index::read(&mut reader, limits).await?;
+        for entry in index.entries() {
+            kind(entry)?;
+        }
+        Ok(Self {
+            reader,
+            index,
+            next: 0,
+            active: None,
+            poisoned: false,
+        })
+    }
+
+    /// Returns metadata in central-directory order, without reading payloads.
+    pub fn entries(&self) -> &[Entry] {
+        self.index.entries()
+    }
+
+    /// Selects a member by central-directory index.
+    ///
+    /// An unfinished prior payload is drained and validated first. The next
+    /// sequential read resumes immediately after the selected entry. Repeated
+    /// explicit selections repeat the associated I/O and decompression work.
+    /// Errors and cancellation poison the archive; subsequent operations fail.
+    pub async fn member(
+        &mut self,
+        index: usize,
+    ) -> Result<Option<Member<ZipMemberPayload<'_, R>>>, DecodeError> {
+        if self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+        self.poisoned = true;
+        self.drain().await?;
+        let Some(entry) = self.index.entries().get(index) else {
+            self.poisoned = false;
+            return Ok(None);
+        };
+        let kind = kind(entry)?;
+        let metadata = MemberMetadata {
+            path: entry.path().to_owned(),
+            position: entry.position(),
+        };
+        let size = entry.size();
+        self.active = Some(Payload::new(entry)?);
+        self.reader
+            .seek(SeekFrom::Start(entry.data_offset()))
+            .await?;
+        self.next = index + 1;
+
+        let member = match kind {
+            Kind::File(executable) => {
+                self.poisoned = false;
+                return Ok(Some(Member::File {
+                    metadata,
+                    size,
+                    executable,
+                    payload: ZipMemberPayload { archive: self },
+                }));
+            }
+            Kind::Directory => {
+                self.drain().await?;
+                Member::Directory { metadata }
+            }
+            Kind::SymbolicLink => {
+                let mut target = Vec::new();
+                let mut chunk = Vec::new();
+                while self.read_chunk(&mut chunk, CHUNK_SIZE).await? {
+                    target.extend_from_slice(&chunk);
+                }
+                let target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
+                    position: metadata.position,
+                    reason: "non-UTF-8 symbolic-link target",
+                })?;
+                if target.contains('\0') {
+                    return Err(DecodeError::Integrity {
+                        position: metadata.position,
+                        reason: "NUL in symbolic-link target",
+                    });
+                }
+                Member::SymbolicLink { metadata, target }
+            }
+            Kind::Special(kind) => {
+                self.drain().await?;
+                Member::Special { metadata, kind }
+            }
+        };
+        self.poisoned = false;
+        Ok(Some(member))
+    }
+
+    /// Returns the source without validating any remaining payloads.
+    pub fn into_inner(self) -> R {
+        self.reader
+    }
+
+    async fn read_chunk(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        target_len: usize,
+    ) -> Result<bool, DecodeError> {
+        let Some(active) = &mut self.active else {
+            return Ok(false);
+        };
+        active.next(&mut self.reader, buffer, target_len).await
+    }
+
+    async fn drain(&mut self) -> Result<(), DecodeError> {
+        let mut buffer = Vec::new();
+        while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {
+            tokio::task::yield_now().await;
+        }
+        self.active = None;
+        Ok(())
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> Archive for ZipArchive<R> {
+    type Error = DecodeError;
+    type Payload<'a>
+        = ZipMemberPayload<'a, R>
+    where
+        Self: 'a;
+
+    async fn next_member(&mut self) -> Result<Option<Member<Self::Payload<'_>>>, Self::Error> {
+        self.member(self.next).await
+    }
+}
+
+/// A lending cursor over one member's decoded, integrity-checked bytes.
+pub struct ZipMemberPayload<'a, R> {
+    archive: &'a mut ZipArchive<R>,
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R> {
+    type Error = DecodeError;
+
+    async fn next_chunk(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        target_len: usize,
+    ) -> Result<bool, DecodeError> {
+        if self.archive.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+        // Set this before the first await. Dropping this future cannot expose
+        // partially updated I/O or decoder state to a subsequent operation.
+        self.archive.poisoned = true;
+        let result = self.archive.read_chunk(buffer, target_len).await?;
+        self.archive.poisoned = false;
+        Ok(result)
+    }
+
+    async fn skip(self) -> Result<(), DecodeError> {
+        if self.archive.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+        self.archive.poisoned = true;
+        self.archive.drain().await?;
+        self.archive.poisoned = false;
+        Ok(())
+    }
+}
+
+enum Kind {
+    File(bool),
+    Directory,
+    SymbolicLink,
+    Special(SpecialKind),
+}
+
+fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
+    let attributes = entry.external_attributes();
+    let unix = matches!(entry.host_system(), 3 | 19);
+    let mode = if unix { attributes >> 16 } else { 0 };
+    let dos = matches!(entry.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
+    let directory = entry.path().ends_with('/') || (dos && attributes & 0x10 != 0);
+    if dos && attributes & 8 != 0 {
+        return Err(DecodeError::Unsupported {
+            position: entry.position(),
+            feature: "volume label",
+        });
+    }
+    let kind = match mode & 0o170000 {
+        0 if directory => Kind::Directory,
+        0 | 0o100000 if !directory => Kind::File(mode & 0o111 != 0),
+        0o040000 => Kind::Directory,
+        0o120000 if !directory => Kind::SymbolicLink,
+        0o020000 if !directory => Kind::Special(SpecialKind::CharacterDevice),
+        0o060000 if !directory => Kind::Special(SpecialKind::BlockDevice),
+        0o010000 if !directory => Kind::Special(SpecialKind::Fifo),
+        _ => {
+            return Err(DecodeError::Unsupported {
+                position: entry.position(),
+                feature: "inconsistent or unsupported file attributes",
+            });
+        }
+    };
+    if matches!(kind, Kind::Directory | Kind::Special(_))
+        && (entry.size() != 0 || entry.compressed_size() != 0 || entry.crc32() != 0)
+    {
+        return Err(DecodeError::Integrity {
+            position: entry.position(),
+            reason: "non-file member has payload data",
+        });
+    }
+    if matches!(kind, Kind::Directory) && entry.version_needed() < 20 {
+        return Err(DecodeError::Integrity {
+            position: entry.position(),
+            reason: "directory requires extraction version 2.0",
+        });
+    }
+    if matches!(kind, Kind::SymbolicLink)
+        && (entry.size() == 0 || entry.size() > u64::from(u16::MAX))
+    {
+        return Err(DecodeError::Integrity {
+            position: entry.position(),
+            reason: "empty or oversized symbolic-link target",
+        });
+    }
+    Ok(kind)
+}
+
+/// A ZIP framing, payload, or member-projection failure.
+#[derive(Debug, Error)]
+pub enum DecodeError {
+    /// ZIP record parsing failed.
+    #[error(transparent)]
+    Framing(#[from] zip_framing::Error),
+    /// Payload I/O failed.
+    #[error("ZIP payload I/O failed: {0}")]
+    Io(#[from] io::Error),
+    /// Member data did not agree with its declared metadata.
+    #[error("at byte {position}: invalid ZIP payload: {reason}")]
+    Integrity {
+        /// Local-header offset.
+        position: u64,
+        /// Failed integrity requirement.
+        reason: &'static str,
+    },
+    /// A member cannot be represented by this codec.
+    #[error("at byte {position}: unsupported ZIP {feature}")]
+    Unsupported {
+        /// Local-header offset.
+        position: u64,
+        /// The unsupported member feature.
+        feature: &'static str,
+    },
+    /// A prior error or interrupted operation invalidated the cursor.
+    #[error("ZIP reader is poisoned after an error or cancelled operation")]
+    Poisoned,
+}

@@ -1346,6 +1346,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "zip-codec"
+version = "0.0.14"
+dependencies = [
+ "archive-trait",
+ "flate2",
+ "tempfile",
+ "thiserror",
+ "tokio",
+ "zip-framing",
+]
+
+[[package]]
 name = "zip-framing"
 version = "0.0.14"
 dependencies = [
