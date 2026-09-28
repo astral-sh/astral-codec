@@ -1,7 +1,7 @@
 # zip-codec
 
-Strict, asynchronous ZIP decoding for seekable inputs, with format-neutral
-iteration and extraction through `archive-trait`.
+Strict, asynchronous ZIP decoding for seekable inputs and streaming ZIP64
+encoding, with format-neutral construction and extraction through `archive-trait`.
 
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -13,6 +13,26 @@ ZipArchive::open(source).await?
 # Ok(())
 # }
 ```
+
+Build an archive without seeking or buffering whole files:
+
+```rust,no_run
+# async fn example() -> Result<(), Box<dyn std::error::Error>> {
+use zip_codec::{ArchiveBuilder, CompressionMethod, EntryMetadata, ZipEncoder};
+
+let output = tokio::fs::File::create("output.zip").await?;
+let mut builder = ZipEncoder::new(output)
+    .compression(CompressionMethod::Deflate)
+    .builder();
+builder.add_file("hello.txt", &b"hello\n"[..], EntryMetadata::default()).await?;
+builder.finish().await?;
+# Ok(())
+# }
+```
+
+`ZipArchive::entries` exposes indexed metadata and `ZipArchive::member(index)`
+selects an entry. Sequential iteration resumes after the selected entry.
+`open_with_limits` and `ZipEncoder::limits` configure resource budgets.
 
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks
@@ -26,6 +46,19 @@ output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited t
 
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
 directories, non-UTF-8 names, ambiguous records, and unaccounted bytes are rejected.
+
+The member adapter supports regular files, directories, symbolic links, APPNOTE
+Unix hard links, and the special kinds represented by `archive-trait`. Volume
+labels, sockets, and conflicting file-type attributes cannot be projected.
+Unknown extra fields are checked as bounded records and otherwise ignored.
+
+Encoding uses ZIP64 even for small archives, emits signed descriptors, and stores
+empty members and symbolic-link targets without compression. Timestamps are
+fixed at 1980-01-01; Unix permissions retain only executable intent. DEFLATE and
+CRC use `flate2` with its pure-Rust `zlib-rs` backend. `CompressionMethod` is
+non-exhaustive so further methods can be added without redesigning the APIs.
+
+See [SECURITY.md](../../SECURITY.md) for resource bounds and validation guarantees.
 
 For HTTP range sources, metadata reads use bounded read-ahead. Local records
 are fetched only when selected. To prefetch a whole selected member, obtain its

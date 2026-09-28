@@ -36,6 +36,31 @@ headers, extensions, data, etc.) should occur in the physical layer, while a
 change to source traversal, path containment, or filesystem behavior belongs in
 `archive-trait`.
 
+### ZIP archives
+
+ZIP reading starts from a seekable source. `zip-framing` finds the end records,
+resolves ZIP64 fields, reads the central directory, and validates every local
+header and data descriptor. It checks the complete physical layout before
+returning an immutable index. Central-directory order and physical order may
+differ.
+
+`zip-codec` projects indexed entries into `archive-trait` members. It owns raw
+DEFLATE processing, decoded-size and CRC checks, payload lending, random access,
+and cursor poisoning. Advancing past an unfinished member drains and validates
+its payload. Filesystem extraction remains in `archive-trait`.
+
+Writing follows the same separation. `archive-trait::Builder` handles names,
+collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
+and retains bounded central-directory metadata. `zip-framing::write` serializes
+UTF-8 ZIP64 headers, signed descriptors, and end records. ZIP output does not
+require seeking.
+
+Test record-layout behavior in `zip-framing/tests` and compression, projection,
+or builder behavior in `zip-codec/tests`. The checked-in Python-generated ZIP
+fixtures can be reproduced with
+`python3 crates/zip-codec/tests/fixtures/generate.py`; Python is not required to
+run the Rust tests.
+
 ## Formatting and linting
 
 Linting and formatting:
