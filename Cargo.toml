@@ -9,12 +9,11 @@ members = [
 
 [workspace.package]
 edition = "2024"
-homepage = "https://github.com/astral-sh/tar-codec"
-repository = "https://github.com/astral-sh/tar-codec"
+homepage = "https://github.com/astral-sh/astral-codec"
+repository = "https://github.com/astral-sh/astral-codec"
 authors = ["William Woodruff <william@astral.sh>"]
 license = "MIT OR Apache-2.0"
 version = "0.0.14"
-readme = "README.md"
 
 [workspace.dependencies]
 archive-trait = { path = "crates/archive-trait", version = "0.0.14" }

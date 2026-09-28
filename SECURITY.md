@@ -3,9 +3,11 @@
 ## Security policy
 
 See our [organization-wide security policy](https://github.com/astral-sh/.github/blob/main/SECURITY.md)
-for how to report issues in tar-codec.
+for how to report issues in astral-codec.
 
 ## Security model
+
+### Tar archives
 
 tar-codec is intended to be resilient to many common differentials when parsing tar streams.
 

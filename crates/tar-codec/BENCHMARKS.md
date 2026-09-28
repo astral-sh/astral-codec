@@ -14,7 +14,7 @@
 
 The following ratios are calculated from Criterion median point estimates in
 the Ubuntu job of a
-[GitHub Actions snapshot](https://github.com/astral-sh/tar-codec/actions/runs/28186813074)
+[GitHub Actions snapshot](https://github.com/astral-sh/astral-codec/actions/runs/28186813074)
 on June 25, 2026. They measure uncompressed end-to-end filesystem operations.
 Each value is elapsed time relative to `tar-codec`, so values below 1.00x are
 faster and values above 1.00x are slower.

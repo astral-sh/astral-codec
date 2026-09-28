@@ -2,6 +2,8 @@
 
 ## Architecture
 
+### Tar archives
+
 There are a few important architectural divisions/separations of concerns
 to be aware of when making changes.
 
@@ -69,4 +71,5 @@ Run the larger filesystem extraction diagnostic matrix separately with:
 cargo bench -p tar-codec --bench extraction_filesystem
 ```
 
-Run both targets when refreshing the benchmark snapshot in [BENCHMARKS](./BENCHMARKS.md)
+Run both targets when refreshing the benchmark snapshot in
+[BENCHMARKS](./crates/tar-codec/BENCHMARKS.md).
