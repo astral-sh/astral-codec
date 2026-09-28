@@ -1,6 +1,9 @@
 //! ZIP member projection and seekable archive access.
 
-use std::io::{self, SeekFrom};
+use std::{
+    io::{self, SeekFrom},
+    str,
+};
 
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
@@ -89,13 +92,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                 self.drain().await?;
                 Member::Directory { metadata }
             }
-            Kind::SymbolicLink => {
+            Kind::HardLink(target) => {
+                self.poisoned = false;
+                return Ok(Some(Member::HardLink {
+                    metadata,
+                    target,
+                    size,
+                    payload: ZipMemberPayload { archive: self },
+                }));
+            }
+            Kind::SymbolicLink(expected) => {
                 let mut target = Vec::new();
                 let mut chunk = Vec::new();
                 while self.read_chunk(&mut chunk, CHUNK_SIZE).await? {
                     target.extend_from_slice(&chunk);
                 }
-                let target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
+                let mut target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
                     position: metadata.position,
                     reason: "non-UTF-8 symbolic-link target",
                 })?;
@@ -104,6 +116,16 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                         position: metadata.position,
                         reason: "NUL in symbolic-link target",
                     });
+                }
+                if let Some(expected) = expected {
+                    if size == 0 {
+                        target = expected;
+                    } else if target != expected {
+                        return Err(DecodeError::Integrity {
+                            position: metadata.position,
+                            reason: "symbolic-link payload and UNIX extra field disagree",
+                        });
+                    }
                 }
                 Member::SymbolicLink { metadata, target }
             }
@@ -192,7 +214,8 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
 enum Kind {
     File(bool),
     Directory,
-    SymbolicLink,
+    SymbolicLink(Option<String>),
+    HardLink(String),
     Special(SpecialKind),
 }
 
@@ -200,6 +223,24 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
     let attributes = entry.external_attributes();
     let unix = matches!(entry.host_system(), 3 | 19);
     let mode = if unix { attributes >> 16 } else { 0 };
+    let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
+    let link = if let Some(data) = extra
+        && matches!(mode & 0o170000, 0 | 0o100000 | 0o120000)
+    {
+        let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
+            position: entry.position(),
+            reason: "non-UTF-8 UNIX link target",
+        })?;
+        if target.contains('\0') {
+            return Err(DecodeError::Integrity {
+                position: entry.position(),
+                reason: "NUL in UNIX link target",
+            });
+        }
+        Some(target.to_owned())
+    } else {
+        None
+    };
     let dos = matches!(entry.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
     let directory = entry.path().ends_with('/') || (dos && attributes & 0x10 != 0);
     if dos && attributes & 8 != 0 {
@@ -210,9 +251,12 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
     }
     let kind = match mode & 0o170000 {
         0 if directory => Kind::Directory,
-        0 | 0o100000 if !directory => Kind::File(mode & 0o111 != 0),
+        0 | 0o100000 if !directory => match link {
+            Some(target) => Kind::HardLink(target),
+            None => Kind::File(mode & 0o111 != 0),
+        },
         0o040000 => Kind::Directory,
-        0o120000 if !directory => Kind::SymbolicLink,
+        0o120000 if !directory => Kind::SymbolicLink(link),
         0o020000 if !directory => Kind::Special(SpecialKind::CharacterDevice),
         0o060000 if !directory => Kind::Special(SpecialKind::BlockDevice),
         0o010000 if !directory => Kind::Special(SpecialKind::Fifo),
@@ -237,12 +281,31 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             reason: "directory requires extraction version 2.0",
         });
     }
-    if matches!(kind, Kind::SymbolicLink)
-        && (entry.size() == 0 || entry.size() > u64::from(u16::MAX))
+    if matches!(kind, Kind::SymbolicLink(_))
+        && ((entry.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
+            || entry.size() > u64::from(u16::MAX))
     {
         return Err(DecodeError::Integrity {
             position: entry.position(),
             reason: "empty or oversized symbolic-link target",
+        });
+    }
+    if extra.is_some() && matches!(kind, Kind::Directory | Kind::Special(SpecialKind::Fifo)) {
+        return Err(DecodeError::Integrity {
+            position: entry.position(),
+            reason: "unexpected UNIX file-type data",
+        });
+    }
+    if let Some(data) = extra
+        && matches!(
+            kind,
+            Kind::Special(SpecialKind::CharacterDevice | SpecialKind::BlockDevice)
+        )
+        && data.len() != 8
+    {
+        return Err(DecodeError::Integrity {
+            position: entry.position(),
+            reason: "invalid UNIX device numbers",
         });
     }
     Ok(kind)

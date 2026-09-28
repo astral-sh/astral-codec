@@ -300,3 +300,32 @@ async fn extracts_with_shared_archive_policy() -> TestResult {
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn projects_appnote_unix_links_and_compares_redundant_targets() -> TestResult {
+    let mut archive =
+        ZipArchive::open(Cursor::new(include_bytes!("fixtures/unix-links.zip"))).await?;
+    assert!(
+        matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
+    );
+    let Some(Member::HardLink {
+        target,
+        size,
+        payload,
+        ..
+    }) = archive.next_member().await?
+    else {
+        return Err(io::Error::other("expected UNIX hard link").into());
+    };
+    assert_eq!(target, "target");
+    assert_eq!(size, 0);
+    payload.skip().await?;
+    assert!(
+        matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
+    );
+    assert!(matches!(
+        archive.next_member().await,
+        Err(DecodeError::Integrity { .. })
+    ));
+    Ok(())
+}

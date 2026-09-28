@@ -44,3 +44,17 @@ for filename, name in [("single-deflate.zip", "file"), ("extract.zip", "nested/f
         entry.external_attr = 0o100644 << 16
         archive.writestr(entry, b"payload")
     (root / filename).write_bytes(output.getvalue())
+
+output = io.BytesIO()
+with zipfile.ZipFile(output, "w") as archive:
+    for name, mode, payload in [
+        ("symbolic", 0o120777, b""),
+        ("hard", 0o100644, b""),
+        ("redundant", 0o120777, b"target"),
+        ("conflicting", 0o120777, b"different"),
+    ]:
+        entry = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
+        entry.external_attr = mode << 16
+        entry.extra = b"\x0d\x00\x12\x00" + bytes(12) + b"target"
+        archive.writestr(entry, payload)
+(root / "unix-links.zip").write_bytes(output.getvalue())
