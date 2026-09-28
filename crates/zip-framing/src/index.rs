@@ -329,10 +329,19 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     mut position: u64,
     end: u64,
 ) -> Result<(), Error> {
-    while position < end {
-        let mut header = [0; 6];
-        read_at(reader, position, &mut header, end).await?;
-        match u16_at(&header, 0) {
+    // The enclosing end record has already passed the metadata budget. Buffer
+    // its extensions once so tiny fields cannot force millions of seeks.
+    let length = usize::try_from(end - position)
+        .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
+    let mut buffer = vec![0; length];
+    read_at(reader, position, &mut buffer, end).await?;
+    let mut bytes = buffer.as_slice();
+    let mut records = 0usize;
+    while !bytes.is_empty() {
+        if bytes.len() < 6 {
+            return Err(invalid(position, "truncated ZIP64 extension header"));
+        }
+        match u16_at(bytes, 0) {
             0x000f | 0x0014..=0x0017 | 0x0019 | 0x9901 => {
                 return Err(Error::Unsupported {
                     position,
@@ -341,11 +350,15 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             }
             _ => {}
         }
-        position = add(add(position, 6)?, u64::from(u32_at(&header, 2)))?;
-        if position > end {
-            return Err(invalid(position, "truncated ZIP64 extension"));
+        let length = u32_at(bytes, 2) as usize;
+        bytes = bytes[6..]
+            .get(length..)
+            .ok_or_else(|| invalid(position, "truncated ZIP64 extension"))?;
+        position += 6 + length as u64;
+        records += 1;
+        if records.is_multiple_of(1024) {
+            tokio::task::yield_now().await;
         }
-        tokio::task::yield_now().await;
     }
     Ok(())
 }

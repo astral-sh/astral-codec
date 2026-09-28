@@ -616,3 +616,28 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         })
     ));
 }
+
+#[tokio::test]
+async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
+    for (extension, valid) in [
+        ([0xef, 0xbe, 0, 0, 0, 0].repeat(2048), true),
+        (vec![0xef], false),
+        (vec![0xef, 0xbe, 1, 0, 0, 0], false),
+        (vec![0x14, 0, 0, 0, 0, 0], false),
+    ] {
+        let mut archive = Fixture {
+            zip64: true,
+            ..Fixture::default()
+        }
+        .build();
+        let end_offset = archive.end - 76;
+        archive.bytes[end_offset + 4..end_offset + 12]
+            .copy_from_slice(&(44 + extension.len() as u64).to_le_bytes());
+        archive
+            .bytes
+            .splice(archive.end - 20..archive.end - 20, extension);
+        let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        assert_eq!(result.is_ok(), valid);
+    }
+    Ok(())
+}
