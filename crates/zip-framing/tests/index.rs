@@ -407,3 +407,32 @@ async fn accepts_empty_archives_and_comments_but_rejects_ambiguous_end_records()
     );
     Ok(())
 }
+
+#[tokio::test]
+async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResult {
+    let mut data = vec![0; 12];
+    data.extend_from_slice(b"target");
+    let fixture = Fixture {
+        local_extra: field(0x000d, &data),
+        central_extra: field(0x000d, &data[..12]),
+        ..Fixture::default()
+    };
+    let index = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+    assert_eq!(
+        index.entries()[0].unix_extra_data(),
+        Some(b"target".as_slice())
+    );
+    for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
+        let fixture = Fixture {
+            local_extra: field(0x000d, &data),
+            central_extra: field(0x000d, &[0; 12]),
+            ..Fixture::default()
+        };
+        assert!(
+            Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                .await
+                .is_err()
+        );
+    }
+    Ok(())
+}

@@ -23,6 +23,7 @@ pub struct Entry {
     data_offset: u64,
     made_by: u16,
     attributes: u32,
+    unix_data: Option<Vec<u8>>,
 }
 
 impl Entry {
@@ -74,6 +75,14 @@ impl Entry {
     /// Returns the version needed to extract this member.
     pub fn version_needed(&self) -> u16 {
         self.common.version
+    }
+
+    /// Returns APPNOTE UNIX extra-field data for links or device numbers.
+    ///
+    /// The fixed timestamp/ownership prefix is excluded. Consumers must
+    /// interpret this data together with the external Unix file type.
+    pub fn unix_extra_data(&self) -> Option<&[u8]> {
+        self.unix_data.as_deref()
     }
 }
 
@@ -409,6 +418,7 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
             data_offset: 0,
             made_by: u16_at(&header, 4),
             attributes: u32_at(&header, 38),
+            unix_data: extras.unix_data().map(<[u8]>::to_vec),
         });
         fields.push(variable[name_length..name_length + extra_length].to_vec());
         position += 46 + variable.len() as u64;
@@ -448,6 +458,9 @@ async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
         return Err(invalid(position, "local and central filenames disagree"));
     }
     extras.agree(&Extras::parse(central_extra, position)?, position)?;
+    if let Some(data) = extras.unix_data() {
+        entry.unix_data = Some(data.to_vec());
+    }
     if (Common {
         crc: entry.common.crc,
         compressed: entry.common.compressed,

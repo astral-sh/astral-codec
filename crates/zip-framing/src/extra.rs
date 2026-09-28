@@ -25,6 +25,12 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated extra-field data"));
             };
             match identifier {
+                0x0007 => {
+                    return Err(Error::Unsupported {
+                        position,
+                        feature: "authenticity verification",
+                    });
+                }
                 0x000f => {
                     return Err(Error::Unsupported {
                         position,
@@ -54,9 +60,16 @@ impl<'a> Extras<'a> {
             if fields.insert(identifier, data).is_some() {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
+            if identifier == 0x000d && data.len() < 12 {
+                return Err(invalid(position, "truncated UNIX extra field"));
+            }
             bytes = &bytes[length..];
         }
         Ok(Self { fields })
+    }
+
+    pub(crate) fn unix_data(&self) -> Option<&[u8]> {
+        self.fields.get(&0x000d).map(|data| &data[12..])
     }
 
     pub(crate) fn zip64(
