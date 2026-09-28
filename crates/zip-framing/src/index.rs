@@ -403,11 +403,8 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
             return Err(invalid(position, "stored member sizes differ"));
         }
-        if sizes.uncompressed == 0 && (sizes.compressed != 0 || common.crc != 0) {
-            return Err(invalid(
-                position,
-                "empty member has file data or nonzero CRC",
-            ));
+        if sizes.uncompressed == 0 && common.crc != 0 {
+            return Err(invalid(position, "empty member has nonzero CRC"));
         }
         entries.push(Entry {
             path,

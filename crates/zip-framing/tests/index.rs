@@ -1,4 +1,11 @@
-use std::{error::Error, io::Cursor};
+use std::{
+    error::Error,
+    io::{self, Cursor, SeekFrom},
+    pin::Pin,
+    task::{Context, Poll},
+};
+
+use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
 use flate2::Crc;
 use zip_framing::{Error as FrameError, Index, Limits};
@@ -435,4 +442,177 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         );
     }
     Ok(())
+}
+
+#[tokio::test]
+async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members() -> TestResult {
+    let first = Fixture::default().build();
+    let second = Fixture {
+        name: b"next".to_vec(),
+        ..Fixture::default()
+    }
+    .build();
+    let mut bytes = first.bytes[..first.central].to_vec();
+    bytes.extend_from_slice(&second.bytes[..second.central]);
+    let central = bytes.len();
+    let mut second_header = second.bytes[second.central..second.end].to_vec();
+    set32(&mut second_header, 42, first.central as u32);
+    bytes.extend_from_slice(&second_header);
+    bytes.extend_from_slice(&first.bytes[first.central..first.end]);
+    let end = bytes.len();
+    bytes.extend_from_slice(&first.bytes[first.end..]);
+    set16(&mut bytes, end + 8, 2);
+    set16(&mut bytes, end + 10, 2);
+    set32(&mut bytes, end + 12, (end - central) as u32);
+    set32(&mut bytes, end + 16, central as u32);
+    let index = Index::read(&mut Cursor::new(&bytes), Limits::default()).await?;
+    assert_eq!(
+        index
+            .entries()
+            .iter()
+            .map(|entry| entry.path())
+            .collect::<Vec<_>>(),
+        ["next", "file"]
+    );
+    let mut shared = bytes.clone();
+    set32(&mut shared, central + 42, 0);
+    assert!(
+        Index::read(&mut Cursor::new(shared), Limits::default())
+            .await
+            .is_err()
+    );
+    bytes.drain(central..central + second_header.len());
+    let end = bytes.len() - 22;
+    set16(&mut bytes, end + 8, 1);
+    set16(&mut bytes, end + 10, 1);
+    set32(&mut bytes, end + 12, (end - central) as u32);
+    assert!(
+        Index::read(&mut Cursor::new(bytes), Limits::default())
+            .await
+            .is_err()
+    );
+    Ok(())
+}
+
+struct Sparse {
+    prefix: Vec<u8>,
+    suffix: Vec<u8>,
+    suffix_offset: u64,
+    position: u64,
+    bytes_read: usize,
+}
+
+impl AsyncRead for Sparse {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        _: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let before = buffer.filled().len();
+        if self.position < self.prefix.len() as u64 {
+            let start = self.position as usize;
+            let length = buffer.remaining().min(self.prefix.len() - start);
+            buffer.put_slice(&self.prefix[start..start + length]);
+        } else if self.position < self.suffix_offset {
+            let length =
+                (buffer.remaining() as u64).min(self.suffix_offset - self.position) as usize;
+            buffer.put_slice(&vec![0; length]);
+        } else if self.position < self.suffix_offset + self.suffix.len() as u64 {
+            let start = (self.position - self.suffix_offset) as usize;
+            let length = buffer.remaining().min(self.suffix.len() - start);
+            buffer.put_slice(&self.suffix[start..start + length]);
+        }
+        let read = buffer.filled().len() - before;
+        self.position += read as u64;
+        self.bytes_read += read;
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncSeek for Sparse {
+    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        self.position = match position {
+            SeekFrom::Start(position) => Some(position),
+            SeekFrom::Current(delta) => self.position.checked_add_signed(delta),
+            SeekFrom::End(delta) => {
+                (self.suffix_offset + self.suffix.len() as u64).checked_add_signed(delta)
+            }
+        }
+        .ok_or_else(|| io::Error::other("invalid seek"))?;
+        Ok(())
+    }
+
+    fn poll_complete(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Poll::Ready(Ok(self.position))
+    }
+}
+
+#[tokio::test]
+async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
+    let archive = Fixture {
+        zip64: true,
+        ..Fixture::default()
+    }
+    .build();
+    let size = u64::from(u32::MAX) + 1;
+    let data_offset = archive.central - 7;
+    let mut prefix = archive.bytes[..data_offset].to_vec();
+    for offset in [38, 46] {
+        prefix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
+    }
+    let mut suffix = archive.bytes[archive.central..].to_vec();
+    for offset in [54, 62] {
+        suffix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
+    }
+    let central_size = 70;
+    let suffix_offset = data_offset as u64 + size;
+    suffix[central_size + 48..central_size + 56].copy_from_slice(&suffix_offset.to_le_bytes());
+    suffix[central_size + 56 + 8..central_size + 56 + 16]
+        .copy_from_slice(&(suffix_offset + central_size as u64).to_le_bytes());
+    let mut source = Sparse {
+        prefix,
+        suffix,
+        suffix_offset,
+        position: 0,
+        bytes_read: 0,
+    };
+    let index = Index::read(&mut source, Limits::default()).await?;
+    assert_eq!(index.entries()[0].size(), size);
+    assert_eq!(index.entries()[0].compressed_size(), size);
+    assert!(source.bytes_read < 70_000);
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_malformed_extras_and_zip64_version_two() {
+    for extra in [
+        vec![0],
+        vec![1, 0, 8, 0],
+        field(1, &[]),
+        [field(0xbeef, &[]), field(0xbeef, &[])].concat(),
+    ] {
+        let archive = Fixture {
+            central_extra: extra,
+            ..Fixture::default()
+        }
+        .build();
+        assert!(
+            Index::read(&mut Cursor::new(archive.bytes), Limits::default())
+                .await
+                .is_err()
+        );
+    }
+    let mut archive = Fixture {
+        zip64: true,
+        ..Fixture::default()
+    }
+    .build();
+    set16(&mut archive.bytes, archive.end - 76 + 14, 62);
+    assert!(matches!(
+        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Err(FrameError::Unsupported {
+            feature: "ZIP64 version-2 directory",
+            ..
+        })
+    ));
 }
