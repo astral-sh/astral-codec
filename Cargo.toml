@@ -5,6 +5,7 @@ members = [
     "crates/tar-codec",
     "crates/tar-framing",
     "crates/tarpit",
+    "crates/zip-framing",
 ]
 
 [workspace.package]
@@ -19,12 +20,14 @@ version = "0.0.14"
 archive-trait = { path = "crates/archive-trait", version = "0.0.14" }
 tar-codec = { path = "crates/tar-codec", version = "0.0.14" }
 tar-framing = { path = "crates/tar-framing", version = "0.0.14" }
+zip-framing = { path = "crates/zip-framing", version = "0.0.14" }
 
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 astral-tokio-tar = "0.7"
 cap-std = "4.0.2"
 clap = "4.6"
 divan = { package = "codspeed-divan-compat", version = "5.0.2" }
+flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 junction = "2.0.0"
 tar = "0.4.46"
 tempfile = "3"
