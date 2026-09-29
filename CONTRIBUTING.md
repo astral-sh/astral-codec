@@ -58,6 +58,10 @@ and validates its payload. `ZipArchive::validate_all` also checks member kinds.
 for caller-controlled prefetching or seeking. Filesystem extraction remains in
 `archive-trait`.
 
+Decoder I/O runs through a private operation guard. The archive remains poisoned
+unless the operation commits after all fallible work succeeds. Member preparation
+returns owned metadata before attaching a payload that borrows the archive.
+
 Writing follows the same separation. `archive-trait::Builder` handles names,
 collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
 and retains bounded central-directory metadata. `zip-framing::write` serializes
