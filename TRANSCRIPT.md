@@ -11,7 +11,12 @@
   selected local records. Declared record spans support explicit prefetching.
 - Framing tests: 16 pass, including a 2,000-member read-count test, deferred
   local corruption, cached resolution, and metadata-budget retry behavior.
-- Remaining: decoder integration/prefetch access, documentation, and stack push.
+- Decoder integration: `ZipArchive::member` resolves local records on demand;
+  `validate_all` checks all metadata and member kinds. `reader_mut().await` drains
+  the active payload before exposing the source for prefetching.
+- Decoder tests cover cancellation in payload, local resolution, full validation,
+  and source lending, plus poisoned local failures and preserved drain checks.
+- Remaining: documentation, full-stack checks, and stack push.
 
 ## Scope and decisions
 

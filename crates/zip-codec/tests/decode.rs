@@ -8,7 +8,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip_codec::{Archive, DecodeError, Member, MemberPayload, ZipArchive, extract::ExtractPolicy};
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -118,6 +118,10 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
             assert_eq!(chunk, b"h");
         }
 
+        // Source access drains the preceding payload and permits explicit
+        // prefetching or seeking before the next member restores its cursor.
+        archive.reader_mut().await?.seek(SeekFrom::End(0)).await?;
+
         let Some(Member::File { payload, .. }) = archive.member(2).await? else {
             return Err(io::Error::other("expected selected file").into());
         };
@@ -148,10 +152,14 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
 #[tokio::test]
 async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult {
     for (_, original) in FIXTURES {
-        let archive = ZipArchive::open(Cursor::new(original)).await?;
-        let position = archive.entries()[2].data_offset() as usize;
+        let mut archive = ZipArchive::open(Cursor::new(original)).await?;
+        archive.validate_all().await?;
+        let position = archive.entries()[2]
+            .resolved()
+            .ok_or("unresolved entry")?
+            .data_offset() as usize;
 
-        for operation in ["read", "skip", "drop"] {
+        for operation in ["read", "skip", "drop", "reader", "validate"] {
             let mut bytes = original.to_vec();
             bytes[position] ^= 0x40;
 
@@ -163,6 +171,8 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
             let result = match operation {
                 "read" => contents(payload).await.map(|_| ()),
                 "skip" => payload.skip().await,
+                "reader" => archive.reader_mut().await.map(|_| ()),
+                "validate" => archive.validate_all().await,
                 _ => archive.next_member().await.map(|_| ()),
             };
 
@@ -215,8 +225,9 @@ fn replace_payload(original: &[u8], start: usize, payload: &[u8], size: u32) -> 
 #[tokio::test]
 async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResult {
     let bytes = include_bytes!("fixtures/single-deflate.zip");
-    let archive = ZipArchive::open(Cursor::new(bytes)).await?;
-    let entry = &archive.entries()[0];
+    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+    archive.validate_all().await?;
+    let entry = archive.entries()[0].resolved().ok_or("unresolved entry")?;
     let start = entry.data_offset() as usize;
     let length = entry.compressed_size() as usize;
     let encoded = &bytes[start..start + length];
@@ -294,37 +305,60 @@ impl AsyncSeek for Interruptible {
 
 #[tokio::test]
 async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult {
-    let interrupt = Rc::new(Cell::new(false));
-    let read_bytes = Rc::new(Cell::new(0));
-    let source = Interruptible {
-        source: Cursor::new(FIXTURES[0].1.to_vec()),
-        interrupt: interrupt.clone(),
-        read_bytes: read_bytes.clone(),
-    };
-    let mut archive = ZipArchive::open(source).await?;
-
-    {
-        let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
-            return Err(io::Error::other("expected file").into());
+    for operation in ["payload", "member", "validate", "reader"] {
+        let interrupt = Rc::new(Cell::new(false));
+        let read_bytes = Rc::new(Cell::new(0));
+        let source = Interruptible {
+            source: Cursor::new(FIXTURES[0].1.to_vec()),
+            interrupt: interrupt.clone(),
+            read_bytes: read_bytes.clone(),
         };
+        let mut archive = ZipArchive::open(source).await?;
+        if operation == "reader" {
+            // Leave a payload active so lending the reader must drain it.
+            assert!(matches!(
+                archive.member(1).await?,
+                Some(Member::File { .. })
+            ));
+        }
 
-        interrupt.set(true);
-        let mut chunk = Vec::new();
-        let mut future = Box::pin(payload.next_chunk(&mut chunk, 100));
+        let mut future = Box::pin(async {
+            if operation == "payload" {
+                let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
+                    return Err(DecodeError::Io(io::Error::other("expected file")));
+                };
+                interrupt.set(true);
+                payload.next_chunk(&mut Vec::new(), 100).await.map(|_| ())
+            } else {
+                interrupt.set(true);
+                match operation {
+                    "member" => archive.member(1).await.map(|_| ()),
+                    "validate" => archive.validate_all().await,
+                    _ => archive.reader_mut().await.map(|_| ()),
+                }
+            }
+        });
         for _ in 0..2 {
             assert!(
                 poll_fn(|context| Poll::Ready(future.as_mut().poll(context).is_pending())).await
             );
         }
-
-        assert_eq!(read_bytes.get(), 2);
+        assert_eq!(read_bytes.get(), 2, "{operation}");
         drop(future);
-    }
 
-    assert!(matches!(
-        archive.next_member().await,
-        Err(DecodeError::Poisoned)
-    ));
+        assert!(
+            matches!(archive.next_member().await, Err(DecodeError::Poisoned)),
+            "{operation}"
+        );
+        assert!(matches!(
+            archive.reader_mut().await,
+            Err(DecodeError::Poisoned)
+        ));
+        assert!(matches!(
+            archive.validate_all().await,
+            Err(DecodeError::Poisoned)
+        ));
+    }
 
     Ok(())
 }
@@ -398,7 +432,10 @@ async fn validates_empty_deflate_streams_in_files_and_directories() -> TestResul
     ));
     assert!(archive.next_member().await?.is_none());
 
-    let position = archive.entries()[1].data_offset() as usize;
+    let position = archive.entries()[1]
+        .resolved()
+        .ok_or("unresolved entry")?
+        .data_offset() as usize;
     let mut corrupt = bytes.to_vec();
     corrupt[position] = 0xff;
 
@@ -408,6 +445,35 @@ async fn validates_empty_deflate_streams_in_files_and_directories() -> TestResul
         archive.member(1).await,
         Err(DecodeError::Integrity { .. })
     ));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn local_metadata_errors_poison_selection_and_full_validation() -> TestResult {
+    let original = FIXTURES[0].1;
+    let archive = ZipArchive::open(Cursor::new(original)).await?;
+    let mut corrupt = original.to_vec();
+    corrupt[archive.entries()[1].position() as usize + 30] ^= 1;
+
+    for full_validation in [false, true] {
+        let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;
+        let Some(Member::File { payload, .. }) = archive.member(2).await? else {
+            return Err(io::Error::other("expected unaffected member").into());
+        };
+        assert_eq!(contents(payload).await?, b"UTF-8 filename");
+
+        let result = if full_validation {
+            archive.validate_all().await
+        } else {
+            archive.member(1).await.map(|_| ())
+        };
+        assert!(matches!(result, Err(DecodeError::Framing(_))));
+        assert!(matches!(
+            archive.member(2).await,
+            Err(DecodeError::Poisoned)
+        ));
+    }
 
     Ok(())
 }

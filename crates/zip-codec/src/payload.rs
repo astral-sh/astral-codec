@@ -23,7 +23,7 @@ pub(crate) struct Payload {
 }
 
 impl Payload {
-    pub(crate) fn new(entry: &Entry) -> Result<Self, DecodeError> {
+    pub(crate) fn new(entry: &Entry<'_>) -> Result<Self, DecodeError> {
         let decoder = match entry.method() {
             CompressionMethod::Stored => None,
             CompressionMethod::Deflate => Some(Decompress::new(false)),

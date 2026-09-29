@@ -8,7 +8,7 @@ use std::{
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, Index, Limits};
+use zip_framing::{DirectoryEntry, Entry, Index, Limits};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -22,18 +22,17 @@ pub struct ZipArchive<R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens and validates all archive metadata using default resource limits.
+    /// Opens and validates the central directory using default resource limits.
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
         Self::open_with_limits(reader, Limits::default()).await
     }
 
-    /// Opens and validates the archive using explicit resource limits.
+    /// Opens and validates the central directory using explicit resource limits.
+    ///
+    /// Local records are checked on member access. Use [`Self::validate_all`]
+    /// to check metadata for every member before reading any payloads.
     pub async fn open_with_limits(mut reader: R, limits: Limits) -> Result<Self, DecodeError> {
         let index = Index::read(&mut reader, limits).await?;
-        for entry in index.entries() {
-            kind(entry)?;
-        }
-
         Ok(Self {
             reader,
             index,
@@ -43,13 +42,15 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         })
     }
 
-    /// Returns metadata in central-directory order, without reading payloads.
-    pub fn entries(&self) -> &[Entry] {
+    /// Returns directory metadata without fetching local records or payloads.
+    pub fn entries(&self) -> &[DirectoryEntry] {
         self.index.entries()
     }
 
     /// Selects a member by central-directory index.
     ///
+    /// The selected local header and descriptor must agree with the directory
+    /// before a member is returned. Successful metadata checks are cached.
     /// An unfinished prior payload is drained and validated first. The next
     /// sequential read resumes immediately after the selected entry. Repeated
     /// explicit selections repeat the associated I/O and decompression work.
@@ -65,19 +66,19 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.poisoned = true;
         self.drain().await?;
 
-        let Some(entry) = self.index.entries().get(index) else {
+        let Some(entry) = self.index.entry(&mut self.reader, index).await? else {
             self.poisoned = false;
             return Ok(None);
         };
 
-        let kind = kind(entry)?;
+        let kind = kind(&entry)?;
         let metadata = MemberMetadata {
             path: entry.path().to_owned(),
             position: entry.position(),
         };
         let size = entry.size();
 
-        self.active = Some(Payload::new(entry)?);
+        self.active = Some(Payload::new(&entry)?);
         self.reader
             .seek(SeekFrom::Start(entry.data_offset()))
             .await?;
@@ -146,6 +147,47 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.poisoned = false;
 
         Ok(Some(member))
+    }
+
+    /// Checks metadata for all members, including those never selected.
+    ///
+    /// An active payload is drained first. Other payloads are not decoded;
+    /// their CRCs and decoded sizes are still checked when they are read.
+    pub async fn validate_all(&mut self) -> Result<(), DecodeError> {
+        if self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+
+        self.poisoned = true;
+        self.drain().await?;
+        self.index.validate_all(&mut self.reader).await?;
+        for entry in self
+            .index
+            .entries()
+            .iter()
+            .filter_map(DirectoryEntry::resolved)
+        {
+            kind(&entry)?;
+        }
+
+        self.poisoned = false;
+        Ok(())
+    }
+
+    /// Borrows the source for operations such as HTTP range prefetching.
+    ///
+    /// Drains and validates an active payload before lending the reader. The
+    /// caller may change its cursor, but must not replace the source or change
+    /// its contents. Subsequent member selection seeks to the checked offset.
+    pub async fn reader_mut(&mut self) -> Result<&mut R, DecodeError> {
+        if self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+
+        self.poisoned = true;
+        self.drain().await?;
+        self.poisoned = false;
+        Ok(&mut self.reader)
     }
 
     /// Returns the source without validating any remaining payloads.
@@ -236,7 +278,7 @@ enum Kind {
     Special(SpecialKind),
 }
 
-fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
+fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
     let attributes = entry.external_attributes();
     let unix = matches!(entry.host_system(), 3 | 19);
     let mode = if unix { attributes >> 16 } else { 0 };
