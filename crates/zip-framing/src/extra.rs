@@ -11,6 +11,18 @@ pub(crate) struct Extras<'a> {
     fields: BTreeMap<u16, &'a [u8]>,
 }
 
+/// Member metadata obtained by reconciling local and central extra fields.
+#[derive(Clone, Debug)]
+pub(crate) struct ResolvedExtras {
+    unix_data: Option<Vec<u8>>,
+}
+
+impl ResolvedExtras {
+    pub(crate) fn unix_data(&self) -> Option<&[u8]> {
+        self.unix_data.as_deref()
+    }
+}
+
 impl<'a> Extras<'a> {
     pub(crate) fn parse(mut bytes: &'a [u8], position: u64) -> Result<Self, Error> {
         let mut fields = BTreeMap::new();
@@ -75,7 +87,7 @@ impl<'a> Extras<'a> {
         Ok(Self { fields })
     }
 
-    pub(crate) fn unix_data(&self) -> Option<&[u8]> {
+    fn unix_data(&self) -> Option<&[u8]> {
         self.fields.get(&0x000d).map(|data| &data[12..])
     }
 
@@ -179,7 +191,11 @@ impl<'a> Extras<'a> {
         Ok(())
     }
 
-    pub(crate) fn agree(&self, central: &Self, position: u64) -> Result<(), Error> {
+    pub(crate) fn resolve(
+        self,
+        central: Extras<'_>,
+        position: u64,
+    ) -> Result<ResolvedExtras, Error> {
         for (identifier, local) in &self.fields {
             let Some(other) = central.fields.get(identifier) else {
                 continue;
@@ -201,7 +217,12 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(())
+        Ok(ResolvedExtras {
+            unix_data: self
+                .unix_data()
+                .or_else(|| central.unix_data())
+                .map(<[u8]>::to_vec),
+        })
     }
 }
 

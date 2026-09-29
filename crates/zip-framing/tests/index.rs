@@ -458,18 +458,25 @@ async fn accepts_empty_archives_and_comments_but_rejects_ambiguous_end_records()
 async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResult {
     let mut data = vec![0; 12];
     data.extend_from_slice(b"target");
-    let fixture = Fixture {
-        local_extra: field(0x000d, &data),
-        central_extra: field(0x000d, &data[..12]),
-        ..Fixture::default()
-    };
 
-    let index = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+    for (local_extra, central_extra) in [
+        (field(0x000d, &data), field(0x000d, &data[..12])),
+        (field(0x000d, &data), Vec::new()),
+        (Vec::new(), field(0x000d, &data)),
+    ] {
+        let fixture = Fixture {
+            local_extra,
+            central_extra,
+            ..Fixture::default()
+        };
 
-    assert_eq!(
-        index.entries()[0].unix_extra_data(),
-        Some(b"target".as_slice())
-    );
+        let index = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+
+        assert_eq!(
+            index.entries()[0].unix_extra_data(),
+            Some(b"target".as_slice())
+        );
+    }
 
     for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
         let fixture = Fixture {
@@ -489,10 +496,42 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
+async fn requires_complete_agreement_for_opaque_member_extras() {
+    for (local, central, valid) in [
+        (b"same".as_slice(), b"same".as_slice(), true),
+        (b"local", b"other", false),
+        (b"prefix-suffix", b"prefix", false),
+    ] {
+        let fixture = Fixture {
+            local_extra: field(0xbeef, local),
+            central_extra: field(0xbeef, central),
+            ..Fixture::default()
+        };
+
+        let result = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await;
+
+        if valid {
+            assert!(result.is_ok());
+        } else {
+            assert!(matches!(
+                result,
+                Err(FrameError::Invalid {
+                    reason: "local and central extra fields disagree",
+                    ..
+                })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members() -> TestResult {
     let first = Fixture::default().build();
+    let unix_data = [vec![0; 12], b"target".to_vec()].concat();
     let second = Fixture {
         name: b"next".to_vec(),
+        local_extra: field(0x000d, &unix_data),
+        descriptor: Some(true),
         ..Fixture::default()
     }
     .build();
@@ -523,6 +562,13 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
             .collect::<Vec<_>>(),
         ["next", "file"]
     );
+    assert_eq!(index.entries()[0].position(), first.central as u64);
+    assert_eq!(
+        index.entries()[0].unix_extra_data(),
+        Some(b"target".as_slice())
+    );
+    assert_eq!(index.entries()[1].position(), 0);
+    assert_eq!(index.entries()[1].unix_extra_data(), None);
 
     let mut shared = bytes.clone();
     set32(&mut shared, central + 42, 0);

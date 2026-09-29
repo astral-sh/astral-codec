@@ -3,88 +3,16 @@ use std::io::SeekFrom;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 
 use crate::{
-    CompressionMethod, Error, Limits, add, check_limit,
+    Error, Limits, add, check_limit,
     extra::Extras,
     invalid,
-    record::{
-        ARCHIVE_EXTRA, CENTRAL, Common, DESCRIPTOR, END, LOCAL, LOCATOR, ZIP64_END, read_at,
-        u16_at, u32_at, u64_at,
-    },
+    record::{ARCHIVE_EXTRA, END, LOCATOR, ZIP64_END, read_at, u16_at, u32_at, u64_at},
 };
 
-/// A member whose record boundaries and redundant headers have been checked.
-#[derive(Clone, Debug)]
-pub struct Entry {
-    path: String,
-    common: Common,
-    compressed_size: u64,
-    size: u64,
-    local_offset: u64,
-    data_offset: u64,
-    made_by: u16,
-    attributes: u32,
-    unix_data: Option<Vec<u8>>,
-}
+mod entry;
 
-impl Entry {
-    /// Returns the exact UTF-8 archive path, without filesystem normalization.
-    pub fn path(&self) -> &str {
-        &self.path
-    }
-
-    /// Returns the raw compression method selected by the headers.
-    pub fn method(&self) -> CompressionMethod {
-        self.common.method
-    }
-
-    /// Returns the expected CRC-32 of the decoded payload.
-    pub fn crc32(&self) -> u32 {
-        self.common.crc
-    }
-
-    /// Returns the decoded payload length.
-    pub fn size(&self) -> u64 {
-        self.size
-    }
-
-    /// Returns the encoded payload length, excluding headers and descriptors.
-    pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
-    }
-
-    /// Returns the absolute position of the local header.
-    pub fn position(&self) -> u64 {
-        self.local_offset
-    }
-
-    /// Returns the absolute position of the encoded payload.
-    pub fn data_offset(&self) -> u64 {
-        self.data_offset
-    }
-
-    /// Returns the host-system identifier for the external attributes.
-    pub fn host_system(&self) -> u8 {
-        (self.made_by >> 8) as u8
-    }
-
-    /// Returns the external file attributes, interpreted according to the host.
-    pub fn external_attributes(&self) -> u32 {
-        self.attributes
-    }
-
-    /// Returns the version needed to extract this member.
-    pub fn version_needed(&self) -> u16 {
-        self.common.version
-    }
-
-    /// Returns APPNOTE UNIX extra-field data for links or device numbers.
-    ///
-    /// The fixed timestamp/ownership prefix is excluded. Consumers must
-    /// interpret this data together with the external Unix file type.
-    pub fn unix_extra_data(&self) -> Option<&[u8]> {
-        self.unix_data.as_deref()
-    }
-}
+use entry::CentralEntry;
+pub use entry::Entry;
 
 /// The validated index of an archive, in central-directory order.
 #[derive(Debug)]
@@ -127,33 +55,31 @@ impl Index {
             output: 0,
             limits,
         };
-        let (mut entries, extras) = read_central(reader, &end, &mut budget).await?;
+        let central = read_central(reader, &end, &mut budget).await?;
 
         // Directory order need not match physical order. Sorting offsets also
         // detects shared local headers, overlaps, gaps, and unindexed members.
-        let mut order: Vec<_> = (0..entries.len()).collect();
-        order.sort_unstable_by_key(|&index| entries[index].local_offset);
+        let mut order: Vec<_> = central.into_iter().enumerate().collect();
+        order.sort_unstable_by_key(|(_, entry)| entry.local_offset());
 
+        let mut entries = Vec::with_capacity(order.len());
+        let mut physical = order.into_iter().peekable();
         let mut position = 0;
-        for (ordinal, &index) in order.iter().enumerate() {
-            if entries[index].local_offset != position {
+        while let Some((ordinal, central)) = physical.next() {
+            if central.local_offset() != position {
                 return Err(invalid(
                     position,
                     "overlapping entries or unaccounted bytes",
                 ));
             }
 
-            let boundary = order
-                .get(ordinal + 1)
-                .map_or(end.offset, |&next| entries[next].local_offset);
-            position = read_local(
-                reader,
-                &mut entries[index],
-                &extras[index],
-                boundary,
-                &mut budget,
-            )
-            .await?;
+            let boundary = physical
+                .peek()
+                .map_or(end.offset, |(_, next)| next.local_offset());
+            let entry = central.into_entry(reader, boundary, &mut budget).await?;
+            entries.push((ordinal, entry));
+            position = boundary;
+
             tokio::task::yield_now().await;
         }
 
@@ -164,7 +90,12 @@ impl Index {
             ));
         }
 
-        Ok(Self { entries })
+        // Restore directory order after consuming the records in physical order.
+        entries.sort_unstable_by_key(|(ordinal, _)| *ordinal);
+
+        Ok(Self {
+            entries: entries.into_iter().map(|(_, entry)| entry).collect(),
+        })
     }
 }
 
@@ -396,11 +327,10 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     directory: &Directory,
     budget: &mut Budget,
-) -> Result<(Vec<Entry>, Vec<Vec<u8>>), Error> {
+) -> Result<Vec<CentralEntry>, Error> {
     let end = add(directory.offset, directory.size)?;
     let mut position = directory.offset;
     let mut entries = Vec::new();
-    let mut fields = Vec::new();
 
     // The archive extra record is part of the directory's declared size.
     if directory.size >= 8 {
@@ -420,56 +350,9 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     }
 
     for _ in 0..directory.count {
-        let mut header = [0; 46];
-        read_at(reader, position, &mut header, end).await?;
-        if u32_at(&header, 0) != CENTRAL {
-            return Err(invalid(position, "invalid central header signature"));
-        }
-
-        let common = Common::parse(&header[6..], position)?;
-        let name_length = usize::from(u16_at(&header, 28));
-        let extra_length = usize::from(u16_at(&header, 30));
-        let comment_length = usize::from(u16_at(&header, 32));
-        let mut variable = vec![0; name_length + extra_length + comment_length];
-        read_at(reader, position + 46, &mut variable, end).await?;
-
-        let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
-        let sizes = extras.zip64(
-            common,
-            Some(u32_at(&header, 42)),
-            Some(u16_at(&header, 34)),
-            position,
-        )?;
-
-        let path = extras.name(&variable[..name_length], common.flags, position)?;
-        extras.comment(
-            &variable[name_length + extra_length..],
-            common.flags,
-            position,
-        )?;
-
-        budget.output(sizes.uncompressed)?;
-        if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
-            return Err(invalid(position, "stored member sizes differ"));
-        }
-
-        if sizes.uncompressed == 0 && common.crc != 0 {
-            return Err(invalid(position, "empty member has nonzero CRC"));
-        }
-
-        entries.push(Entry {
-            path,
-            common,
-            compressed_size: sizes.compressed,
-            size: sizes.uncompressed,
-            local_offset: sizes.offset,
-            data_offset: 0,
-            made_by: u16_at(&header, 4),
-            attributes: u32_at(&header, 38),
-            unix_data: extras.unix_data().map(<[u8]>::to_vec),
-        });
-        fields.push(variable[name_length..name_length + extra_length].to_vec());
-        position += 46 + variable.len() as u64;
+        let (entry, next) = CentralEntry::read(reader, position, end, budget).await?;
+        entries.push(entry);
+        position = next;
 
         tokio::task::yield_now().await;
     }
@@ -481,130 +364,5 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
         ));
     }
 
-    Ok((entries, fields))
-}
-
-async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
-    entry: &mut Entry,
-    central_extra: &[u8],
-    boundary: u64,
-    budget: &mut Budget,
-) -> Result<u64, Error> {
-    let position = entry.local_offset;
-    let mut header = [0; 30];
-    read_at(reader, position, &mut header, boundary).await?;
-    if u32_at(&header, 0) != LOCAL {
-        return Err(invalid(position, "invalid local header signature"));
-    }
-
-    let common = Common::parse(&header[4..], position)?;
-    let name_length = usize::from(u16_at(&header, 26));
-    let extra_length = usize::from(u16_at(&header, 28));
-    budget.metadata(30 + (name_length + extra_length) as u64)?;
-
-    let mut variable = vec![0; name_length + extra_length];
-    read_at(reader, position + 30, &mut variable, boundary).await?;
-
-    let extras = Extras::parse(&variable[name_length..], position)?;
-    let sizes = extras.zip64(common, None, None, position)?;
-    if extras.name(&variable[..name_length], common.flags, position)? != entry.path {
-        return Err(invalid(position, "local and central filenames disagree"));
-    }
-
-    extras.agree(&Extras::parse(central_extra, position)?, position)?;
-    if let Some(data) = extras.unix_data() {
-        entry.unix_data = Some(data.to_vec());
-    }
-
-    if (Common {
-        crc: entry.common.crc,
-        compressed: entry.common.compressed,
-        uncompressed: entry.common.uncompressed,
-        ..common
-    }) != entry.common
-    {
-        return Err(invalid(position, "local and central headers disagree"));
-    }
-
-    if common.descriptor() {
-        if common.crc != 0 || sizes.compressed != 0 || sizes.uncompressed != 0 {
-            return Err(invalid(
-                position,
-                "descriptor member has nonzero local CRC or sizes",
-            ));
-        }
-    } else if common.crc != entry.crc32()
-        || sizes.compressed != entry.compressed_size
-        || sizes.uncompressed != entry.size
-    {
-        return Err(invalid(position, "local and central CRC or sizes disagree"));
-    }
-
-    entry.data_offset = add(position, 30 + variable.len() as u64)?;
-    let data_end = add(entry.data_offset, entry.compressed_size)?;
-    if data_end > boundary {
-        return Err(invalid(position, "payload overlaps the next record"));
-    }
-
-    if common.descriptor() {
-        let zip64 = sizes.zip64
-            || entry.common.compressed == u32::MAX
-            || entry.common.uncompressed == u32::MAX;
-        read_descriptor(reader, entry, data_end, boundary, zip64).await?;
-    } else if data_end != boundary {
-        return Err(invalid(data_end, "unaccounted bytes after payload"));
-    }
-
-    Ok(boundary)
-}
-
-async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
-    entry: &Entry,
-    position: u64,
-    end: u64,
-    zip64: bool,
-) -> Result<(), Error> {
-    let unsigned_length = if zip64 { 20 } else { 12 };
-    let length = end - position;
-    if length != unsigned_length && length != unsigned_length + 4 {
-        return Err(invalid(position, "invalid data descriptor length"));
-    }
-
-    let mut bytes = [0; 24];
-    read_at(reader, position, &mut bytes[..length as usize], end).await?;
-
-    // Length disambiguates a signature-less descriptor whose CRC is itself
-    // 0x08074b50. Never search for a descriptor inside compressed data.
-    let offset = if length == unsigned_length + 4 {
-        if u32_at(&bytes, 0) != DESCRIPTOR {
-            return Err(invalid(position, "invalid data descriptor signature"));
-        }
-
-        4
-    } else {
-        0
-    };
-
-    let crc = u32_at(&bytes, offset);
-    let compressed = if zip64 {
-        u64_at(&bytes, offset + 4)
-    } else {
-        u64::from(u32_at(&bytes, offset + 4))
-    };
-    let uncompressed = if zip64 {
-        u64_at(&bytes, offset + 12)
-    } else {
-        u64::from(u32_at(&bytes, offset + 8))
-    };
-
-    if crc != entry.crc32() || compressed != entry.compressed_size || uncompressed != entry.size {
-        return Err(invalid(
-            position,
-            "data descriptor disagrees with central header",
-        ));
-    }
-
-    Ok(())
+    Ok(entries)
 }
