@@ -33,6 +33,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         for entry in index.entries() {
             kind(entry)?;
         }
+
         Ok(Self {
             reader,
             index,
@@ -60,18 +61,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         if self.poisoned {
             return Err(DecodeError::Poisoned);
         }
+
         self.poisoned = true;
         self.drain().await?;
+
         let Some(entry) = self.index.entries().get(index) else {
             self.poisoned = false;
             return Ok(None);
         };
+
         let kind = kind(entry)?;
         let metadata = MemberMetadata {
             path: entry.path().to_owned(),
             position: entry.position(),
         };
         let size = entry.size();
+
         self.active = Some(Payload::new(entry)?);
         self.reader
             .seek(SeekFrom::Start(entry.data_offset()))
@@ -107,6 +112,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                 while self.read_chunk(&mut chunk, CHUNK_SIZE).await? {
                     target.extend_from_slice(&chunk);
                 }
+
                 let mut target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
                     position: metadata.position,
                     reason: "non-UTF-8 symbolic-link target",
@@ -117,6 +123,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                         reason: "NUL in symbolic-link target",
                     });
                 }
+
                 if let Some(expected) = expected {
                     if size == 0 {
                         target = expected;
@@ -127,6 +134,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                         });
                     }
                 }
+
                 Member::SymbolicLink { metadata, target }
             }
             Kind::Special(kind) => {
@@ -134,7 +142,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
                 Member::Special { metadata, kind }
             }
         };
+
         self.poisoned = false;
+
         Ok(Some(member))
     }
 
@@ -151,6 +161,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         let Some(active) = &mut self.active else {
             return Ok(false);
         };
+
         active.next(&mut self.reader, buffer, target_len).await
     }
 
@@ -159,7 +170,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {
             tokio::task::yield_now().await;
         }
+
         self.active = None;
+
         Ok(())
     }
 }
@@ -192,11 +205,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
         if self.archive.poisoned {
             return Err(DecodeError::Poisoned);
         }
+
         // Set this before the first await. Dropping this future cannot expose
         // partially updated I/O or decoder state to a subsequent operation.
         self.archive.poisoned = true;
         let result = self.archive.read_chunk(buffer, target_len).await?;
         self.archive.poisoned = false;
+
         Ok(result)
     }
 
@@ -204,9 +219,11 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
         if self.archive.poisoned {
             return Err(DecodeError::Poisoned);
         }
+
         self.archive.poisoned = true;
         self.archive.drain().await?;
         self.archive.poisoned = false;
+
         Ok(())
     }
 }
@@ -223,6 +240,7 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
     let attributes = entry.external_attributes();
     let unix = matches!(entry.host_system(), 3 | 19);
     let mode = if unix { attributes >> 16 } else { 0 };
+
     let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
     let link = if let Some(data) = extra
         && matches!(mode & 0o170000, 0 | 0o100000 | 0o120000)
@@ -237,10 +255,12 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
                 reason: "NUL in UNIX link target",
             });
         }
+
         Some(target.to_owned())
     } else {
         None
     };
+
     let dos = matches!(entry.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
     let directory = entry.path().ends_with('/') || (dos && attributes & 0x10 != 0);
     if dos && attributes & 8 != 0 {
@@ -249,6 +269,7 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             feature: "volume label",
         });
     }
+
     let kind = match mode & 0o170000 {
         0 if directory => Kind::Directory,
         0 | 0o100000 if !directory => match link {
@@ -267,6 +288,7 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             });
         }
     };
+
     if matches!(kind, Kind::Directory | Kind::Special(_))
         && (entry.size() != 0 || entry.crc32() != 0)
     {
@@ -275,12 +297,14 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             reason: "non-file member has payload data",
         });
     }
+
     if matches!(kind, Kind::Directory) && entry.version_needed() < 20 {
         return Err(DecodeError::Integrity {
             position: entry.position(),
             reason: "directory requires extraction version 2.0",
         });
     }
+
     if matches!(kind, Kind::SymbolicLink(_))
         && ((entry.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
             || entry.size() > u64::from(u16::MAX))
@@ -290,12 +314,14 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             reason: "empty or oversized symbolic-link target",
         });
     }
+
     if extra.is_some() && matches!(kind, Kind::Directory | Kind::Special(SpecialKind::Fifo)) {
         return Err(DecodeError::Integrity {
             position: entry.position(),
             reason: "unexpected UNIX file-type data",
         });
     }
+
     if let Some(data) = extra
         && matches!(
             kind,
@@ -308,6 +334,7 @@ fn kind(entry: &Entry) -> Result<Kind, DecodeError> {
             reason: "invalid UNIX device numbers",
         });
     }
+
     Ok(kind)
 }
 
