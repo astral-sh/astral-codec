@@ -12,19 +12,63 @@ pub(crate) const ZIP64_END: u32 = 0x0606_4b50;
 pub(crate) const LOCATOR: u32 = 0x0706_4b50;
 pub(crate) const ARCHIVE_EXTRA: u32 = 0x0806_4b50;
 
-// Every read is bounded by its containing record, not just by the input file.
+/// A bounded read-ahead window that survives absolute seeks within the window.
+/// Ordinary buffered readers discard their buffer on those seeks.
+pub(crate) struct RecordReader<'a, R> {
+    inner: &'a mut R,
+    buffer: Vec<u8>,
+    start: u64,
+    capacity: usize,
+}
+
+impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
+    pub(crate) fn new(inner: &'a mut R, capacity: usize) -> Self {
+        Self {
+            inner,
+            buffer: Vec::new(),
+            start: 0,
+            capacity,
+        }
+    }
+
+    pub(crate) async fn length(&mut self) -> Result<u64, Error> {
+        Ok(self.inner.seek(SeekFrom::End(0)).await?)
+    }
+}
+
+// Every read, including read-ahead, is bounded by its containing record span.
 pub(crate) async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
+    reader: &mut RecordReader<'_, R>,
     position: u64,
     bytes: &mut [u8],
     end: u64,
 ) -> Result<(), Error> {
-    if add(position, bytes.len() as u64)? > end {
+    let requested_end = add(position, bytes.len() as u64)?;
+    if requested_end > end {
         return Err(invalid(position, "record extends beyond its container"));
     }
 
-    reader.seek(SeekFrom::Start(position)).await?;
-    reader.read_exact(bytes).await?;
+    if bytes.is_empty() {
+        return Ok(());
+    }
+
+    if position >= reader.start && requested_end <= reader.start + reader.buffer.len() as u64 {
+        let offset = (position - reader.start) as usize;
+        bytes.copy_from_slice(&reader.buffer[offset..offset + bytes.len()]);
+        return Ok(());
+    }
+
+    reader.inner.seek(SeekFrom::Start(position)).await?;
+    if bytes.len() >= reader.capacity {
+        reader.inner.read_exact(bytes).await?;
+        return Ok(());
+    }
+
+    let length = (end - position).min(reader.capacity as u64) as usize;
+    reader.buffer.resize(length, 0);
+    reader.inner.read_exact(&mut reader.buffer).await?;
+    reader.start = position;
+    bytes.copy_from_slice(&reader.buffer[..bytes.len()]);
 
     Ok(())
 }

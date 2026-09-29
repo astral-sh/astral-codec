@@ -1,46 +1,45 @@
-use std::{io::SeekFrom, str};
+use std::str;
 
-use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
+use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
     Error, Limits, add, check_limit,
     extra::Extras,
     invalid,
-    record::{ARCHIVE_EXTRA, END, LOCATOR, ZIP64_END, read_at, u16_at, u32_at, u64_at},
+    record::{
+        ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, read_at, u16_at, u32_at, u64_at,
+    },
 };
 
 mod entry;
 
-use entry::CentralEntry;
-pub use entry::Entry;
+pub use entry::{DirectoryEntry, Entry};
 
-/// The validated index of an archive, in central-directory order.
+/// A central-directory index with lazily checked local records.
 #[derive(Debug)]
 pub struct Index {
-    entries: Vec<Entry>,
+    entries: Vec<DirectoryEntry>,
+    budget: Budget,
 }
 
 impl Index {
-    /// Borrows all indexed entries.
-    pub fn entries(&self) -> &[Entry] {
+    /// Borrows directory metadata, without fetching local records or payloads.
+    pub fn entries(&self) -> &[DirectoryEntry] {
         &self.entries
     }
 
-    /// Consumes the index and returns its entries.
-    pub fn into_entries(self) -> Vec<Entry> {
-        self.entries
-    }
-
-    /// Indexes an entire input, starting at byte zero regardless of its cursor.
+    /// Indexes the directory and checks bounds derivable from its records.
     ///
-    /// All local headers, central records, and descriptors are checked before
-    /// this returns. No file payloads are decompressed. A cancelled call may
-    /// leave the source cursor anywhere; another call restarts from the end.
+    /// Local headers and descriptors are checked by [`Self::entry`] on access,
+    /// or by [`Self::validate_all`]. The source must remain unchanged and be the
+    /// same source passed to subsequent operations. A cancelled read may leave
+    /// its cursor anywhere; another call restarts from the end.
     pub async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut R,
         limits: Limits,
     ) -> Result<Self, Error> {
-        let end = find_directory(reader, limits).await?;
+        let mut buffered = RecordReader::new(reader, 64 * 1024);
+        let end = find_directory(&mut buffered, limits).await?;
         check_limit(end.count, limits.entries as u64, "entry count")?;
         check_limit(end.size, limits.metadata_size, "metadata bytes")?;
         if end.count > end.size / 46 {
@@ -55,50 +54,65 @@ impl Index {
             output: 0,
             limits,
         };
-        let central = read_central(reader, &end, &mut budget).await?;
+        let mut entries = read_central(&mut buffered, &end, &mut budget).await?;
 
-        // Directory order need not match physical order. Sorting offsets also
-        // detects shared local headers, overlaps, gaps, and unindexed members.
-        let mut order: Vec<_> = central.into_iter().enumerate().collect();
-        order.sort_unstable_by_key(|(_, entry)| entry.local_offset());
+        // Preserve directory order while assigning boundaries in physical order.
+        // Only local reads can establish exact coverage inside these spans.
+        let mut order: Vec<_> = (0..entries.len()).collect();
+        order.sort_unstable_by_key(|&index| entries[index].position());
+        if order
+            .first()
+            .map_or(end.offset, |&index| entries[index].position())
+            != 0
+        {
+            return Err(invalid(0, "unaccounted bytes before the first member"));
+        }
 
-        let mut entries = Vec::with_capacity(order.len());
-        let mut physical = order.into_iter().peekable();
-        let mut position = 0;
-        while let Some((ordinal, central)) = physical.next() {
-            if central.local_offset() != position {
-                return Err(invalid(
-                    position,
-                    "overlapping entries or unaccounted bytes",
-                ));
-            }
+        for (ordinal, &index) in order.iter().enumerate() {
+            let boundary = order
+                .get(ordinal + 1)
+                .map_or(end.offset, |&next| entries[next].position());
+            entries[index].set_boundary(boundary)?;
+        }
 
-            let boundary = physical
-                .peek()
-                .map_or(end.offset, |(_, next)| next.local_offset());
-            let entry = central.into_entry(reader, boundary, &mut budget).await?;
-            entries.push((ordinal, entry));
-            position = boundary;
+        Ok(Self { entries, budget })
+    }
 
+    /// Checks one member's local header, extras and descriptor before exposing it.
+    ///
+    /// Successful resolutions are cached. This does not decode or check payload
+    /// contents. The source must be the immutable source used by [`Self::read`].
+    pub async fn entry<R: AsyncRead + AsyncSeek + Unpin>(
+        &mut self,
+        reader: &mut R,
+        index: usize,
+    ) -> Result<Option<Entry<'_>>, Error> {
+        let Some(entry) = self.entries.get_mut(index) else {
+            return Ok(None);
+        };
+
+        Ok(Some(entry.resolve(reader, &mut self.budget).await?))
+    }
+
+    /// Checks every local header and descriptor, including unselected members.
+    ///
+    /// Success establishes complete, nonoverlapping record coverage and
+    /// agreement of redundant metadata. Payload sizes and CRCs still need to
+    /// be verified when decoding. Already checked members require no I/O.
+    pub async fn validate_all<R: AsyncRead + AsyncSeek + Unpin>(
+        &mut self,
+        reader: &mut R,
+    ) -> Result<(), Error> {
+        for entry in &mut self.entries {
+            entry.resolve(reader, &mut self.budget).await?;
             tokio::task::yield_now().await;
         }
 
-        if position != end.offset {
-            return Err(invalid(
-                position,
-                "unaccounted bytes before central directory",
-            ));
-        }
-
-        // Restore directory order after consuming the records in physical order.
-        entries.sort_unstable_by_key(|(ordinal, _)| *ordinal);
-
-        Ok(Self {
-            entries: entries.into_iter().map(|(_, entry)| entry).collect(),
-        })
+        Ok(())
     }
 }
 
+#[derive(Clone, Copy, Debug)]
 struct Budget {
     metadata: u64,
     output: u64,
@@ -126,10 +140,10 @@ struct Directory {
 }
 
 async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
+    reader: &mut RecordReader<'_, R>,
     limits: Limits,
 ) -> Result<Directory, Error> {
-    let length = reader.seek(SeekFrom::End(0)).await?;
+    let length = reader.length().await?;
     check_limit(length, limits.archive_size, "archive bytes")?;
     if length < 22 {
         return Err(invalid(0, "missing end of central directory"));
@@ -281,7 +295,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
 }
 
 async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
+    reader: &mut RecordReader<'_, R>,
     mut position: u64,
     end: u64,
 ) -> Result<(), Error> {
@@ -327,10 +341,10 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
 }
 
 async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut R,
+    reader: &mut RecordReader<'_, R>,
     directory: &Directory,
     budget: &mut Budget,
-) -> Result<Vec<CentralEntry>, Error> {
+) -> Result<Vec<DirectoryEntry>, Error> {
     let end = add(directory.offset, directory.size)?;
     let mut position = directory.offset;
     let mut entries = Vec::new();
@@ -353,7 +367,7 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     }
 
     for _ in 0..directory.count {
-        let (entry, next) = CentralEntry::read(reader, position, end, budget).await?;
+        let (entry, next) = DirectoryEntry::read(reader, position, end, budget).await?;
         entries.push(entry);
         position = next;
 

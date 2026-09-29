@@ -1,6 +1,7 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
-//! [`Index::read`] validates all record boundaries and redundant member metadata.
+//! [`Index::read`] indexes the directory; [`Index::entry`] checks local records
+//! on access. [`Index::validate_all`] checks all members without decoding payloads.
 //! Filenames and archive/member comments must be UTF-8.
 //! It does not read file contents: consumers must verify decoded sizes and CRCs.
 //! The source must remain unchanged while the index and its payloads are used.
@@ -15,7 +16,7 @@ use std::io;
 
 use thiserror::Error;
 
-pub use index::{Entry, Index};
+pub use index::{DirectoryEntry, Entry, Index};
 
 /// A supported ZIP compression method.
 ///
@@ -62,7 +63,7 @@ pub struct Limits {
     pub archive_size: u64,
     /// Maximum number of members (default: 100,000).
     pub entries: usize,
-    /// Total local and central metadata bytes (default: 64 MiB).
+    /// Total central and resolved local metadata bytes (default: 64 MiB).
     pub metadata_size: u64,
     /// Maximum decoded size of one member (default: 8 GiB).
     pub member_size: u64,
