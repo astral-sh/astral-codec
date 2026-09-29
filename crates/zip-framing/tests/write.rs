@@ -112,10 +112,11 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     bytes.extend(central);
     bytes.extend(end_records(1, directory_offset, directory_size)?);
 
-    let index = Index::read(&mut Cursor::new(&bytes), Limits::default()).await?;
+    let mut source = Cursor::new(&bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
     assert_eq!(index.entries().len(), 1);
 
-    let entry = &index.entries()[0];
+    let entry = index.entry(&mut source, 0).await?.ok_or("missing member")?;
     assert_eq!(entry.path(), "café");
     assert_eq!(entry.version_needed(), 45);
     assert_eq!(entry.data_offset(), data_offset as u64);
