@@ -57,8 +57,8 @@ its payload. Filesystem extraction remains in `archive-trait`.
 Writing follows the same separation. `archive-trait::Builder` handles names,
 collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
 and retains bounded central-directory metadata. `zip-framing::write` serializes
-UTF-8 ZIP64 headers, signed descriptors, and end records. ZIP output does not
-require seeking.
+UTF-8 ZIP64 headers and end records. ZIP output requires seeking so the encoder
+can fill in each local header after streaming its payload, without descriptors.
 
 Test record-layout behavior in `zip-framing/tests` and compression, projection,
 or builder behavior in `zip-codec/tests`. The checked-in Python-generated ZIP

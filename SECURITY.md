@@ -99,9 +99,12 @@ validation sorts member offsets in O(n log n) time. Payload work is bounded by
 encoded input and decoded output, including streams that produce no output.
 
 Read errors or cancellation poison the archive cursor. Construction uses
-`archive-trait::Builder` poisoning and never seeks backward to repair partial
-output. The ZIP crates forbid unsafe Rust; CRC and DEFLATE use `flate2` with its
-`zlib-rs` backend. No native compression library is required.
+`archive-trait::Builder` poisoning. The encoder requires seekable output and
+fills in local headers after streaming each payload. Write, seek, or source
+failures after output begins poison the builder, as does cancellation during
+header replacement or cursor restoration. The ZIP crates forbid unsafe Rust;
+CRC and DEFLATE use `flate2` with its `zlib-rs` backend. No native compression
+library is required.
 
 As with tar, concurrent mutation of the input, build sources, or extraction root
 is outside the threat model. Extraction may leave partial destination state after

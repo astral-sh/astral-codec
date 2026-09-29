@@ -14,7 +14,7 @@ ZipArchive::open(source).await?
 # }
 ```
 
-Build an archive without seeking or buffering whole files:
+Build an archive with seekable output, without buffering whole files:
 
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
@@ -29,6 +29,9 @@ builder.finish().await?;
 # Ok(())
 # }
 ```
+
+The output must implement `AsyncWrite + AsyncSeek + Unpin`, be empty, and start
+at byte zero. Use `std::io::Cursor<Vec<u8>>` for an in-memory archive.
 
 `ZipArchive::entries` exposes indexed metadata and `ZipArchive::member(index)`
 selects an entry. Sequential iteration resumes after the selected entry.
@@ -54,11 +57,13 @@ Unix hard links, and the special kinds represented by `archive-trait`. Volume
 labels, sockets, and conflicting file-type attributes cannot be projected.
 Unknown extra fields are checked as bounded records and otherwise ignored.
 
-Encoding uses ZIP64 even for small archives, emits signed descriptors, and stores
-empty members and symbolic-link targets without compression. Timestamps are
-fixed at 1980-01-01; Unix permissions retain only executable intent. DEFLATE and
-CRC use `flate2` with its pure-Rust `zlib-rs` backend. `CompressionMethod` is
-non-exhaustive so further methods can be added without redesigning the APIs.
+Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
+the encoder seeks back to fill in the local header's CRC and sizes. No data
+descriptors are emitted. Empty members and symbolic-link targets are stored
+without compression. Timestamps are fixed at 1980-01-01; Unix permissions retain
+only executable intent. DEFLATE and CRC use `flate2` with its pure-Rust `zlib-rs`
+backend. `CompressionMethod` is non-exhaustive so further methods can be added
+without redesigning the APIs.
 
 See [SECURITY.md](../../SECURITY.md) for resource bounds and validation guarantees.
 
