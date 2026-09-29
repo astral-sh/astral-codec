@@ -98,15 +98,12 @@ async fn serializes_consistent_zip64_records() -> TestResult {
         EntryKind::File { executable: false },
     )?;
     let metadata_size = header.metadata_size();
-    let mut bytes = header.local_header();
-    let data_offset = bytes.len();
-    bytes.extend_from_slice(payload);
-
+    let data_offset = header.local_header_size();
     let member = header.finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
-    let descriptor = member.descriptor();
-    assert_eq!(descriptor.len(), 24);
-    assert_eq!(&descriptor[..4], &0x0807_4b50u32.to_le_bytes());
-    bytes.extend(descriptor);
+    let mut bytes = member.local_header();
+    assert_eq!(bytes.len(), data_offset);
+    assert_eq!(&bytes[6..8], &0x0800u16.to_le_bytes());
+    bytes.extend_from_slice(payload);
 
     let directory_offset = bytes.len() as u64;
     let central = member.central_header();

@@ -1,11 +1,11 @@
 //! Canonical UTF-8, single-volume ZIP64 record serialization.
 //!
-//! Local headers use zero-valued ZIP64 size placeholders and signed data
-//! descriptors. This permits streaming without guessing the compressed size.
+//! Completed members serialize matching local and central headers without data
+//! descriptors. Writers can reserve local header space before streaming data.
 
 use crate::{
     CompressionMethod, Error, add, invalid,
-    record::{CENTRAL, DESCRIPTOR, END, LOCAL, LOCATOR, ZIP64_END, parse_name},
+    record::{CENTRAL, END, LOCAL, LOCATOR, ZIP64_END, parse_name},
 };
 
 /// A portable file type represented by the encoder's Unix attributes.
@@ -45,7 +45,7 @@ impl<'a> MemberHeader<'a> {
         Ok(Self { path, method, kind })
     }
 
-    /// Returns total local and central metadata bytes, excluding descriptors.
+    /// Returns total local and central metadata bytes.
     pub fn metadata_size(&self) -> u64 {
         (30 + 20 + 46 + 28 + 2 * self.path.len()) as u64
     }
@@ -55,22 +55,9 @@ impl<'a> MemberHeader<'a> {
         self.method
     }
 
-    /// Serializes the local header with unknown CRC and sizes.
-    pub fn local_header(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(50 + self.path.len());
-        push32(&mut bytes, LOCAL);
-        self.common(&mut bytes, 0);
-        push16(&mut bytes, self.path.len() as u16);
-        push16(&mut bytes, 20);
-
-        bytes.extend_from_slice(self.path.as_bytes());
-
-        push16(&mut bytes, 1);
-        push16(&mut bytes, 16);
-        push64(&mut bytes, 0);
-        push64(&mut bytes, 0);
-
-        bytes
+    /// Returns the space to reserve for the completed local header.
+    pub fn local_header_size(&self) -> usize {
+        50 + self.path.len()
     }
 
     /// Completes metadata after the payload's CRC and sizes are known.
@@ -104,7 +91,7 @@ impl<'a> MemberHeader<'a> {
 
     fn common(&self, bytes: &mut Vec<u8>, crc: u32) {
         push16(bytes, 45);
-        push16(bytes, 0x0808); // UTF-8 and data descriptor.
+        push16(bytes, 0x0800); // UTF-8.
         push16(bytes, self.method.number());
         push16(bytes, 0); // 00:00:00, 1980-01-01.
         push16(bytes, 0x0021);
@@ -124,13 +111,20 @@ pub struct CompletedMember<'a> {
 }
 
 impl CompletedMember<'_> {
-    /// Serializes the signed ZIP64 data descriptor.
-    pub fn descriptor(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(24);
-        push32(&mut bytes, DESCRIPTOR);
-        push32(&mut bytes, self.crc);
-        push64(&mut bytes, self.compressed);
+    /// Serializes the local header with the final CRC and sizes.
+    pub fn local_header(&self) -> Vec<u8> {
+        let mut bytes = Vec::with_capacity(self.header.local_header_size());
+        push32(&mut bytes, LOCAL);
+        self.header.common(&mut bytes, self.crc);
+        push16(&mut bytes, self.header.path.len() as u16);
+        push16(&mut bytes, 20);
+
+        bytes.extend_from_slice(self.header.path.as_bytes());
+
+        push16(&mut bytes, 1);
+        push16(&mut bytes, 16);
         push64(&mut bytes, self.uncompressed);
+        push64(&mut bytes, self.compressed);
 
         bytes
     }
