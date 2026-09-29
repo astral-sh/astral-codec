@@ -1,5 +1,6 @@
 use std::{
-    io::{self, SeekFrom},
+    io::{self, Cursor, SeekFrom},
+    ops::Range,
     pin::Pin,
     task::{Context, Poll},
 };
@@ -234,5 +235,54 @@ impl AsyncSeek for Sparse {
 
     fn poll_complete(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<u64>> {
         Poll::Ready(Ok(self.position))
+    }
+}
+
+/// Records source reads rather than parser calls, as a range backend would see them.
+pub(super) struct Observed {
+    pub(super) inner: Cursor<Vec<u8>>,
+    pub(super) reads: Vec<Range<u64>>,
+    pub(super) fail_at: Option<u64>,
+}
+
+impl Observed {
+    pub(super) fn new(bytes: Vec<u8>) -> Self {
+        Self {
+            inner: Cursor::new(bytes),
+            reads: Vec::new(),
+            fail_at: None,
+        }
+    }
+}
+
+impl AsyncRead for Observed {
+    fn poll_read(
+        mut self: Pin<&mut Self>,
+        context: &mut Context<'_>,
+        buffer: &mut ReadBuf<'_>,
+    ) -> Poll<io::Result<()>> {
+        let start = self.inner.position();
+        if self.fail_at == Some(start) {
+            self.fail_at = None;
+            return Poll::Ready(Err(io::Error::other("injected read failure")));
+        }
+
+        let before = buffer.filled().len();
+        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
+        let length = buffer.filled().len() - before;
+        if length != 0 {
+            self.reads.push(start..start + length as u64);
+        }
+        result
+    }
+}
+
+impl AsyncSeek for Observed {
+    fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
+        Pin::new(&mut self.inner).start_seek(position)
+    }
+
+    fn poll_complete(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<u64>> {
+        Pin::new(&mut self.inner).poll_complete(context)
     }
 }

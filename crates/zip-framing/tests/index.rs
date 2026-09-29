@@ -3,11 +3,23 @@ mod support;
 use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
+use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{Error as FrameError, Index, Limits};
 
-use support::{Fixture, Sparse, field, set16, set32};
+use support::{Fixture, Observed, Sparse, field, set16, set32};
 
 type TestResult = Result<(), Box<dyn Error>>;
+
+// Format-validation cases exercise the complete metadata check. Lazy access
+// and its I/O behavior are covered separately below.
+async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
+    reader: &mut R,
+    limits: Limits,
+) -> Result<Index, FrameError> {
+    let mut index = Index::read(reader, limits).await?;
+    index.validate_all(reader).await?;
+    Ok(index)
+}
 
 #[tokio::test]
 async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
@@ -22,10 +34,10 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
             }
             .build();
 
-            let index = Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+            let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
             assert_eq!(index.entries().len(), 1);
 
-            let entry = &index.entries()[0];
+            let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
             assert_eq!(entry.path(), "file");
             assert_eq!(entry.size(), 7);
             assert_eq!(entry.compressed_size(), 7);
@@ -57,7 +69,7 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
         archive.bytes[offset] = value;
 
         assert!(
-            Index::read(&mut Cursor::new(archive.bytes), Limits::default())
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
                 .await
                 .is_err(),
             "{label}"
@@ -72,7 +84,7 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
         set16(&mut archive.bytes, archive.central + 8, flags);
 
         assert!(
-            Index::read(&mut Cursor::new(archive.bytes), Limits::default())
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
                 .await
                 .is_err(),
             "flags {flags:#x}"
@@ -103,7 +115,7 @@ async fn rejects_unsupported_extras_in_either_header() {
 
             let archive = fixture.build();
             let offset = if local { 0 } else { archive.central as u64 };
-            let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+            let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
             assert!(
                 matches!(result, Err(FrameError::Unsupported { position, feature })
@@ -128,7 +140,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     };
 
     assert_eq!(
-        Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default())
+        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
             .await?
             .entries()[0]
             .path(),
@@ -144,7 +156,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         "\u{feff}name".as_bytes().to_vec(),
     ] {
         assert!(
-            Index::read(
+            read_validated(
                 &mut Cursor::new(
                     Fixture {
                         name,
@@ -170,7 +182,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         };
 
         assert!(
-            Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default())
+            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
                 .await
                 .is_err()
         );
@@ -205,7 +217,7 @@ async fn enforces_resource_budgets_before_exposing_members() {
         },
     ] {
         assert!(matches!(
-            Index::read(&mut Cursor::new(&bytes), limits).await,
+            read_validated(&mut Cursor::new(&bytes), limits).await,
             Err(FrameError::Limit { .. })
         ));
     }
@@ -223,7 +235,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
 
         for length in 0..archive.bytes.len() {
             assert!(
-                Index::read(
+                read_validated(
                     &mut Cursor::new(&archive.bytes[..length]),
                     Limits::default()
                 )
@@ -247,7 +259,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
             bytes[offset] ^= 1;
 
             assert!(
-                Index::read(&mut Cursor::new(bytes), Limits::default())
+                read_validated(&mut Cursor::new(bytes), Limits::default())
                     .await
                     .is_err(),
                 "offset {offset}, zip64={zip64}"
@@ -258,7 +270,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
         bytes.push(0);
 
         assert!(
-            Index::read(&mut Cursor::new(bytes), Limits::default())
+            read_validated(&mut Cursor::new(bytes), Limits::default())
                 .await
                 .is_err()
         );
@@ -294,7 +306,8 @@ async fn requires_utf8_archive_and_member_comments() {
                 } else {
                     (archive.end as u64, "non-UTF-8 archive comment")
                 };
-                let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+                let result =
+                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
                 if valid {
                     assert!(
@@ -319,7 +332,7 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
     set32(&mut empty, 0, 0x0605_4b50);
 
     assert!(
-        Index::read(&mut Cursor::new(&empty), Limits::default())
+        read_validated(&mut Cursor::new(&empty), Limits::default())
             .await?
             .entries()
             .is_empty()
@@ -330,7 +343,7 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
     archive.bytes.extend(empty);
 
     assert!(
-        Index::read(&mut Cursor::new(archive.bytes), Limits::default())
+        read_validated(&mut Cursor::new(archive.bytes), Limits::default())
             .await
             .is_err()
     );
@@ -354,10 +367,14 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
             ..Fixture::default()
         };
 
-        let index = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+        let index =
+            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
 
         assert_eq!(
-            index.entries()[0].unix_extra_data(),
+            index.entries()[0]
+                .resolved()
+                .ok_or("unresolved entry")?
+                .unix_extra_data(),
             Some(b"target".as_slice())
         );
     }
@@ -370,7 +387,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         };
 
         assert!(
-            Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default())
+            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
                 .await
                 .is_err()
         );
@@ -392,7 +409,8 @@ async fn requires_complete_agreement_for_opaque_member_extras() {
             ..Fixture::default()
         };
 
-        let result = Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await;
+        let result =
+            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await;
 
         if valid {
             assert!(result.is_ok());
@@ -436,7 +454,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     set32(&mut bytes, end + 12, (end - central) as u32);
     set32(&mut bytes, end + 16, central as u32);
 
-    let index = Index::read(&mut Cursor::new(&bytes), Limits::default()).await?;
+    let index = read_validated(&mut Cursor::new(&bytes), Limits::default()).await?;
 
     assert_eq!(
         index
@@ -448,17 +466,26 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     );
     assert_eq!(index.entries()[0].position(), first.central as u64);
     assert_eq!(
-        index.entries()[0].unix_extra_data(),
+        index.entries()[0]
+            .resolved()
+            .ok_or("unresolved entry")?
+            .unix_extra_data(),
         Some(b"target".as_slice())
     );
     assert_eq!(index.entries()[1].position(), 0);
-    assert_eq!(index.entries()[1].unix_extra_data(), None);
+    assert_eq!(
+        index.entries()[1]
+            .resolved()
+            .ok_or("unresolved entry")?
+            .unix_extra_data(),
+        None
+    );
 
     let mut shared = bytes.clone();
     set32(&mut shared, central + 42, 0);
 
     assert!(
-        Index::read(&mut Cursor::new(shared), Limits::default())
+        read_validated(&mut Cursor::new(shared), Limits::default())
             .await
             .is_err()
     );
@@ -470,7 +497,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     set32(&mut bytes, end + 12, (end - central) as u32);
 
     assert!(
-        Index::read(&mut Cursor::new(bytes), Limits::default())
+        read_validated(&mut Cursor::new(bytes), Limits::default())
             .await
             .is_err()
     );
@@ -512,7 +539,7 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
         bytes_read: 0,
     };
 
-    let index = Index::read(&mut source, Limits::default()).await?;
+    let index = read_validated(&mut source, Limits::default()).await?;
     assert_eq!(index.entries()[0].size(), size);
     assert_eq!(index.entries()[0].compressed_size(), size);
     assert!(source.bytes_read < 70_000);
@@ -535,7 +562,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         .build();
 
         assert!(
-            Index::read(&mut Cursor::new(archive.bytes), Limits::default())
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
                 .await
                 .is_err()
         );
@@ -549,7 +576,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
     set16(&mut archive.bytes, archive.end - 76 + 14, 62);
 
     assert!(matches!(
-        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
         Err(FrameError::Unsupported {
             feature: "ZIP64 version-2 directory",
             ..
@@ -578,9 +605,125 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
             .bytes
             .splice(archive.end - 20..archive.end - 20, extension);
 
-        let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
         assert_eq!(result.is_ok(), valid);
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
+    let mut bytes = Vec::new();
+    let mut directory = Vec::new();
+    let mut positions = Vec::new();
+    for ordinal in 0..2000 {
+        let fixture = Fixture {
+            name: format!("file-{ordinal}").into_bytes(),
+            ..Fixture::default()
+        }
+        .build();
+        positions.push(bytes.len() as u64);
+        let mut central = fixture.bytes[fixture.central..fixture.end].to_vec();
+        set32(&mut central, 42, bytes.len() as u32);
+        directory.extend(central);
+        bytes.extend_from_slice(&fixture.bytes[..fixture.central]);
+    }
+
+    // Keep the tail search outside both the directory and local records.
+    let central = bytes.len();
+    bytes.extend_from_slice(&directory);
+    let end = bytes.len();
+    let footer = Fixture {
+        archive_comment: vec![b'a'; usize::from(u16::MAX)],
+        ..Fixture::default()
+    }
+    .build();
+    bytes.extend_from_slice(&footer.bytes[footer.end..]);
+    set16(&mut bytes, end + 8, 2000);
+    set16(&mut bytes, end + 10, 2000);
+    set32(&mut bytes, end + 12, directory.len() as u32);
+    set32(&mut bytes, end + 16, central as u32);
+    bytes[30] = b'x';
+
+    let mut source = Observed::new(bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+    assert_eq!(index.entries().len(), 2000);
+    assert!(
+        index
+            .entries()
+            .iter()
+            .all(|entry| entry.resolved().is_none())
+    );
+    assert!(
+        source
+            .reads
+            .iter()
+            .all(|range| range.start >= central as u64)
+    );
+    // Tail, locator probe, and a few bounded directory windows, not 4000 reads.
+    assert!(source.reads.len() <= 5, "{:?}", source.reads);
+
+    source.reads.clear();
+    let entry = index.entry(&mut source, 7).await?.ok_or("missing member")?;
+    assert_eq!(entry.path(), "file-7");
+    assert_eq!(source.reads.len(), 1);
+    assert_eq!(source.reads[0], positions[7]..positions[8]);
+    assert_eq!(entry.record_range(), positions[7]..positions[8]);
+
+    source.reads.clear();
+    assert!(index.entry(&mut source, 7).await?.is_some());
+    assert!(index.entry(&mut source, 2000).await?.is_none());
+    assert!(source.reads.is_empty());
+    assert!(index.entries()[0].resolved().is_none());
+    assert!(index.validate_all(&mut source).await.is_err());
+    assert!(index.entries()[0].resolved().is_none());
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn charges_local_metadata_once_after_successful_resolution() -> TestResult {
+    let extra = field(0xbeef, &vec![0; 5000]);
+    let archive = Fixture {
+        local_extra: extra.clone(),
+        central_extra: extra,
+        ..Fixture::default()
+    }
+    .build();
+    let exact_budget = (archive.end - archive.central + archive.central - 7) as u64;
+
+    for (budget, valid) in [(exact_budget - 1, false), (exact_budget, true)] {
+        let mut source = Observed::new(archive.bytes.clone());
+        let mut index = Index::read(
+            &mut source,
+            Limits {
+                metadata_size: budget,
+                ..Limits::default()
+            },
+        )
+        .await?;
+        if !valid {
+            assert!(matches!(
+                index.entry(&mut source, 0).await,
+                Err(FrameError::Limit { .. })
+            ));
+            continue;
+        }
+
+        // The variable fields require a second read after checking the budget.
+        // An I/O failure there must not leave a charge or a checked entry behind.
+        source.fail_at = Some(30);
+        assert!(matches!(
+            index.entry(&mut source, 0).await,
+            Err(FrameError::Io(_))
+        ));
+        assert!(index.entries()[0].resolved().is_none());
+        assert!(index.entry(&mut source, 0).await?.is_some());
+        source.reads.clear();
+        index.validate_all(&mut source).await?;
+        assert!(source.reads.is_empty());
     }
 
     Ok(())
