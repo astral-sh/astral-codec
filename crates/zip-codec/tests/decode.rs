@@ -305,7 +305,7 @@ impl AsyncSeek for Interruptible {
 
 #[tokio::test]
 async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult {
-    for operation in ["payload", "member", "validate", "reader"] {
+    for operation in ["payload", "skip", "member", "validate", "reader"] {
         let interrupt = Rc::new(Cell::new(false));
         let read_bytes = Rc::new(Cell::new(0));
         let source = Interruptible {
@@ -323,12 +323,17 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
         }
 
         let mut future = Box::pin(async {
-            if operation == "payload" {
+            if matches!(operation, "payload" | "skip") {
                 let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
                     return Err(DecodeError::Io(io::Error::other("expected file")));
                 };
+
                 interrupt.set(true);
-                payload.next_chunk(&mut Vec::new(), 100).await.map(|_| ())
+                if operation == "skip" {
+                    payload.skip().await
+                } else {
+                    payload.next_chunk(&mut Vec::new(), 100).await.map(|_| ())
+                }
             } else {
                 interrupt.set(true);
                 match operation {

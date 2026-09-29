@@ -14,11 +14,26 @@ use crate::payload::{CHUNK_SIZE, Payload};
 
 /// An indexed ZIP archive over an immutable, seekable source.
 pub struct ZipArchive<R> {
+    state: DecoderState<R>,
+    poisoned: bool,
+}
+
+struct DecoderState<R> {
     reader: R,
     index: Index,
     next: usize,
     active: Option<Payload>,
-    poisoned: bool,
+}
+
+struct Operation<'a, R> {
+    state: &'a mut DecoderState<R>,
+    poisoned: &'a mut bool,
+}
+
+impl<R> Operation<'_, R> {
+    fn commit(self) {
+        *self.poisoned = false;
+    }
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
@@ -33,18 +48,21 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// to check metadata for every member before reading any payloads.
     pub async fn open_with_limits(mut reader: R, limits: Limits) -> Result<Self, DecodeError> {
         let index = Index::read(&mut reader, limits).await?;
+
         Ok(Self {
-            reader,
-            index,
-            next: 0,
-            active: None,
+            state: DecoderState {
+                reader,
+                index,
+                next: 0,
+                active: None,
+            },
             poisoned: false,
         })
     }
 
     /// Returns directory metadata without fetching local records or payloads.
     pub fn entries(&self) -> &[DirectoryEntry] {
-        self.index.entries()
+        self.state.index.entries()
     }
 
     /// Selects a member by central-directory index.
@@ -59,15 +77,66 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         &mut self,
         index: usize,
     ) -> Result<Option<Member<ZipMemberPayload<'_, R>>>, DecodeError> {
+        let operation = self.begin_operation()?;
+        let member = operation.state.prepare_member(index).await?;
+        operation.commit();
+
+        Ok(member.map(|member| attach_payload(member, self)))
+    }
+
+    /// Checks metadata for all members, including those never selected.
+    ///
+    /// An active payload is drained first. Other payloads are not decoded;
+    /// their CRCs and decoded sizes are still checked when they are read.
+    pub async fn validate_all(&mut self) -> Result<(), DecodeError> {
+        let operation = self.begin_operation()?;
+        operation.state.validate_all().await?;
+        operation.commit();
+
+        Ok(())
+    }
+
+    /// Borrows the source for operations such as HTTP range prefetching.
+    ///
+    /// Drains and validates an active payload before lending the reader. The
+    /// caller may change its cursor, but must not replace the source or change
+    /// its contents. Subsequent member selection seeks to the checked offset.
+    pub async fn reader_mut(&mut self) -> Result<&mut R, DecodeError> {
+        let operation = self.begin_operation()?;
+        operation.state.drain().await?;
+        operation.commit();
+
+        Ok(&mut self.state.reader)
+    }
+
+    /// Returns the source without validating any remaining payloads.
+    pub fn into_inner(self) -> R {
+        self.state.reader
+    }
+
+    fn begin_operation(&mut self) -> Result<Operation<'_, R>, DecodeError> {
         if self.poisoned {
             return Err(DecodeError::Poisoned);
         }
 
+        // Poison before any work starts. Only a committed operation restores
+        // usability; errors and cancellation leave the archive poisoned without
+        // relying on Drop to run.
         self.poisoned = true;
+
+        Ok(Operation {
+            state: &mut self.state,
+            poisoned: &mut self.poisoned,
+        })
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
+    // Finish all fallible work before lending the archive to a payload.
+    async fn prepare_member(&mut self, index: usize) -> Result<Option<Member<()>>, DecodeError> {
         self.drain().await?;
 
         let Some(entry) = self.index.entry(&mut self.reader, index).await? else {
-            self.poisoned = false;
             return Ok(None);
         };
 
@@ -85,28 +154,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.next = index + 1;
 
         let member = match kind {
-            Kind::File(executable) => {
-                self.poisoned = false;
-                return Ok(Some(Member::File {
-                    metadata,
-                    size,
-                    executable,
-                    payload: ZipMemberPayload { archive: self },
-                }));
-            }
+            Kind::File(executable) => Member::File {
+                metadata,
+                size,
+                executable,
+                payload: (),
+            },
             Kind::Directory => {
                 self.drain().await?;
                 Member::Directory { metadata }
             }
-            Kind::HardLink(target) => {
-                self.poisoned = false;
-                return Ok(Some(Member::HardLink {
-                    metadata,
-                    target,
-                    size,
-                    payload: ZipMemberPayload { archive: self },
-                }));
-            }
+            Kind::HardLink(target) => Member::HardLink {
+                metadata,
+                target,
+                size,
+                payload: (),
+            },
             Kind::SymbolicLink(expected) => {
                 let mut target = Vec::new();
                 let mut chunk = Vec::new();
@@ -144,23 +207,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
             }
         };
 
-        self.poisoned = false;
-
         Ok(Some(member))
     }
 
-    /// Checks metadata for all members, including those never selected.
-    ///
-    /// An active payload is drained first. Other payloads are not decoded;
-    /// their CRCs and decoded sizes are still checked when they are read.
-    pub async fn validate_all(&mut self) -> Result<(), DecodeError> {
-        if self.poisoned {
-            return Err(DecodeError::Poisoned);
-        }
-
-        self.poisoned = true;
+    async fn validate_all(&mut self) -> Result<(), DecodeError> {
         self.drain().await?;
         self.index.validate_all(&mut self.reader).await?;
+
         for entry in self
             .index
             .entries()
@@ -170,29 +223,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
             kind(&entry)?;
         }
 
-        self.poisoned = false;
         Ok(())
-    }
-
-    /// Borrows the source for operations such as HTTP range prefetching.
-    ///
-    /// Drains and validates an active payload before lending the reader. The
-    /// caller may change its cursor, but must not replace the source or change
-    /// its contents. Subsequent member selection seeks to the checked offset.
-    pub async fn reader_mut(&mut self) -> Result<&mut R, DecodeError> {
-        if self.poisoned {
-            return Err(DecodeError::Poisoned);
-        }
-
-        self.poisoned = true;
-        self.drain().await?;
-        self.poisoned = false;
-        Ok(&mut self.reader)
-    }
-
-    /// Returns the source without validating any remaining payloads.
-    pub fn into_inner(self) -> R {
-        self.reader
     }
 
     async fn read_chunk(
@@ -227,7 +258,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> Archive for ZipArchive<R> {
         Self: 'a;
 
     async fn next_member(&mut self) -> Result<Option<Member<Self::Payload<'_>>>, Self::Error> {
-        self.member(self.next).await
+        self.member(self.state.next).await
     }
 }
 
@@ -244,29 +275,52 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
         buffer: &mut Vec<u8>,
         target_len: usize,
     ) -> Result<bool, DecodeError> {
-        if self.archive.poisoned {
-            return Err(DecodeError::Poisoned);
-        }
-
-        // Set this before the first await. Dropping this future cannot expose
-        // partially updated I/O or decoder state to a subsequent operation.
-        self.archive.poisoned = true;
-        let result = self.archive.read_chunk(buffer, target_len).await?;
-        self.archive.poisoned = false;
+        let operation = self.archive.begin_operation()?;
+        let result = operation.state.read_chunk(buffer, target_len).await?;
+        operation.commit();
 
         Ok(result)
     }
 
     async fn skip(self) -> Result<(), DecodeError> {
-        if self.archive.poisoned {
-            return Err(DecodeError::Poisoned);
-        }
-
-        self.archive.poisoned = true;
-        self.archive.drain().await?;
-        self.archive.poisoned = false;
+        let operation = self.archive.begin_operation()?;
+        operation.state.drain().await?;
+        operation.commit();
 
         Ok(())
+    }
+}
+
+fn attach_payload<R>(
+    member: Member<()>,
+    archive: &mut ZipArchive<R>,
+) -> Member<ZipMemberPayload<'_, R>> {
+    match member {
+        Member::File {
+            metadata,
+            size,
+            executable,
+            ..
+        } => Member::File {
+            metadata,
+            size,
+            executable,
+            payload: ZipMemberPayload { archive },
+        },
+        Member::HardLink {
+            metadata,
+            target,
+            size,
+            ..
+        } => Member::HardLink {
+            metadata,
+            target,
+            size,
+            payload: ZipMemberPayload { archive },
+        },
+        Member::Directory { metadata } => Member::Directory { metadata },
+        Member::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
+        Member::Special { metadata, kind } => Member::Special { metadata, kind },
     }
 }
 
