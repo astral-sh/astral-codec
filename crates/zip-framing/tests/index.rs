@@ -266,7 +266,55 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
 }
 
 #[tokio::test]
-async fn accepts_empty_archives_and_comments_but_rejects_ambiguous_end_records() -> TestResult {
+async fn requires_utf8_archive_and_member_comments() {
+    for (comment, valid) in [
+        (b"zip".as_slice(), true),
+        ("café".as_bytes(), true),
+        (b"\xff".as_slice(), false),
+        (b"\xe2\x82".as_slice(), false),
+    ] {
+        for zip64 in [false, true] {
+            for (member, flags) in [(false, 0x0800), (true, 0x0800), (true, 0)] {
+                let mut fixture = Fixture {
+                    zip64,
+                    ..Fixture::default()
+                };
+                if member {
+                    fixture.member_comment = comment.to_vec();
+                } else {
+                    fixture.archive_comment = comment.to_vec();
+                }
+
+                let mut archive = fixture.build();
+                set16(&mut archive.bytes, 6, flags);
+                set16(&mut archive.bytes, archive.central + 8, flags);
+
+                let (offset, expected) = if member {
+                    (archive.central as u64, "non-UTF-8 member comment")
+                } else {
+                    (archive.end as u64, "non-UTF-8 archive comment")
+                };
+                let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+
+                if valid {
+                    assert!(
+                        result.is_ok(),
+                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}: {result:?}"
+                    );
+                } else {
+                    assert!(
+                        matches!(result, Err(FrameError::Invalid { position, reason })
+                            if position == offset && reason == expected),
+                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}"
+                    );
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResult {
     let mut empty = vec![0; 22];
     set32(&mut empty, 0, 0x0605_4b50);
 
@@ -278,12 +326,6 @@ async fn accepts_empty_archives_and_comments_but_rejects_ambiguous_end_records()
     );
 
     let mut archive = Fixture::default().build();
-    set16(&mut archive.bytes, archive.end + 20, 3);
-    archive.bytes.extend_from_slice(b"zip");
-
-    Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
-
-    archive.bytes.truncate(archive.end + 22);
     set16(&mut archive.bytes, archive.end + 20, 22);
     archive.bytes.extend(empty);
 

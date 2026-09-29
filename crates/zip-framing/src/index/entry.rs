@@ -129,11 +129,7 @@ impl CentralEntry {
         )?;
 
         let path = extras.name(&variable[..name_length], common.flags, position)?;
-        extras.comment(
-            &variable[name_length + extra_length..],
-            common.flags,
-            position,
-        )?;
+        extras.comment(&variable[name_length + extra_length..], position)?;
 
         budget.output(sizes.uncompressed)?;
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {

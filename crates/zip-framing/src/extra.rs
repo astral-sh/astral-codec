@@ -146,10 +146,8 @@ impl<'a> Extras<'a> {
         Ok(name.to_owned())
     }
 
-    pub(crate) fn comment(&self, bytes: &[u8], flags: u16, position: u64) -> Result<(), Error> {
-        if flags & 0x0800 != 0 && str::from_utf8(bytes).is_err() {
-            return Err(invalid(position, "non-UTF-8 comment with UTF-8 flag"));
-        }
+    pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
+        str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 member comment"))?;
 
         if let Some(field) = self.fields.get(&0x6375) {
             unicode_field(field, bytes, position)?;

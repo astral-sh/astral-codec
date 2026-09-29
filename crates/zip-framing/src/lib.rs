@@ -1,6 +1,7 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
 //! [`Index::read`] validates all record boundaries and redundant member metadata.
+//! Filenames and archive/member comments must be UTF-8.
 //! It does not read file contents: consumers must verify decoded sizes and CRCs.
 //! The source must remain unchanged while the index and its payloads are used.
 

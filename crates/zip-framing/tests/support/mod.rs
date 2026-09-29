@@ -12,6 +12,8 @@ pub(super) struct Fixture {
     pub(super) name: Vec<u8>,
     pub(super) local_extra: Vec<u8>,
     pub(super) central_extra: Vec<u8>,
+    pub(super) member_comment: Vec<u8>,
+    pub(super) archive_comment: Vec<u8>,
     pub(super) zip64: bool,
     pub(super) descriptor: Option<bool>,
     pub(super) crc: Option<u32>,
@@ -121,10 +123,12 @@ impl Fixture {
         set32(&mut header, 24, size);
         set16(&mut header, 28, name.len() as u16);
         set16(&mut header, 30, central_extra.len() as u16);
+        set16(&mut header, 32, self.member_comment.len() as u16);
 
         bytes.extend(header);
         bytes.extend(name);
         bytes.extend(central_extra);
+        bytes.extend(self.member_comment);
 
         let central_size = bytes.len() - central;
         if self.zip64 {
@@ -164,7 +168,9 @@ impl Fixture {
             16,
             if self.zip64 { u32::MAX } else { central as u32 },
         );
+        set16(&mut record, 20, self.archive_comment.len() as u16);
         bytes.extend(record);
+        bytes.extend(self.archive_comment);
 
         Archive {
             bytes,

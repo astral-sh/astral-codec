@@ -1,4 +1,4 @@
-use std::io::SeekFrom;
+use std::{io::SeekFrom, str};
 
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 
@@ -154,6 +154,9 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     let offset =
         candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
     let position = tail_start + offset as u64;
+    str::from_utf8(&tail[offset + 22..])
+        .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
+
     let end = &tail[offset..offset + 22];
     let mut directory = Directory {
         offset: u64::from(u32_at(end, 16)),
