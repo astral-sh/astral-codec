@@ -356,6 +356,9 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             .ok_or_else(|| invalid(position, "truncated ZIP64 extension"))?;
         position += 6 + length as u64;
         records += 1;
+
+        // Parsing buffered records performs no I/O. Periodically yield to give
+        // other tasks a chance to run while processing many small extensions.
         if records.is_multiple_of(1024) {
             tokio::task::yield_now().await;
         }
