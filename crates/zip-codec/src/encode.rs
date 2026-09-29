@@ -1,13 +1,13 @@
 //! Streaming ZIP64 encoding for the format-neutral archive builder.
 
-use std::io;
+use std::io::{self, SeekFrom};
 
 use archive_trait::{
     ArchiveBuilder, BuildError, EntryMetadata, FilePayload, builder::BuildFailure,
 };
 use flate2::{Compress, Compression, Crc, FlushCompress, Status};
 use thiserror::Error;
-use tokio::io::{AsyncWrite, AsyncWriteExt};
+use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
     CompressionMethod, Limits,
     write::{EntryKind, MemberHeader, end_records},
@@ -17,9 +17,9 @@ use crate::payload::CHUNK_SIZE;
 
 /// A streaming UTF-8 ZIP64 writer for [`ArchiveBuilder::builder`].
 ///
-/// Output starts at the writer's current position, which must be the start of
-/// an empty archive. Payloads are streamed; only bounded directory metadata is
-/// retained. ZIP64 descriptors avoid seeking or estimating compressed sizes.
+/// Output must be seekable, empty, and positioned at byte zero. Payloads are
+/// streamed; only bounded directory metadata is retained. Local headers are
+/// filled in after each payload, once its CRC and compressed size are known.
 pub struct ZipEncoder<W> {
     writer: W,
     method: CompressionMethod,
@@ -69,7 +69,7 @@ impl<W> ZipEncoder<W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> ZipEncoder<W> {
+impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
     fn preflight(&self, header: &MemberHeader<'_>, size: u64) -> Result<(), EncodeError> {
         if self.finished {
             return Err(EncodeError::Finished);
@@ -155,7 +155,7 @@ impl<W: AsyncWrite + Unpin> ZipEncoder<W> {
         self.preflight(&header, size).map_err(recoverable)?;
 
         let offset = self.position;
-        self.write_bytes(&header.local_header())
+        self.write_bytes(&vec![0; header.local_header_size()])
             .await
             .map_err(poisoned)?;
 
@@ -203,7 +203,18 @@ impl<W: AsyncWrite + Unpin> ZipEncoder<W> {
         let member = header
             .finish(crc.sum(), self.position - start, size, offset)
             .map_err(poisoned)?;
-        self.write_bytes(&member.descriptor())
+
+        // Rewriting the reserved header does not advance the archive's end.
+        self.writer
+            .seek(SeekFrom::Start(offset))
+            .await
+            .map_err(poisoned)?;
+        self.writer
+            .write_all(&member.local_header())
+            .await
+            .map_err(poisoned)?;
+        self.writer
+            .seek(SeekFrom::Start(self.position))
             .await
             .map_err(poisoned)?;
 
@@ -216,7 +227,7 @@ impl<W: AsyncWrite + Unpin> ZipEncoder<W> {
     }
 }
 
-impl<W: AsyncWrite + Unpin> ArchiveBuilder for ZipEncoder<W> {
+impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type Error = EncodeError;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
@@ -333,7 +344,7 @@ pub enum EncodeError {
     /// Metadata could not be represented in ZIP.
     #[error(transparent)]
     Framing(#[from] zip_framing::Error),
-    /// Writing or flushing the output failed.
+    /// Writing, seeking, or flushing the output failed.
     #[error("ZIP output I/O failed: {0}")]
     Io(#[from] io::Error),
     /// A compressor failed or made no progress.
