@@ -75,6 +75,10 @@ with the raw filename. APPNOTE Unix link metadata is interpreted, and a symbolic
 link's extra-field target must agree with its payload when both are present.
 Filesystem containment and configurable name/link policy remain in `archive-trait`.
 
+Archive and member comments must be UTF-8, even without the UTF-8 flag. This
+restricts binary comment data; UTF-8 alone does not exclude all embedded ZIP
+records.
+
 File contents are checked during consumption. Successful completion requires the
 declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload
 is drained and checked before another member is returned. Seeking to an entry

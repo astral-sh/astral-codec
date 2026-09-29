@@ -45,7 +45,9 @@ output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited t
 65,535 bytes. The source must remain unchanged while reading the archive.
 
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
-directories, non-UTF-8 names, ambiguous records, and unaccounted bytes are rejected.
+directories, non-UTF-8 names or comments, ambiguous records, and unaccounted bytes
+are rejected. Archive and member comments must be UTF-8 regardless of the
+member's UTF-8 flag.
 
 The member adapter supports regular files, directories, symbolic links, APPNOTE
 Unix hard links, and the special kinds represented by `archive-trait`. Volume
