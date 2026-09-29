@@ -11,6 +11,7 @@
 mod extra;
 mod index;
 mod record;
+pub mod write;
 
 use std::io;
 
