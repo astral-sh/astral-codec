@@ -81,8 +81,18 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
 }
 
 #[tokio::test]
-async fn rejects_security_extras_in_either_header() {
-    for identifier in [0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x9901] {
+async fn rejects_unsupported_extras_in_either_header() {
+    for (identifier, expected) in [
+        (0x0007, "authenticity verification"),
+        (0x0008, "alternate name encoding"),
+        (0x000f, "patch descriptor"),
+        (0x0014, "digital signature"),
+        (0x0015, "digital signature"),
+        (0x0016, "digital signature"),
+        (0x0017, "encryption extra field"),
+        (0x0019, "encryption extra field"),
+        (0x9901, "encryption extra field"),
+    ] {
         for local in [false, true] {
             let mut fixture = Fixture::default();
             if local {
@@ -91,11 +101,13 @@ async fn rejects_security_extras_in_either_header() {
                 fixture.central_extra = field(identifier, &[]);
             }
 
-            let result =
-                Index::read(&mut Cursor::new(fixture.build().bytes), Limits::default()).await;
+            let archive = fixture.build();
+            let offset = if local { 0 } else { archive.central as u64 };
+            let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
             assert!(
-                matches!(result, Err(FrameError::Unsupported { .. })),
+                matches!(result, Err(FrameError::Unsupported { position, feature })
+                    if position == offset && feature == expected),
                 "{identifier:#x}, local={local}"
             );
         }
@@ -129,6 +141,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         b"C:/drive".to_vec(),
         b"back\\slash".to_vec(),
         b"nul\0name".to_vec(),
+        "\u{feff}name".as_bytes().to_vec(),
     ] {
         assert!(
             Index::read(

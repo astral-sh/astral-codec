@@ -9,49 +9,54 @@ use crate::{
 
 use super::Budget;
 
-/// A member whose record boundaries and redundant headers have been checked.
 #[derive(Clone, Debug)]
-pub struct Entry {
+struct Metadata {
     path: String,
     common: Common,
     compressed_size: u64,
     size: u64,
     local_offset: u64,
-    data_offset: u64,
     made_by: u16,
     attributes: u32,
+}
+
+/// A member whose record boundaries and redundant headers have been checked.
+#[derive(Clone, Debug)]
+pub struct Entry {
+    metadata: Metadata,
+    data_offset: u64,
     extras: ResolvedExtras,
 }
 
 impl Entry {
     /// Returns the exact UTF-8 archive path, without filesystem normalization.
     pub fn path(&self) -> &str {
-        &self.path
+        &self.metadata.path
     }
 
     /// Returns the raw compression method selected by the headers.
     pub fn method(&self) -> CompressionMethod {
-        self.common.method
+        self.metadata.common.method
     }
 
     /// Returns the expected CRC-32 of the decoded payload.
     pub fn crc32(&self) -> u32 {
-        self.common.crc
+        self.metadata.common.crc
     }
 
     /// Returns the decoded payload length.
     pub fn size(&self) -> u64 {
-        self.size
+        self.metadata.size
     }
 
     /// Returns the encoded payload length, excluding headers and descriptors.
     pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
+        self.metadata.compressed_size
     }
 
     /// Returns the absolute position of the local header.
     pub fn position(&self) -> u64 {
-        self.local_offset
+        self.metadata.local_offset
     }
 
     /// Returns the absolute position of the encoded payload.
@@ -61,17 +66,17 @@ impl Entry {
 
     /// Returns the host-system identifier for the external attributes.
     pub fn host_system(&self) -> u8 {
-        (self.made_by >> 8) as u8
+        (self.metadata.made_by >> 8) as u8
     }
 
     /// Returns the external file attributes, interpreted according to the host.
     pub fn external_attributes(&self) -> u32 {
-        self.attributes
+        self.metadata.attributes
     }
 
     /// Returns the version needed to extract this member.
     pub fn version_needed(&self) -> u16 {
-        self.common.version
+        self.metadata.common.version
     }
 
     /// Returns APPNOTE UNIX extra-field data for links or device numbers.
@@ -87,19 +92,13 @@ impl Entry {
 // Keep Entry's fields private to this module so the index cannot construct one
 // from central metadata alone.
 pub(super) struct CentralEntry {
-    path: String,
-    common: Common,
-    compressed_size: u64,
-    size: u64,
-    local_offset: u64,
-    made_by: u16,
-    attributes: u32,
+    metadata: Metadata,
     extra: Vec<u8>,
 }
 
 impl CentralEntry {
     pub(super) fn local_offset(&self) -> u64 {
-        self.local_offset
+        self.metadata.local_offset
     }
 
     pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
@@ -146,13 +145,15 @@ impl CentralEntry {
         }
 
         let entry = Self {
-            path,
-            common,
-            compressed_size: sizes.compressed,
-            size: sizes.uncompressed,
-            local_offset: sizes.offset,
-            made_by: u16_at(&header, 4),
-            attributes: u32_at(&header, 38),
+            metadata: Metadata {
+                path,
+                common,
+                compressed_size: sizes.compressed,
+                size: sizes.uncompressed,
+                local_offset: sizes.offset,
+                made_by: u16_at(&header, 4),
+                attributes: u32_at(&header, 38),
+            },
             extra: variable[name_length..name_length + extra_length].to_vec(),
         };
 
@@ -165,7 +166,8 @@ impl CentralEntry {
         boundary: u64,
         budget: &mut Budget,
     ) -> Result<Entry, Error> {
-        let position = self.local_offset;
+        let Self { metadata, extra } = self;
+        let position = metadata.local_offset;
         let mut header = [0; 30];
         read_at(reader, position, &mut header, boundary).await?;
         if u32_at(&header, 0) != LOCAL {
@@ -182,18 +184,18 @@ impl CentralEntry {
 
         let extras = Extras::parse(&variable[name_length..], position)?;
         let sizes = extras.zip64(common, None, None, position)?;
-        if extras.name(&variable[..name_length], common.flags, position)? != self.path {
+        if extras.name(&variable[..name_length], common.flags, position)? != metadata.path {
             return Err(invalid(position, "local and central filenames disagree"));
         }
 
-        let extras = extras.resolve(Extras::parse(&self.extra, position)?, position)?;
+        let extras = extras.resolve(Extras::parse(&extra, position)?, position)?;
 
         if (Common {
-            crc: self.common.crc,
-            compressed: self.common.compressed,
-            uncompressed: self.common.uncompressed,
+            crc: metadata.common.crc,
+            compressed: metadata.common.compressed,
+            uncompressed: metadata.common.uncompressed,
             ..common
-        }) != self.common
+        }) != metadata.common
         {
             return Err(invalid(position, "local and central headers disagree"));
         }
@@ -205,37 +207,31 @@ impl CentralEntry {
                     "descriptor member has nonzero local CRC or sizes",
                 ));
             }
-        } else if common.crc != self.common.crc
-            || sizes.compressed != self.compressed_size
-            || sizes.uncompressed != self.size
+        } else if common.crc != metadata.common.crc
+            || sizes.compressed != metadata.compressed_size
+            || sizes.uncompressed != metadata.size
         {
             return Err(invalid(position, "local and central CRC or sizes disagree"));
         }
 
         let data_offset = add(position, 30 + variable.len() as u64)?;
-        let data_end = add(data_offset, self.compressed_size)?;
+        let data_end = add(data_offset, metadata.compressed_size)?;
         if data_end > boundary {
             return Err(invalid(position, "payload overlaps the next record"));
         }
 
         if common.descriptor() {
             let zip64 = sizes.zip64
-                || self.common.compressed == u32::MAX
-                || self.common.uncompressed == u32::MAX;
-            read_descriptor(reader, &self, data_end, boundary, zip64).await?;
+                || metadata.common.compressed == u32::MAX
+                || metadata.common.uncompressed == u32::MAX;
+            read_descriptor(reader, &metadata, data_end, boundary, zip64).await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
 
         Ok(Entry {
-            path: self.path,
-            common: self.common,
-            compressed_size: self.compressed_size,
-            size: self.size,
-            local_offset: self.local_offset,
+            metadata,
             data_offset,
-            made_by: self.made_by,
-            attributes: self.attributes,
             extras,
         })
     }
@@ -243,7 +239,7 @@ impl CentralEntry {
 
 async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
-    entry: &CentralEntry,
+    metadata: &Metadata,
     position: u64,
     end: u64,
     zip64: bool,
@@ -281,7 +277,9 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
         u64::from(u32_at(&bytes, offset + 8))
     };
 
-    if crc != entry.common.crc || compressed != entry.compressed_size || uncompressed != entry.size
+    if crc != metadata.common.crc
+        || compressed != metadata.compressed_size
+        || uncompressed != metadata.size
     {
         return Err(invalid(
             position,

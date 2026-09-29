@@ -1,4 +1,4 @@
-use std::io::SeekFrom;
+use std::{io::SeekFrom, str};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
@@ -39,6 +39,23 @@ pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
 
 pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
     u64::from(u32_at(bytes, offset)) | (u64::from(u32_at(bytes, offset + 4)) << 32)
+}
+
+pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str, Error> {
+    let name = str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 filename"))?;
+    if flags & 0x0800 == 0 && !name.is_ascii() {
+        return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
+    }
+
+    if name.starts_with('\u{feff}')
+        || name.contains(['\0', '\\'])
+        || name.starts_with('/')
+        || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
+    {
+        return Err(invalid(position, "invalid ZIP filename"));
+    }
+
+    Ok(name)
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

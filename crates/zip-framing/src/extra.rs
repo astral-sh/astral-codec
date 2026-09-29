@@ -4,7 +4,7 @@ use flate2::Crc;
 
 use crate::{
     Error, invalid,
-    record::{Common, u16_at, u32_at, u64_at},
+    record::{Common, parse_name, u16_at, u32_at, u64_at},
 };
 
 pub(crate) struct Extras<'a> {
@@ -39,38 +39,16 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated extra-field data"));
             };
 
-            match identifier {
-                0x0007 => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "authenticity verification",
-                    });
-                }
-                0x000f => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "patch descriptor",
-                    });
-                }
-                0x0014..=0x0016 => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "digital signature",
-                    });
-                }
-                0x0017 | 0x0019 | 0x9901 => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "encryption extra field",
-                    });
-                }
-                0x0008 => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "alternate name encoding",
-                    });
-                }
-                _ => {}
+            let unsupported = match identifier {
+                0x0007 => Some("authenticity verification"),
+                0x000f => Some("patch descriptor"),
+                0x0014..=0x0016 => Some("digital signature"),
+                0x0017 | 0x0019 | 0x9901 => Some("encryption extra field"),
+                0x0008 => Some("alternate name encoding"),
+                _ => None,
+            };
+            if let Some(feature) = unsupported {
+                return Err(Error::Unsupported { position, feature });
             }
 
             if fields.insert(identifier, data).is_some() {
@@ -153,18 +131,7 @@ impl<'a> Extras<'a> {
     }
 
     pub(crate) fn name(&self, bytes: &[u8], flags: u16, position: u64) -> Result<String, Error> {
-        let name = str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 filename"))?;
-        if flags & 0x0800 == 0 && !name.is_ascii() {
-            return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
-        }
-
-        if name.starts_with('\u{feff}')
-            || name.contains(['\0', '\\'])
-            || name.starts_with('/')
-            || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
-        {
-            return Err(invalid(position, "invalid ZIP filename"));
-        }
+        let name = parse_name(bytes, flags, position)?;
 
         if let Some(field) = self.fields.get(&0x7075) {
             let unicode = unicode_field(field, bytes, position)?;
