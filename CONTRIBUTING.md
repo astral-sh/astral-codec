@@ -39,20 +39,24 @@ change to source traversal, path containment, or filesystem behavior belongs in
 ### ZIP archives
 
 ZIP reading starts from a seekable source. `zip-framing` finds the end records,
-resolves ZIP64 fields, reads the central directory, and validates every local
-header and data descriptor. It checks the complete physical layout before
-returning an immutable index. Central-directory order and physical order may
-differ.
+resolves ZIP64 fields, and reads the central directory through a bounded window.
+The index preserves directory order and derives each member's physical boundary
+from sorted local offsets, without fetching local records during opening.
 
-Central records remain private `CentralEntry` values until their local headers,
-extra fields, and data descriptors have been reconciled. This transition
-consumes each central record and constructs an `Entry` with resolved metadata
-and a checked payload offset.
+`DirectoryEntry` exposes declared metadata. `Index::entry` checks a selected
+local header, extras, descriptor, and exact record extent before constructing a
+borrowed `Entry`. The resolved local metadata is cached only after every check
+succeeds; payload offsets and reconciled UNIX extras are available only through
+that checked type. `Index::validate_all` checks all members without decoding
+payloads. Local metadata budgets are charged once per successful resolution.
 
-`zip-codec` projects indexed entries into `archive-trait` members. It owns raw
-DEFLATE processing, decoded-size and CRC checks, payload lending, random access,
-and cursor poisoning. Advancing past an unfinished member drains and validates
-its payload. Filesystem extraction remains in `archive-trait`.
+`zip-codec` resolves entries before projecting them into `archive-trait` members.
+It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
+random access, and cursor poisoning. Advancing past an unfinished member drains
+and validates its payload. `ZipArchive::validate_all` also checks member kinds.
+`reader_mut().await` drains an active payload before lending the immutable source
+for caller-controlled prefetching or seeking. Filesystem extraction remains in
+`archive-trait`.
 
 Writing follows the same separation. `archive-trait::Builder` handles names,
 collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads

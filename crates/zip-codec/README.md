@@ -40,8 +40,9 @@ selects an entry. Sequential iteration resumes after the selected entry.
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks
 metadata for every member, including unselected members. Payload reads check
-CRC-32, exact decoded size, and exact DEFLATE stream consumption. Advancing or selecting another member drains and validates an
-unfinished payload. Errors or cancellation poison the reader.
+CRC-32, exact decoded size, and exact DEFLATE stream consumption. Advancing or
+selecting another member drains and validates an unfinished payload. Errors or
+cancellation poison the reader.
 
 `Limits` bounds archive size, entry count, metadata, per-member output, and total
 output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited to
@@ -49,8 +50,9 @@ output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited t
 
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
 directories, non-UTF-8 names or comments, ambiguous records, and unaccounted bytes
-are rejected. Archive and member comments must be UTF-8 regardless of the
-member's UTF-8 flag.
+are rejected when the affected records are checked. Listing alone does not
+validate unselected local records. Archive and member comments must be UTF-8
+regardless of the member's UTF-8 flag.
 
 The member adapter supports regular files, directories, symbolic links, APPNOTE
 Unix hard links, and the special kinds represented by `archive-trait`. Volume
@@ -74,3 +76,14 @@ are fetched only when selected. To prefetch a whole selected member, obtain its
 Lending the reader drains an active payload first; the caller may move the cursor
 but must preserve the source and its contents. Prefetch sizes and the underlying
 source's cache policy remain under caller control.
+
+For a source with an async `prefetch` method, the access pattern is:
+
+```rust,ignore
+let range = archive.entries()[index].record_range();
+archive.reader_mut().await?.prefetch(range).await;
+let member = archive.member(index).await?;
+```
+
+The declared range includes the local header, compressed payload, and any
+trailing descriptor. Prefetching does not mark those records as validated.

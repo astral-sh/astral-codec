@@ -63,11 +63,17 @@ digital signatures, patched data, multi-volume archives, and ZIP64 version-2
 directories are rejected. Self-extracting prefixes, padding outside records,
 trailing bytes, and ambiguous end records are also rejected.
 
-Opening an archive validates the whole index before exposing members. Local
-headers, central headers, ZIP64 fields, and descriptors must agree. Payload
-extents cannot overlap, refer to shared local headers, or conceal unindexed
-records. Extra fields must be bounded, complete records with unique identifiers.
-Unknown extensions remain opaque and do not supply effective names or file types.
+Opening an archive validates the end records and central directory, including
+bounds derivable from the declared local offsets and sizes. Local records are
+checked only when selected. Before exposing a member, its local header, central
+header, ZIP64 fields, extras, and descriptor must agree, and its physical extent
+must exactly fill its assigned span. Checked local metadata is cached.
+`ZipArchive::validate_all` checks every member's metadata and file type, including
+unselected members, establishing complete nonoverlapping record coverage. Without
+that call or traversal of every member, malformed unselected local records and
+some gaps or overlaps can remain undiscovered. Extra fields must be bounded,
+complete records with unique identifiers. Unknown extensions remain opaque
+and do not supply effective names or file types.
 
 Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
 accepted without it. Unicode path extra fields must have a valid CRC and agree
@@ -82,8 +88,9 @@ records.
 File contents are checked during consumption. Successful completion requires the
 declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload
 is drained and checked before another member is returned. Seeking to an entry
-does not validate the contents of unselected entries. Dropping the entire archive
-or recovering its source likewise does not validate remaining contents.
+does not validate local metadata or payload contents of unselected entries.
+Dropping the entire archive or recovering its source likewise does not validate
+remaining contents.
 
 Default budgets cap the archive at 128 GiB, entries at 100,000, local and central
 metadata at 64 MiB, decoded members at 8 GiB each, and their sum at 64 GiB. End
@@ -93,10 +100,19 @@ an additional metadata-size bound. Payload processing uses chunks of at most
 at 65,535 bytes. Raising limits permits additional resource use. Repeated explicit
 random-access reads repeat the associated work; the total-size budget describes
 the indexed archive, not a cumulative quota across caller-requested rereads.
+Local metadata is charged when first resolved; failed or cancelled resolutions
+do not retain a charge. Full metadata validation applies that budget to all members.
 
 Index memory is proportional to bounded metadata and entry count. Physical-order
 validation sorts member offsets in O(n log n) time. Payload work is bounded by
 encoded input and decoded output, including streams that produce no output.
+
+Metadata reads use a 64 KiB directory window and a 4 KiB selected-record window,
+clipped to their containing spans. Read-ahead can include payload bytes, but
+does not decode them. Explicit prefetch sizes and transport cache retention are
+controlled by the caller and are not bounded by ZIP metadata or payload buffers.
+Access through `reader_mut` permits cursor changes, not replacement or mutation
+of the underlying archive.
 
 Read errors or cancellation poison the archive cursor. Construction uses
 `archive-trait::Builder` poisoning. The encoder requires seekable output and
