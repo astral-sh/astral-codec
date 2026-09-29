@@ -22,8 +22,10 @@ pub(crate) async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
     if add(position, bytes.len() as u64)? > end {
         return Err(invalid(position, "record extends beyond its container"));
     }
+
     reader.seek(SeekFrom::Start(position)).await?;
     reader.read_exact(bytes).await?;
+
     Ok(())
 }
 
@@ -61,12 +63,14 @@ impl Common {
                 feature: "encryption",
             });
         }
+
         if flags & 0x20 != 0 {
             return Err(Error::Unsupported {
                 position,
                 feature: "patched data",
             });
         }
+
         let method = CompressionMethod::parse(u16_at(bytes, 4), position)?;
         let allowed = 0x0808
             | if method == CompressionMethod::Deflate {
@@ -80,6 +84,7 @@ impl Common {
                 "reserved or inapplicable general-purpose flags",
             ));
         }
+
         let version = u16_at(bytes, 0);
         if version > 45 {
             return Err(Error::Unsupported {
@@ -87,6 +92,7 @@ impl Common {
                 feature: "extraction version",
             });
         }
+
         if version
             < if method == CompressionMethod::Deflate {
                 20
@@ -96,6 +102,7 @@ impl Common {
         {
             return Err(invalid(position, "extraction version is too low"));
         }
+
         Ok(Self {
             version,
             flags,
@@ -116,6 +123,7 @@ impl Common {
         if zip64 && self.version < 45 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
+
         Ok(())
     }
 }

@@ -126,5 +126,6 @@ pub(crate) fn check_limit(value: u64, limit: u64, resource: &'static str) -> Res
     if value > limit {
         return Err(Error::Limit { resource, limit });
     }
+
     Ok(())
 }

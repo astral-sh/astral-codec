@@ -14,16 +14,19 @@ pub(crate) struct Extras<'a> {
 impl<'a> Extras<'a> {
     pub(crate) fn parse(mut bytes: &'a [u8], position: u64) -> Result<Self, Error> {
         let mut fields = BTreeMap::new();
+
         while !bytes.is_empty() {
             if bytes.len() < 4 {
                 return Err(invalid(position, "truncated extra-field header"));
             }
+
             let identifier = u16_at(bytes, 0);
             let length = usize::from(u16_at(bytes, 2));
             bytes = &bytes[4..];
             let Some(data) = bytes.get(..length) else {
                 return Err(invalid(position, "truncated extra-field data"));
             };
+
             match identifier {
                 0x0007 => {
                     return Err(Error::Unsupported {
@@ -57,14 +60,18 @@ impl<'a> Extras<'a> {
                 }
                 _ => {}
             }
+
             if fields.insert(identifier, data).is_some() {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
+
             if identifier == 0x000d && data.len() < 12 {
                 return Err(invalid(position, "truncated UNIX extra field"));
             }
+
             bytes = &bytes[length..];
         }
+
         Ok(Self { fields })
     }
 
@@ -86,15 +93,18 @@ impl<'a> Extras<'a> {
         if local && uncompressed != compressed {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
+
         expected += usize::from(uncompressed) * 8;
         expected += usize::from(compressed) * 8;
         expected += usize::from(offset == Some(u32::MAX)) * 8;
         expected += usize::from(disk == Some(u16::MAX)) * 4;
+
         let field = self.fields.get(&1).copied();
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
         common.check_zip64(field.is_some(), position)?;
+
         let mut bytes = field.unwrap_or_default();
         let mut take_size = |small: u32| {
             if small == u32::MAX {
@@ -105,9 +115,11 @@ impl<'a> Extras<'a> {
                 u64::from(small)
             }
         };
+
         let uncompressed = take_size(common.uncompressed);
         let compressed = take_size(common.compressed);
         let offset = offset.map(&mut take_size).unwrap_or_default();
+
         let disk = match disk {
             Some(u16::MAX) => u32_at(bytes, 0),
             Some(disk) => u32::from(disk),
@@ -119,6 +131,7 @@ impl<'a> Extras<'a> {
                 feature: "multiple volumes",
             });
         }
+
         Ok(Sizes {
             uncompressed,
             compressed,
@@ -132,6 +145,7 @@ impl<'a> Extras<'a> {
         if flags & 0x0800 == 0 && !name.is_ascii() {
             return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
         }
+
         if name.starts_with('\u{feff}')
             || name.contains(['\0', '\\'])
             || name.starts_with('/')
@@ -139,6 +153,7 @@ impl<'a> Extras<'a> {
         {
             return Err(invalid(position, "invalid ZIP filename"));
         }
+
         if let Some(field) = self.fields.get(&0x7075) {
             let unicode = unicode_field(field, bytes, position)?;
             if unicode != name {
@@ -148,6 +163,7 @@ impl<'a> Extras<'a> {
                 ));
             }
         }
+
         Ok(name.to_owned())
     }
 
@@ -155,9 +171,11 @@ impl<'a> Extras<'a> {
         if flags & 0x0800 != 0 && str::from_utf8(bytes).is_err() {
             return Err(invalid(position, "non-UTF-8 comment with UTF-8 flag"));
         }
+
         if let Some(field) = self.fields.get(&0x6375) {
             unicode_field(field, bytes, position)?;
         }
+
         Ok(())
     }
 
@@ -166,6 +184,7 @@ impl<'a> Extras<'a> {
             let Some(other) = central.fields.get(identifier) else {
                 continue;
             };
+
             // APPNOTE and Info-ZIP define shorter central forms for these
             // fields. ZIP64 values are resolved and compared separately.
             let equal = match identifier {
@@ -181,6 +200,7 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "local and central extra fields disagree"));
             }
         }
+
         Ok(())
     }
 }
@@ -189,16 +209,19 @@ fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<
     if field.len() < 5 || field[0] != 1 {
         return Err(invalid(position, "invalid Unicode extra field"));
     }
+
     let mut crc = Crc::new();
     crc.update(original);
     if u32_at(field, 1) != crc.sum() {
         return Err(invalid(position, "Unicode extra field CRC mismatch"));
     }
+
     let value = str::from_utf8(&field[5..])
         .map_err(|_| invalid(position, "non-UTF-8 Unicode extra field"))?;
     if value.starts_with('\u{feff}') {
         return Err(invalid(position, "Unicode extra field contains a BOM"));
     }
+
     Ok(value)
 }
 

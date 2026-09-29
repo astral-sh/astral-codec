@@ -121,6 +121,7 @@ impl Index {
                 "entry count exceeds directory capacity",
             ));
         }
+
         let mut budget = Budget {
             metadata: end.size,
             output: 0,
@@ -132,6 +133,7 @@ impl Index {
         // detects shared local headers, overlaps, gaps, and unindexed members.
         let mut order: Vec<_> = (0..entries.len()).collect();
         order.sort_unstable_by_key(|&index| entries[index].local_offset);
+
         let mut position = 0;
         for (ordinal, &index) in order.iter().enumerate() {
             if entries[index].local_offset != position {
@@ -140,6 +142,7 @@ impl Index {
                     "overlapping entries or unaccounted bytes",
                 ));
             }
+
             let boundary = order
                 .get(ordinal + 1)
                 .map_or(end.offset, |&next| entries[next].local_offset);
@@ -153,12 +156,14 @@ impl Index {
             .await?;
             tokio::task::yield_now().await;
         }
+
         if position != end.offset {
             return Err(invalid(
                 position,
                 "unaccounted bytes before central directory",
             ));
         }
+
         Ok(Self { entries })
     }
 }
@@ -177,6 +182,7 @@ impl Budget {
 
     fn output(&mut self, size: u64) -> Result<(), Error> {
         check_limit(size, self.limits.member_size, "decoded member bytes")?;
+
         self.output = add(self.output, size)?;
         check_limit(self.output, self.limits.total_size, "total decoded bytes")
     }
@@ -197,11 +203,13 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     if length < 22 {
         return Err(invalid(0, "missing end of central directory"));
     }
+
     // EOCD has a 16-bit comment length. Never scan the payload for signatures.
     let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
     let tail_start = length - tail_size as u64;
     let mut tail = vec![0; tail_size];
     read_at(reader, tail_start, &mut tail, length).await?;
+
     let mut candidate = None;
     for offset in 0..=tail.len() - 22 {
         if u32_at(&tail, offset) == END
@@ -211,6 +219,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
             return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
         }
     }
+
     let offset =
         candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
     let position = tail_start + offset as u64;
@@ -220,6 +229,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
         size: u64::from(u32_at(end, 12)),
         count: u64::from(u16_at(end, 10)),
     };
+
     let mut boundary = position;
     let mut locator = [0; 20];
     let has_locator = if position >= 20 {
@@ -228,6 +238,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     } else {
         false
     };
+
     if has_locator {
         if u32_at(&locator, 4) != 0 || u32_at(&locator, 16) != 1 {
             return Err(Error::Unsupported {
@@ -235,17 +246,20 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
                 feature: "multiple volumes",
             });
         }
+
         boundary = u64_at(&locator, 8);
         let mut zip64 = [0; 56];
         read_at(reader, boundary, &mut zip64, position - 20).await?;
         if u32_at(&zip64, 0) != ZIP64_END {
             return Err(invalid(boundary, "invalid ZIP64 end signature"));
         }
+
         let size = u64_at(&zip64, 4);
         if size < 44 || add(boundary, add(12, size)?)? != position - 20 {
             return Err(invalid(boundary, "invalid ZIP64 end length"));
         }
         check_limit(size, limits.metadata_size, "ZIP64 end bytes")?;
+
         if u16_at(&zip64, 14) >= 62 {
             return Err(Error::Unsupported {
                 position: boundary,
@@ -255,15 +269,18 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
         if u16_at(&zip64, 14) != 45 {
             return Err(invalid(boundary, "invalid ZIP64 extraction version"));
         }
+
         if u32_at(&zip64, 16) != 0 || u32_at(&zip64, 20) != 0 {
             return Err(Error::Unsupported {
                 position: boundary,
                 feature: "multiple volumes",
             });
         }
+
         if u64_at(&zip64, 24) != u64_at(&zip64, 32) {
             return Err(invalid(boundary, "ZIP64 entry counts disagree"));
         }
+
         directory = Directory {
             offset: u64_at(&zip64, 48),
             size: u64_at(&zip64, 40),
@@ -297,6 +314,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
                 return Err(invalid(position, "classic and ZIP64 end records disagree"));
             }
         }
+
         read_extensible_sector(reader, boundary + 56, position - 20).await?;
     } else {
         if u16_at(end, 4) != 0 || u16_at(end, 6) != 0 {
@@ -305,9 +323,11 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
                 feature: "multiple volumes",
             });
         }
+
         if u16_at(end, 8) != u16_at(end, 10) {
             return Err(invalid(position, "entry counts disagree"));
         }
+
         if directory.count == u64::from(u16::MAX)
             || directory.size == u64::from(u32::MAX)
             || directory.offset == u64::from(u32::MAX)
@@ -315,12 +335,14 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
             return Err(invalid(position, "ZIP64 sentinel without locator"));
         }
     }
+
     if add(directory.offset, directory.size)? != boundary {
         return Err(invalid(
             directory.offset,
             "central directory boundary mismatch",
         ));
     }
+
     Ok(directory)
 }
 
@@ -335,12 +357,14 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
         .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
     let mut buffer = vec![0; length];
     read_at(reader, position, &mut buffer, end).await?;
+
     let mut bytes = buffer.as_slice();
     let mut records = 0usize;
     while !bytes.is_empty() {
         if bytes.len() < 6 {
             return Err(invalid(position, "truncated ZIP64 extension header"));
         }
+
         match u16_at(bytes, 0) {
             0x000f | 0x0014..=0x0017 | 0x0019 | 0x9901 => {
                 return Err(Error::Unsupported {
@@ -350,6 +374,7 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             }
             _ => {}
         }
+
         let length = u32_at(bytes, 2) as usize;
         bytes = bytes[6..]
             .get(length..)
@@ -363,6 +388,7 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             tokio::task::yield_now().await;
         }
     }
+
     Ok(())
 }
 
@@ -375,6 +401,7 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     let mut position = directory.offset;
     let mut entries = Vec::new();
     let mut fields = Vec::new();
+
     // The archive extra record is part of the directory's declared size.
     if directory.size >= 8 {
         let mut header = [0; 8];
@@ -384,24 +411,28 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
             if add(position, 8 + length as u64)? > end {
                 return Err(invalid(position, "truncated archive extra record"));
             }
+
             let mut bytes = vec![0; length];
             read_at(reader, position + 8, &mut bytes, end).await?;
             Extras::parse(&bytes, position)?;
             position += 8 + length as u64;
         }
     }
+
     for _ in 0..directory.count {
         let mut header = [0; 46];
         read_at(reader, position, &mut header, end).await?;
         if u32_at(&header, 0) != CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
+
         let common = Common::parse(&header[6..], position)?;
         let name_length = usize::from(u16_at(&header, 28));
         let extra_length = usize::from(u16_at(&header, 30));
         let comment_length = usize::from(u16_at(&header, 32));
         let mut variable = vec![0; name_length + extra_length + comment_length];
         read_at(reader, position + 46, &mut variable, end).await?;
+
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
             common,
@@ -409,19 +440,23 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
             Some(u16_at(&header, 34)),
             position,
         )?;
+
         let path = extras.name(&variable[..name_length], common.flags, position)?;
         extras.comment(
             &variable[name_length + extra_length..],
             common.flags,
             position,
         )?;
+
         budget.output(sizes.uncompressed)?;
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
             return Err(invalid(position, "stored member sizes differ"));
         }
+
         if sizes.uncompressed == 0 && common.crc != 0 {
             return Err(invalid(position, "empty member has nonzero CRC"));
         }
+
         entries.push(Entry {
             path,
             common,
@@ -435,14 +470,17 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
         });
         fields.push(variable[name_length..name_length + extra_length].to_vec());
         position += 46 + variable.len() as u64;
+
         tokio::task::yield_now().await;
     }
+
     if position != end {
         return Err(invalid(
             position,
             "unaccounted directory bytes or digital signature",
         ));
     }
+
     Ok((entries, fields))
 }
 
@@ -459,21 +497,26 @@ async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
     if u32_at(&header, 0) != LOCAL {
         return Err(invalid(position, "invalid local header signature"));
     }
+
     let common = Common::parse(&header[4..], position)?;
     let name_length = usize::from(u16_at(&header, 26));
     let extra_length = usize::from(u16_at(&header, 28));
     budget.metadata(30 + (name_length + extra_length) as u64)?;
+
     let mut variable = vec![0; name_length + extra_length];
     read_at(reader, position + 30, &mut variable, boundary).await?;
+
     let extras = Extras::parse(&variable[name_length..], position)?;
     let sizes = extras.zip64(common, None, None, position)?;
     if extras.name(&variable[..name_length], common.flags, position)? != entry.path {
         return Err(invalid(position, "local and central filenames disagree"));
     }
+
     extras.agree(&Extras::parse(central_extra, position)?, position)?;
     if let Some(data) = extras.unix_data() {
         entry.unix_data = Some(data.to_vec());
     }
+
     if (Common {
         crc: entry.common.crc,
         compressed: entry.common.compressed,
@@ -483,6 +526,7 @@ async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
     {
         return Err(invalid(position, "local and central headers disagree"));
     }
+
     if common.descriptor() {
         if common.crc != 0 || sizes.compressed != 0 || sizes.uncompressed != 0 {
             return Err(invalid(
@@ -496,11 +540,13 @@ async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
     {
         return Err(invalid(position, "local and central CRC or sizes disagree"));
     }
+
     entry.data_offset = add(position, 30 + variable.len() as u64)?;
     let data_end = add(entry.data_offset, entry.compressed_size)?;
     if data_end > boundary {
         return Err(invalid(position, "payload overlaps the next record"));
     }
+
     if common.descriptor() {
         let zip64 = sizes.zip64
             || entry.common.compressed == u32::MAX
@@ -509,6 +555,7 @@ async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
     } else if data_end != boundary {
         return Err(invalid(data_end, "unaccounted bytes after payload"));
     }
+
     Ok(boundary)
 }
 
@@ -524,18 +571,22 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     if length != unsigned_length && length != unsigned_length + 4 {
         return Err(invalid(position, "invalid data descriptor length"));
     }
+
     let mut bytes = [0; 24];
     read_at(reader, position, &mut bytes[..length as usize], end).await?;
+
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
     let offset = if length == unsigned_length + 4 {
         if u32_at(&bytes, 0) != DESCRIPTOR {
             return Err(invalid(position, "invalid data descriptor signature"));
         }
+
         4
     } else {
         0
     };
+
     let crc = u32_at(&bytes, offset);
     let compressed = if zip64 {
         u64_at(&bytes, offset + 4)
@@ -547,11 +598,13 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     } else {
         u64::from(u32_at(&bytes, offset + 8))
     };
+
     if crc != entry.crc32() || compressed != entry.compressed_size || uncompressed != entry.size {
         return Err(invalid(
             position,
             "data descriptor disagrees with central header",
         ));
     }
+
     Ok(())
 }
