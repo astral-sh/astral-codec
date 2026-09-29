@@ -44,6 +44,11 @@ header and data descriptor. It checks the complete physical layout before
 returning an immutable index. Central-directory order and physical order may
 differ.
 
+Central records remain private `CentralEntry` values until their local headers,
+extra fields, and data descriptors have been reconciled. This transition
+consumes each central record and constructs an `Entry` with resolved metadata
+and a checked payload offset.
+
 `zip-codec` projects indexed entries into `archive-trait` members. It owns raw
 DEFLATE processing, decoded-size and CRC checks, payload lending, random access,
 and cursor poisoning. Advancing past an unfinished member drains and validates
