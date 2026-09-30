@@ -13,14 +13,19 @@ use zip_codec::{Archive, DecodeError, Member, MemberPayload, ZipArchive, extract
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+const STORED: &[u8] = include_bytes!("fixtures/stored.zip");
+const DEFLATE: &[u8] = include_bytes!("fixtures/deflate.zip");
+
+// Only interoperability spans the record-layout matrix. Codec workflows below
+// use one fixture per compression method; framing owns the layout edge cases.
 const FIXTURES: &[(&str, &[u8])] = &[
-    ("stored", include_bytes!("fixtures/stored.zip")),
+    ("stored", STORED),
     (
         "stored descriptor",
         include_bytes!("fixtures/stored-descriptor.zip"),
     ),
     ("stored ZIP64", include_bytes!("fixtures/stored-zip64.zip")),
-    ("deflate", include_bytes!("fixtures/deflate.zip")),
+    ("deflate", DEFLATE),
     (
         "deflate descriptor",
         include_bytes!("fixtures/deflate-descriptor.zip"),
@@ -39,10 +44,6 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
     while payload.next_chunk(&mut chunk, 257).await? {
         output.extend_from_slice(&chunk);
     }
-
-    let previous = chunk.clone();
-    assert!(!payload.next_chunk(&mut chunk, 257).await?);
-    assert_eq!(chunk, previous, "EOF preserves the reusable buffer");
 
     Ok(output)
 }
@@ -103,8 +104,52 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
 }
 
 #[tokio::test]
+async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
+    for (label, bytes, index) in [
+        ("stored", STORED, 1),
+        ("deflate", DEFLATE, 1),
+        ("empty", STORED, 3),
+        (
+            "empty DEFLATE stream",
+            include_bytes!("fixtures/empty-deflate.zip").as_slice(),
+            0,
+        ),
+    ] {
+        let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+        let Some(Member::File {
+            size, mut payload, ..
+        }) = archive.member(index).await?
+        else {
+            return Err(io::Error::other("expected file").into());
+        };
+
+        let mut buffer = vec![0xa5; 16];
+        let mut total = 0;
+        loop {
+            let previous = buffer.clone();
+            if !payload.next_chunk(&mut buffer, usize::MAX).await? {
+                assert_eq!(buffer, previous, "first EOF: {label}");
+                break;
+            }
+
+            assert!(!buffer.is_empty(), "{label}");
+            assert!(buffer.len() <= 64 * 1024, "{label}");
+            total += buffer.len() as u64;
+            assert!(total <= size, "{label}");
+        }
+
+        assert_eq!(total, size, "{label}");
+        let previous = buffer.clone();
+        assert!(!payload.next_chunk(&mut buffer, usize::MAX).await?);
+        assert_eq!(buffer, previous, "repeated EOF: {label}");
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
-    for (_, bytes) in FIXTURES {
+    for bytes in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
         assert_eq!(archive.entries().len(), 5);
 
@@ -151,7 +196,7 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
 
 #[tokio::test]
 async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult {
-    for (_, original) in FIXTURES {
+    for original in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(original)).await?;
         archive.validate_all().await?;
         let position = archive.entries()[2]
@@ -309,7 +354,7 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
         let interrupt = Rc::new(Cell::new(false));
         let read_bytes = Rc::new(Cell::new(0));
         let source = Interruptible {
-            source: Cursor::new(FIXTURES[0].1.to_vec()),
+            source: Cursor::new(STORED.to_vec()),
             interrupt: interrupt.clone(),
             read_bytes: read_bytes.clone(),
         };
@@ -421,18 +466,12 @@ async fn projects_appnote_unix_links_and_compares_redundant_targets() -> TestRes
 }
 
 #[tokio::test]
-async fn validates_empty_deflate_streams_in_files_and_directories() -> TestResult {
+async fn validates_empty_deflate_streams_in_directories() -> TestResult {
     let bytes = include_bytes!("fixtures/empty-deflate.zip");
     let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
 
-    let Some(Member::File { payload, .. }) = archive.next_member().await? else {
-        return Err(io::Error::other("expected empty file").into());
-    };
-
-    assert!(contents(payload).await?.is_empty());
-
     assert!(matches!(
-        archive.next_member().await?,
+        archive.member(1).await?,
         Some(Member::Directory { .. })
     ));
     assert!(archive.next_member().await?.is_none());
@@ -456,7 +495,7 @@ async fn validates_empty_deflate_streams_in_files_and_directories() -> TestResul
 
 #[tokio::test]
 async fn local_metadata_errors_poison_selection_and_full_validation() -> TestResult {
-    let original = FIXTURES[0].1;
+    let original = STORED;
     let archive = ZipArchive::open(Cursor::new(original)).await?;
     let mut corrupt = original.to_vec();
     corrupt[archive.entries()[1].position() as usize + 30] ^= 1;

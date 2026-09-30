@@ -6,7 +6,7 @@ use crate::{
     CompressionMethod, Error, add,
     extra::{Extras, ResolvedExtras},
     invalid,
-    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, read_at, u16_at, u32_at, u64_at},
+    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, u16_at, u32_at, u64_at},
 };
 
 use super::Budget;
@@ -182,7 +182,7 @@ impl DirectoryEntry {
         budget: &mut Budget,
     ) -> Result<(Self, u64), Error> {
         let mut header = [0; 46];
-        read_at(reader, position, &mut header, end).await?;
+        reader.read_at(position, &mut header, end).await?;
         if u32_at(&header, 0) != CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
@@ -192,7 +192,7 @@ impl DirectoryEntry {
         let extra_length = usize::from(u16_at(&header, 30));
         let comment_length = usize::from(u16_at(&header, 32));
         let mut variable = vec![0; name_length + extra_length + comment_length];
-        read_at(reader, position + 46, &mut variable, end).await?;
+        reader.read_at(position + 46, &mut variable, end).await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
@@ -216,7 +216,7 @@ impl DirectoryEntry {
 
         let entry = Self {
             metadata: Metadata {
-                path,
+                path: path.to_owned(),
                 common,
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
@@ -241,7 +241,7 @@ impl DirectoryEntry {
         let boundary = self.boundary;
         let position = metadata.local_offset;
         let mut header = [0; 30];
-        read_at(reader, position, &mut header, boundary).await?;
+        reader.read_at(position, &mut header, boundary).await?;
         if u32_at(&header, 0) != LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
@@ -252,7 +252,9 @@ impl DirectoryEntry {
         budget.metadata(30 + (name_length + extra_length) as u64)?;
 
         let mut variable = vec![0; name_length + extra_length];
-        read_at(reader, position + 30, &mut variable, boundary).await?;
+        reader
+            .read_at(position + 30, &mut variable, boundary)
+            .await?;
 
         let extras = Extras::parse(&variable[name_length..], position)?;
         let sizes = extras.zip64(common, None, None, position)?;
@@ -322,7 +324,9 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     }
 
     let mut bytes = [0; 24];
-    read_at(reader, position, &mut bytes[..length as usize], end).await?;
+    reader
+        .read_at(position, &mut bytes[..length as usize], end)
+        .await?;
 
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
