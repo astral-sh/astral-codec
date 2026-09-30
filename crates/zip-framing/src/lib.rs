@@ -17,7 +17,7 @@ use std::io;
 
 use thiserror::Error;
 
-pub use index::{DirectoryEntry, Entry, Index};
+pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 
 /// A supported ZIP compression method.
 ///
@@ -64,7 +64,8 @@ pub struct Limits {
     pub archive_size: u64,
     /// Maximum number of members (default: 100,000).
     pub entries: usize,
-    /// Total central and resolved local metadata bytes (default: 64 MiB).
+    /// Total central directory, resolved local, and ZIP64 end record metadata
+    /// bytes (default: 64 MiB).
     pub metadata_size: u64,
     /// Maximum decoded size of one member (default: 8 GiB).
     pub member_size: u64,
@@ -123,12 +124,4 @@ pub(crate) fn invalid(position: u64, reason: &'static str) -> Error {
 pub(crate) fn add(left: u64, right: u64) -> Result<u64, Error> {
     left.checked_add(right)
         .ok_or_else(|| invalid(left, "offset or size overflow"))
-}
-
-pub(crate) fn check_limit(value: u64, limit: u64, resource: &'static str) -> Result<(), Error> {
-    if value > limit {
-        return Err(Error::Limit { resource, limit });
-    }
-
-    Ok(())
 }

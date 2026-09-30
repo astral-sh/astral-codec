@@ -35,6 +35,22 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         Ok(self.inner.seek(SeekFrom::End(0)).await?)
     }
 
+    /// Checks the requested span before allocating and reading its bytes.
+    pub(crate) async fn read_vec(
+        &mut self,
+        position: u64,
+        length: usize,
+        end: u64,
+    ) -> Result<Vec<u8>, Error> {
+        if add(position, length as u64)? > end {
+            return Err(invalid(position, "record extends beyond its container"));
+        }
+
+        let mut bytes = vec![0; length];
+        self.read_at(position, &mut bytes, end).await?;
+        Ok(bytes)
+    }
+
     // Every read, including read-ahead, is bounded by its containing record span.
     pub(crate) async fn read_at(
         &mut self,
@@ -73,16 +89,25 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     }
 }
 
-pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
+/// Extracts a field from a fixed-size array, checking its bounds at compile time.
+pub(crate) fn array_at<const OFFSET: usize, const WIDTH: usize, const LEN: usize>(
+    bytes: &[u8; LEN],
+) -> [u8; WIDTH] {
+    const { assert!(OFFSET <= LEN && WIDTH <= LEN - OFFSET) };
+    std::array::from_fn(|index| bytes[OFFSET + index])
 }
 
-pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from(u16_at(bytes, offset)) | (u32::from(u16_at(bytes, offset + 2)) << 16)
-}
-
-pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from(u32_at(bytes, offset)) | (u64::from(u32_at(bytes, offset + 4)) << 32)
+/// Extracts a fixed-size field after checking its offset and length.
+pub(crate) fn bytes_at<const N: usize>(
+    bytes: &[u8],
+    offset: usize,
+    position: u64,
+) -> Result<[u8; N], Error> {
+    bytes
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .ok_or_else(|| invalid(position, "truncated integer field"))
 }
 
 pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str, Error> {
@@ -102,22 +127,48 @@ pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str
     Ok(name)
 }
 
+/// Common fixed-length components of both local file and central directory entries.
+///
+/// TODO(ww): Do more type-state modeling here, e.g. [`Common::compressed`] should probably
+/// be an enum with `{ Size(size), SeeZip64, SeeDescriptor }` and [`Common::flags`] should probably be
+/// some kind of bitflags enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Common {
+    /// The minimum ZIP specification version needed to extract this member.
     pub(crate) version: u16,
+    /// The member's general-purpose bit flags.
     pub(crate) flags: u16,
+    /// The member's compression method.
     pub(crate) method: CompressionMethod,
+    /// The member's last-modified time, in MS-DOS format.
+    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
     pub(crate) time: u16,
+    /// The member's last-modified date, in MS-DOS format.
+    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
     pub(crate) date: u16,
+    /// The CRC-32 of the member's uncompressed data.
+    ///
+    /// This will be `0` for a local file entry whose [`Common::flags`] indicate that a data descriptor
+    /// conveys the CRC-32 instead.
     pub(crate) crc: u32,
+    /// The member's size in the ZIP modulo any headers and (optional) data descriptor.
+    ///
+    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
+    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
+    /// [`Common::flags`] indicates that a data descriptor conveys the compressed size instead.
     pub(crate) compressed: u32,
+    /// The member's true (i.e. uncompressed) size.
+    ///
+    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
+    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
+    /// [`Common::flags`] indicates that a data descriptor conveys the uncompressed size instead.
     pub(crate) uncompressed: u32,
 }
 
 impl Common {
-    // Call only on the fixed, length-checked header starting at version-needed.
-    pub(crate) fn parse(bytes: &[u8], position: u64) -> Result<Self, Error> {
-        let flags = u16_at(bytes, 2);
+    /// Parse a local file or central directory [`Common`] from the given bytes.
+    pub(crate) fn parse(bytes: &[u8; 22], position: u64) -> Result<Self, Error> {
+        let flags = u16::from_le_bytes(array_at::<2, 2, _>(bytes));
         if flags & 0x2041 != 0 {
             return Err(Error::Unsupported {
                 position,
@@ -132,7 +183,8 @@ impl Common {
             });
         }
 
-        let method = CompressionMethod::parse(u16_at(bytes, 4), position)?;
+        let method =
+            CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
         let allowed = 0x0808
             | if method == CompressionMethod::Deflate {
                 6
@@ -146,7 +198,7 @@ impl Common {
             ));
         }
 
-        let version = u16_at(bytes, 0);
+        let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
         if version > 45 {
             return Err(Error::Unsupported {
                 position,
@@ -168,11 +220,11 @@ impl Common {
             version,
             flags,
             method,
-            time: u16_at(bytes, 6),
-            date: u16_at(bytes, 8),
-            crc: u32_at(bytes, 10),
-            compressed: u32_at(bytes, 14),
-            uncompressed: u32_at(bytes, 18),
+            time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
+            date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
+            crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
+            compressed: u32::from_le_bytes(array_at::<14, 4, _>(bytes)),
+            uncompressed: u32::from_le_bytes(array_at::<18, 4, _>(bytes)),
         })
     }
 
@@ -184,6 +236,90 @@ impl Common {
         if zip64 && self.version < 45 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::Cursor;
+
+    use super::{Common, RecordReader, array_at, bytes_at};
+    use crate::{CompressionMethod, Error};
+
+    #[tokio::test]
+    async fn bounds_owned_reads_before_allocation() -> Result<(), Error> {
+        let mut source = Cursor::new([1, 2, 3, 4]);
+        let mut reader = RecordReader::new(&mut source, 4);
+
+        // An allocation of this size would fail before any I/O could occur.
+        assert!(matches!(
+            reader.read_vec(0, usize::MAX, 4).await,
+            Err(Error::Invalid {
+                position: 0,
+                reason: "record extends beyond its container",
+            })
+        ));
+        assert_eq!(reader.read_vec(1, 2, 4).await?, [2, 3]);
+
+        Ok(())
+    }
+
+    #[test]
+    fn parses_common_header_fields() -> Result<(), Error> {
+        let bytes = [
+            20, 0, 0x0a, 0x08, 8, 0, 0x34, 0x12, 0x78, 0x56, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+        ];
+        assert_eq!(
+            Common::parse(&bytes, 42)?,
+            Common {
+                version: 20,
+                flags: 0x080a,
+                method: CompressionMethod::Deflate,
+                time: 0x1234,
+                date: 0x5678,
+                crc: 0x4433_2211,
+                compressed: 0x8877_6655,
+                uncompressed: 0xccbb_aa99,
+            }
+        );
+
+        Ok(())
+    }
+
+    #[test]
+    fn extracts_fields_from_fixed_arrays() {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        assert_eq!(array_at::<0, 8, _>(&bytes), bytes);
+        assert_eq!(array_at::<1, 2, _>(&bytes), [2, 3]);
+        assert_eq!(array_at::<4, 4, _>(&bytes), [5, 6, 7, 8]);
+        assert_eq!(array_at::<8, 0, _>(&bytes), []);
+    }
+
+    #[test]
+    fn reads_fixed_width_fields_and_rejects_out_of_bounds_offsets() -> Result<(), Error> {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        assert_eq!(u16::from_le_bytes(bytes_at(&bytes, 1, 42)?), 0x0302);
+        assert_eq!(u32::from_le_bytes(bytes_at(&bytes, 2, 42)?), 0x0605_0403);
+        assert_eq!(
+            u64::from_le_bytes(bytes_at(&bytes, 0, 42)?),
+            0x0807_0605_0403_0201
+        );
+
+        for offset in [7, 8, usize::MAX] {
+            assert!(matches!(
+                bytes_at::<2>(&bytes, offset, 42),
+                Err(Error::Invalid {
+                    position: 42,
+                    reason: "truncated integer field"
+                })
+            ));
+        }
+        assert!(bytes_at::<8>(&bytes, 1, 42).is_err());
 
         Ok(())
     }
