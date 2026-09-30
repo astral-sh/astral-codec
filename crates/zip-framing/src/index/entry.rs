@@ -3,7 +3,7 @@ use std::ops::{Deref, Range};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    CompressionMethod, EntryKind, Error, add,
+    CompressionMethod, EntryKind, Error, HostSystem, add,
     constants::{signature, size},
     extra::{Extras, ResolvedExtras},
     invalid,
@@ -144,9 +144,11 @@ impl DirectoryEntry {
         self.metadata.local_offset
     }
 
-    /// Returns the host-system identifier for the external attributes.
-    pub fn host_system(&self) -> u8 {
-        (self.metadata.made_by >> 8) as u8
+    /// Returns the host-system interpretation of the external attributes.
+    ///
+    /// Unrecognized identifiers are preserved as [`HostSystem::Unknown`].
+    pub fn host_system(&self) -> HostSystem {
+        HostSystem::from((self.metadata.made_by >> 8) as u8)
     }
 
     /// Returns the raw external file attributes, whose meaning depends on the host.

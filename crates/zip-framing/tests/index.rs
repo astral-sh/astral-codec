@@ -5,7 +5,8 @@ use std::{error::Error, io::Cursor};
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, Index, IndexedEntry, Limits,
+    CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, HostSystem, Index,
+    IndexedEntry, Limits,
     write::{EntryKind as WriteEntryKind, MemberHeader, end_records},
 };
 
@@ -72,7 +73,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let index = read_validated(&mut reader, Limits::default()).await?;
     let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
     assert_eq!(entry.directory().path(), "n".repeat(258));
-    assert_eq!(entry.directory().host_system(), 0x12);
+    assert_eq!(entry.directory().host_system(), HostSystem::Os400);
     assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
     assert_eq!(entry.data_offset(), 30 + 258 + 261);
     assert_eq!(entry.directory().size(), 7);

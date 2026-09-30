@@ -1,6 +1,6 @@
 use crate::{
-    DirectoryEntry, Error,
-    constants::{attributes, host, version},
+    DirectoryEntry, Error, HostSystem,
+    constants::{attributes, version},
     invalid,
 };
 
@@ -136,19 +136,19 @@ pub(crate) struct ExternalAttributes {
 }
 
 impl ExternalAttributes {
-    pub(crate) fn new(host_system: u8, raw: u32) -> Self {
+    pub(crate) fn new(host_system: HostSystem, raw: u32) -> Self {
         let has_dos_attributes = matches!(
             host_system,
-            host::MS_DOS
-                | host::UNIX
-                | host::OS2_HPFS
-                | host::WINDOWS_NTFS
-                | host::VFAT
-                | host::OS_X
+            HostSystem::MsDos
+                | HostSystem::Unix
+                | HostSystem::Os2Hpfs
+                | HostSystem::WindowsNtfs
+                | HostSystem::Vfat
+                | HostSystem::Darwin
         );
 
         Self {
-            unix_mode: if matches!(host_system, host::UNIX | host::OS_X) {
+            unix_mode: if matches!(host_system, HostSystem::Unix | HostSystem::Darwin) {
                 (raw >> attributes::UNIX_MODE_SHIFT) as u16
             } else {
                 0
@@ -161,31 +161,36 @@ impl ExternalAttributes {
 
 #[cfg(test)]
 mod tests {
+    use crate::HostSystem;
+
     use super::ExternalAttributes;
 
     #[test]
     fn interprets_external_attributes_according_to_the_host() {
         for (host, unix_mode, has_dos_attributes) in [
-            (0, 0, true),
-            (3, 0o100755, true),
-            (6, 0, true),
-            (10, 0, true),
-            (14, 0, true),
-            (19, 0o100755, true),
-            (1, 0, false),
-            (255, 0, false),
+            (HostSystem::MsDos, 0, true),
+            (HostSystem::Unix, 0o100755, true),
+            (HostSystem::Os2Hpfs, 0, true),
+            (HostSystem::WindowsNtfs, 0, true),
+            (HostSystem::Vfat, 0, true),
+            (HostSystem::Darwin, 0o100755, true),
+            (HostSystem::Amiga, 0, false),
+            (HostSystem::Unknown(255), 0, false),
         ] {
             let attributes = ExternalAttributes::new(host, (0o100755 << 16) | 0x10);
-            assert_eq!(attributes.unix_mode, unix_mode, "host {host}");
-            assert_eq!(attributes.dos_directory, has_dos_attributes, "host {host}");
-            assert!(!attributes.dos_volume_label, "host {host}");
+            assert_eq!(attributes.unix_mode, unix_mode, "host {host:?}");
+            assert_eq!(
+                attributes.dos_directory, has_dos_attributes,
+                "host {host:?}"
+            );
+            assert!(!attributes.dos_volume_label, "host {host:?}");
 
             let attributes = ExternalAttributes::new(host, 0x08);
-            assert_eq!(attributes.unix_mode, 0, "host {host}");
-            assert!(!attributes.dos_directory, "host {host}");
+            assert_eq!(attributes.unix_mode, 0, "host {host:?}");
+            assert!(!attributes.dos_directory, "host {host:?}");
             assert_eq!(
                 attributes.dos_volume_label, has_dos_attributes,
-                "host {host}"
+                "host {host:?}"
             );
         }
     }

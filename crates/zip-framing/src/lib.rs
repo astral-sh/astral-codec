@@ -11,6 +11,7 @@
 
 pub mod constants;
 mod extra;
+mod host;
 mod index;
 mod kind;
 mod record;
@@ -20,6 +21,7 @@ use std::io;
 
 use thiserror::Error;
 
+pub use host::HostSystem;
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::EntryKind;
 

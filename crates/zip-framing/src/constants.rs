@@ -129,6 +129,8 @@ pub mod version {
 }
 
 /// Host-system identifiers in the high byte of "version made by" (APPNOTE section 4.4.2).
+///
+/// See [`crate::HostSystem`] for their typed interpretation.
 pub mod host {
     /// MS-DOS and OS/2 FAT filesystems.
     pub const MS_DOS: u8 = 0;

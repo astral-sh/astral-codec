@@ -2,7 +2,7 @@ use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
 use zip_framing::{
-    CompressionMethod, Error as FrameError, Index, Limits,
+    CompressionMethod, Error as FrameError, HostSystem, Index, Limits,
     write::{EntryKind, MemberHeader, end_records},
 };
 
@@ -138,6 +138,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
 
     let entry = index.entry(&mut source, 0).await?.ok_or("missing member")?;
     assert_eq!(entry.directory().path(), "café");
+    assert_eq!(entry.directory().host_system(), HostSystem::Unix);
     assert_eq!(entry.directory().version_needed(), 45);
     assert_eq!(entry.data_offset(), data_offset as u64);
     assert_eq!(entry.directory().size(), payload.len() as u64);
