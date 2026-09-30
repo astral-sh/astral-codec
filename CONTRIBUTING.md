@@ -36,6 +36,44 @@ headers, extensions, data, etc.) should occur in the physical layer, while a
 change to source traversal, path containment, or filesystem behavior belongs in
 `archive-trait`.
 
+### ZIP archives
+
+ZIP reading starts from a seekable source. `zip-framing` finds the end records,
+resolves ZIP64 fields, and reads the central directory through a bounded window.
+The index preserves directory order and derives each member's physical boundary
+from sorted local offsets, without fetching local records during opening.
+
+`DirectoryEntry` exposes declared metadata. `Index::entry` checks a selected
+local header, extras, descriptor, and exact record extent before constructing a
+borrowed `Entry`. The resolved local metadata is cached only after every check
+succeeds; payload offsets and reconciled UNIX extras are available only through
+that checked type. `Index::validate_all` checks all members without decoding
+payloads. Local metadata budgets are charged once per successful resolution.
+
+`zip-codec` resolves entries before projecting them into `archive-trait` members.
+It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
+random access, and cursor poisoning. Advancing past an unfinished member drains
+and validates its payload. `ZipArchive::validate_all` also checks member kinds.
+`reader_mut().await` drains an active payload before lending the immutable source
+for caller-controlled prefetching or seeking. Filesystem extraction remains in
+`archive-trait`.
+
+Decoder I/O runs through a private operation guard. The archive remains poisoned
+unless the operation commits after all fallible work succeeds. Member preparation
+returns owned metadata before attaching a payload that borrows the archive.
+
+Writing follows the same separation. `archive-trait::Builder` handles names,
+collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
+and retains bounded central-directory metadata. `zip-framing::write` serializes
+UTF-8 ZIP64 headers and end records. ZIP output requires seeking so the encoder
+can fill in each local header after streaming its payload, without descriptors.
+
+Test record-layout behavior in `zip-framing/tests` and compression, projection,
+or builder behavior in `zip-codec/tests`. The checked-in Python-generated ZIP
+fixtures can be reproduced with
+`python3 crates/zip-codec/tests/fixtures/generate.py`; Python is not required to
+run the Rust tests.
+
 ## Formatting and linting
 
 Linting and formatting:
