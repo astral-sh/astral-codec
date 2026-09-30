@@ -45,9 +45,10 @@ resolves ZIP64 fields, and reads the central directory through a bounded window.
 The index preserves directory order and derives each member's physical boundary
 from sorted local offsets, without fetching local records during opening.
 
-`DirectoryEntry` exposes declared metadata. `Index::entry` checks a selected
+`IndexedEntry` owns a `DirectoryEntry` with declared metadata and tracks the
+derived record boundary and cached resolution. `Index::entry` checks a selected
 local header, extras, descriptor, and exact record extent before constructing a
-borrowed `Entry`. The resolved local metadata is cached only after every check
+borrowed `Entry`. The resolved member data is cached only after every check
 succeeds; payload offsets and reconciled UNIX extras are available only through
 that checked type. `Index::validate_all` checks all members without decoding
 payloads. Local metadata budgets are charged once per successful resolution.

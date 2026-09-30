@@ -51,16 +51,16 @@ struct Metadata {
 /// have been reconciled with the directory.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a> {
-    /// The member's central directory entry.
-    directory: &'a DirectoryEntry,
-    /// The member's local file entry.
-    local: &'a LocalEntry,
+    /// The indexed member.
+    indexed: &'a IndexedEntry,
+    /// The reconciled member state.
+    resolved: &'a ResolvedMember,
 }
 
 impl Entry<'_> {
     /// Returns the absolute position of the encoded payload.
     pub fn data_offset(&self) -> u64 {
-        self.local.data_offset
+        self.resolved.data_offset
     }
 
     /// Returns reconciled APPNOTE UNIX data for links or device numbers.
@@ -68,41 +68,31 @@ impl Entry<'_> {
     /// The timestamp/ownership prefix is excluded. Interpret this data with
     /// the external Unix file type.
     pub fn unix_extra_data(&self) -> Option<&[u8]> {
-        self.local.extras.unix_data()
+        self.resolved.extras.unix_data()
     }
 }
 
 impl Deref for Entry<'_> {
-    type Target = DirectoryEntry;
+    type Target = IndexedEntry;
 
     fn deref(&self) -> &Self::Target {
-        self.directory
+        self.indexed
     }
 }
 
 #[derive(Debug)]
-struct LocalEntry {
+struct ResolvedMember {
     data_offset: u64,
     extras: ResolvedExtras,
 }
 
-/// An indexed ZIP member and its central directory metadata.
-///
-/// The member's local records are checked on demand by [`super::Index::entry`]
-/// or [`super::Index::validate_all`]. Successful checks are cached and exposed
-/// through [`Self::resolved`].
+/// Metadata retained from a member's central directory entry.
 #[derive(Debug)]
 pub struct DirectoryEntry {
     /// Central directory entry metadata.
     metadata: Metadata,
     /// Raw extra data for the central directory entry.
     extra: Vec<u8>,
-    /// The end offset for the member's full local file entry state,
-    /// including the local header itself, filename, extras, data,
-    /// and optional data descriptor.
-    boundary: u64,
-    // TODO(ww): This seems wrong.
-    local: Option<LocalEntry>,
 }
 
 impl DirectoryEntry {
@@ -150,44 +140,72 @@ impl DirectoryEntry {
     pub fn version_needed(&self) -> u16 {
         self.metadata.common.version
     }
+}
+
+/// An indexed ZIP member and its central directory entry.
+///
+/// Its directory metadata is available through [`Self::directory`].
+/// The member's local records are checked on demand by [`super::Index::entry`]
+/// or [`super::Index::validate_all`]. Successful checks are cached and exposed
+/// through [`Self::resolved`].
+#[derive(Debug)]
+pub struct IndexedEntry {
+    directory: DirectoryEntry,
+    /// The exclusive end offset of the span assigned to the local header,
+    /// filename, extras, data, and optional data descriptor.
+    boundary: u64,
+    resolved: Option<ResolvedMember>,
+}
+
+impl IndexedEntry {
+    /// Returns the member's central directory entry.
+    pub fn directory(&self) -> &DirectoryEntry {
+        &self.directory
+    }
 
     /// Returns the span assigned to this member by the directory's offsets.
     ///
     /// This range can be prefetched before selection. Its local records have
     /// not necessarily been checked, and it includes headers and any descriptor.
     pub fn record_range(&self) -> Range<u64> {
-        self.position()..self.boundary
+        self.directory.position()..self.boundary
     }
 
     /// Returns the previously checked entry, without performing I/O.
     pub fn resolved(&self) -> Option<Entry<'_>> {
-        self.local.as_ref().map(|local| Entry {
-            directory: self,
-            local,
+        self.resolved.as_ref().map(|resolved| Entry {
+            indexed: self,
+            resolved,
         })
     }
 
-    pub(super) fn set_boundary(&mut self, boundary: u64) -> Result<(), Error> {
+    pub(super) fn new(directory: DirectoryEntry, boundary: u64) -> Result<Self, Error> {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
-        let minimum = add(30 + self.metadata.path.len() as u64, self.compressed_size())?;
+        let minimum = add(
+            30 + directory.metadata.path.len() as u64,
+            directory.compressed_size(),
+        )?;
         let minimum = add(
             minimum,
-            if self.metadata.common.descriptor() {
+            if directory.metadata.common.descriptor() {
                 12
             } else {
                 0
             },
         )?;
-        if add(self.position(), minimum)? > boundary {
+        if add(directory.position(), minimum)? > boundary {
             return Err(invalid(
-                self.position(),
+                directory.position(),
                 "member cannot fit before the next record",
             ));
         }
 
-        self.boundary = boundary;
-        Ok(())
+        Ok(Self {
+            directory,
+            boundary,
+            resolved: None,
+        })
     }
 
     pub(super) async fn resolve<R: AsyncRead + AsyncSeek + Unpin>(
@@ -195,20 +213,22 @@ impl DirectoryEntry {
         reader: &mut R,
         budget: &mut Budget,
     ) -> Result<Entry<'_>, Error> {
-        if self.local.is_none() {
+        if self.resolved.is_none() {
             let mut buffered = RecordReader::new(reader, 4096);
             // Failed or cancelled resolution must not charge the same metadata
             // again on retry. Publish the cache and budget only after success.
             let mut pending_budget = *budget;
-            let local = self.read_local(&mut buffered, &mut pending_budget).await?;
-            self.local = Some(local);
+            let resolved = self.read_local(&mut buffered, &mut pending_budget).await?;
+            self.resolved = Some(resolved);
             *budget = pending_budget;
         }
 
         self.resolved()
-            .ok_or_else(|| invalid(self.position(), "missing resolved local record"))
+            .ok_or_else(|| invalid(self.directory.position(), "missing resolved local record"))
     }
+}
 
+impl DirectoryEntry {
     pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         position: u64,
@@ -259,19 +279,19 @@ impl DirectoryEntry {
                 attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
             extra: variable[name_length..name_length + extra_length].to_vec(),
-            boundary: end,
-            local: None,
         };
 
         Ok((entry, position + 46 + variable.len() as u64))
     }
+}
 
+impl IndexedEntry {
     async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-    ) -> Result<LocalEntry, Error> {
-        let metadata = &self.metadata;
+    ) -> Result<ResolvedMember, Error> {
+        let metadata = &self.directory.metadata;
         let boundary = self.boundary;
         let position = metadata.local_offset;
         let mut header = [0; 30];
@@ -296,7 +316,7 @@ impl DirectoryEntry {
             return Err(invalid(position, "local and central filenames disagree"));
         }
 
-        let extras = extras.resolve(Extras::parse(&self.extra, position)?, position)?;
+        let extras = extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;
 
         if (Common {
             crc: metadata.common.crc,
@@ -337,7 +357,7 @@ impl DirectoryEntry {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
 
-        Ok(LocalEntry {
+        Ok(ResolvedMember {
             data_offset,
             extras,
         })

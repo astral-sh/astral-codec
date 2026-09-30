@@ -4,7 +4,7 @@ use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
-use zip_framing::{Error as FrameError, Index, Limits};
+use zip_framing::{DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits};
 
 use support::{Fixture, Observed, Sparse, field, set16, set32};
 
@@ -38,10 +38,10 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
             assert_eq!(index.entries().len(), 1);
 
             let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
-            assert_eq!(entry.path(), "file");
-            assert_eq!(entry.size(), 7);
-            assert_eq!(entry.compressed_size(), 7);
-            assert_eq!(entry.crc32(), 0x0807_4b50);
+            assert_eq!(entry.directory().path(), "file");
+            assert_eq!(entry.directory().size(), 7);
+            assert_eq!(entry.directory().compressed_size(), 7);
+            assert_eq!(entry.directory().crc32(), 0x0807_4b50);
             assert_eq!(
                 &archive.bytes[entry.data_offset() as usize..archive.descriptor],
                 b"payload"
@@ -69,11 +69,11 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let mut reader = Cursor::new(archive.bytes);
     let index = read_validated(&mut reader, Limits::default()).await?;
     let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
-    assert_eq!(entry.path(), "n".repeat(258));
-    assert_eq!(entry.host_system(), 0x12);
-    assert_eq!(entry.external_attributes(), 0x1234_5678);
+    assert_eq!(entry.directory().path(), "n".repeat(258));
+    assert_eq!(entry.directory().host_system(), 0x12);
+    assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
     assert_eq!(entry.data_offset(), 30 + 258 + 261);
-    assert_eq!(entry.size(), 7);
+    assert_eq!(entry.directory().size(), 7);
 
     Ok(())
 }
@@ -97,7 +97,7 @@ async fn reads_and_bounds_archive_extra_record() -> TestResult {
     );
 
     let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
-    assert_eq!(index.entries()[0].path(), "file");
+    assert_eq!(index.entries()[0].directory().path(), "file");
 
     set32(&mut archive.bytes, archive.central + 4, u32::MAX);
     assert!(matches!(
@@ -202,6 +202,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
             .await?
             .entries()[0]
+            .directory()
             .path(),
         "café"
     );
@@ -513,17 +514,40 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     set32(&mut bytes, end + 12, (end - central) as u32);
     set32(&mut bytes, end + 16, central as u32);
 
-    let index = read_validated(&mut Cursor::new(&bytes), Limits::default()).await?;
+    let mut source = Cursor::new(&bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+
+    let entries: &[IndexedEntry] = index.entries();
+    let directory: &DirectoryEntry = entries[0].directory();
+    assert_eq!(directory.path(), "next");
+    assert_eq!(
+        entries[0].record_range(),
+        first.central as u64..central as u64
+    );
+    assert_eq!(entries[1].record_range(), 0..first.central as u64);
+    assert!(entries.iter().all(|entry| entry.resolved().is_none()));
+
+    let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
+    assert_eq!(entry.directory().path(), "next");
+    assert_eq!(entry.record_range(), first.central as u64..central as u64);
+    assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
+    assert!(index.entries()[0].resolved().is_some());
+    assert!(index.entries()[1].resolved().is_none());
+
+    index.validate_all(&mut source).await?;
 
     assert_eq!(
         index
             .entries()
             .iter()
-            .map(|entry| entry.path())
+            .map(|entry| entry.directory().path())
             .collect::<Vec<_>>(),
         ["next", "file"]
     );
-    assert_eq!(index.entries()[0].position(), first.central as u64);
+    assert_eq!(
+        index.entries()[0].directory().position(),
+        first.central as u64
+    );
     assert_eq!(
         index.entries()[0]
             .resolved()
@@ -531,7 +555,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
             .unix_extra_data(),
         Some(b"target".as_slice())
     );
-    assert_eq!(index.entries()[1].position(), 0);
+    assert_eq!(index.entries()[1].directory().position(), 0);
     assert_eq!(
         index.entries()[1]
             .resolved()
@@ -599,8 +623,8 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
     };
 
     let index = read_validated(&mut source, Limits::default()).await?;
-    assert_eq!(index.entries()[0].size(), size);
-    assert_eq!(index.entries()[0].compressed_size(), size);
+    assert_eq!(index.entries()[0].directory().size(), size);
+    assert_eq!(index.entries()[0].directory().compressed_size(), size);
     assert!(source.bytes_read < 70_000);
 
     Ok(())
@@ -733,7 +757,7 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
 
     source.reads.clear();
     let entry = index.entry(&mut source, 7).await?.ok_or("missing member")?;
-    assert_eq!(entry.path(), "file-7");
+    assert_eq!(entry.directory().path(), "file-7");
     assert_eq!(source.reads.len(), 1);
     assert_eq!(source.reads[0], positions[7]..positions[8]);
     assert_eq!(entry.record_range(), positions[7]..positions[8]);

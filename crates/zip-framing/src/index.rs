@@ -11,18 +11,18 @@ use crate::{
 
 mod entry;
 
-pub use entry::{DirectoryEntry, Entry};
+pub use entry::{DirectoryEntry, Entry, IndexedEntry};
 
 /// A central-directory index with lazily checked local records.
 #[derive(Debug)]
 pub struct Index {
-    entries: Vec<DirectoryEntry>,
+    entries: Vec<IndexedEntry>,
     budget: Budget,
 }
 
 impl Index {
-    /// Borrows directory metadata, without fetching local records or payloads.
-    pub fn entries(&self) -> &[DirectoryEntry] {
+    /// Borrows indexed members, without fetching local records or payloads.
+    pub fn entries(&self) -> &[IndexedEntry] {
         &self.entries
     }
 
@@ -52,7 +52,7 @@ impl Index {
             output: 0,
             limits,
         };
-        let mut entries = read_central(&mut buffered, &end, &mut budget).await?;
+        let entries = read_central(&mut buffered, &end, &mut budget).await?;
 
         // Preserve directory order while assigning boundaries in physical order.
         // Only local reads can establish exact coverage inside these spans.
@@ -66,12 +66,17 @@ impl Index {
             return Err(invalid(0, "unaccounted bytes before the first member"));
         }
 
+        let mut boundaries = vec![end.offset; entries.len()];
         for (ordinal, &index) in order.iter().enumerate() {
-            let boundary = order
+            boundaries[index] = order
                 .get(ordinal + 1)
                 .map_or(end.offset, |&next| entries[next].position());
-            entries[index].set_boundary(boundary)?;
         }
+        let entries = entries
+            .into_iter()
+            .zip(boundaries)
+            .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
+            .collect::<Result<_, _>>()?;
 
         Ok(Self { entries, budget })
     }

@@ -17,7 +17,7 @@ use std::io;
 
 use thiserror::Error;
 
-pub use index::{DirectoryEntry, Entry, Index};
+pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 
 /// A supported ZIP compression method.
 ///
