@@ -24,23 +24,24 @@ pub(crate) struct Payload {
 
 impl Payload {
     pub(crate) fn new(entry: &Entry<'_>) -> Result<Self, DecodeError> {
-        let decoder = match entry.method() {
+        let directory = entry.directory();
+        let decoder = match directory.method() {
             CompressionMethod::Stored => None,
             CompressionMethod::Deflate => Some(Decompress::new(false)),
             _ => {
                 return Err(DecodeError::Unsupported {
-                    position: entry.position(),
+                    position: directory.position(),
                     feature: "compression method",
                 });
             }
         };
 
         Ok(Self {
-            position: entry.position(),
-            expected_crc: entry.crc32(),
+            position: directory.position(),
+            expected_crc: directory.crc32(),
             crc: Crc::new(),
-            encoded_remaining: entry.compressed_size(),
-            decoded_remaining: entry.size(),
+            encoded_remaining: directory.compressed_size(),
+            decoded_remaining: directory.size(),
             decoder,
             input: vec![0; CHUNK_SIZE],
             output: Vec::new(),

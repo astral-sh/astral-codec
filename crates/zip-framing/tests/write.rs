@@ -117,11 +117,11 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     assert_eq!(index.entries().len(), 1);
 
     let entry = index.entry(&mut source, 0).await?.ok_or("missing member")?;
-    assert_eq!(entry.path(), "café");
-    assert_eq!(entry.version_needed(), 45);
+    assert_eq!(entry.directory().path(), "café");
+    assert_eq!(entry.directory().version_needed(), 45);
     assert_eq!(entry.data_offset(), data_offset as u64);
-    assert_eq!(entry.size(), payload.len() as u64);
-    assert_eq!(entry.crc32(), crc.sum());
+    assert_eq!(entry.directory().size(), payload.len() as u64);
+    assert_eq!(entry.directory().crc32(), crc.sum());
 
     Ok(())
 }
