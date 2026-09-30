@@ -88,11 +88,13 @@ cargo test -p tar-framing --bench framing --locked -- --test
 ### CodSpeed
 
 [The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
-and pushes to `main`, and supports manual runs. It runs two jobs:
+and pushes to `main`, and supports manual runs:
 
 - `framing`: CPU simulation on a GitHub-hosted Linux runner.
 - `comparison`: walltime on a CodSpeed Graviton macro runner, including time
-  spent in filesystem operations and other system calls.
+  spent in filesystem operations and other system calls. A separate Depot job
+  builds the benchmarks on ARM64 Ubuntu 22.04 and uploads them for the macro
+  runner to execute.
 
 Uploads use OIDC; no token secret is needed. Enable the repository in CodSpeed
 and allow public repositories in the organization's default runner group for
