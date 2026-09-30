@@ -18,35 +18,28 @@ use std::io;
 
 use thiserror::Error;
 
-use constants::method;
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 
 /// A supported ZIP compression method.
 ///
+/// Cast to [`u16`] to obtain the APPNOTE method number.
 /// New methods can be added without changing the record or archive APIs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum CompressionMethod {
     /// Uncompressed bytes (method 0).
     #[default]
-    Stored,
+    Stored = 0,
     /// Raw DEFLATE (method 8).
-    Deflate,
+    Deflate = 8,
 }
 
 impl CompressionMethod {
-    /// Returns the APPNOTE method number.
-    pub fn number(self) -> u16 {
-        match self {
-            Self::Stored => method::STORED,
-            Self::Deflate => method::DEFLATE,
-        }
-    }
-
     pub(crate) fn parse(value: u16, position: u64) -> Result<Self, Error> {
         match value {
-            method::STORED => Ok(Self::Stored),
-            method::DEFLATE => Ok(Self::Deflate),
+            value if value == Self::Stored as u16 => Ok(Self::Stored),
+            value if value == Self::Deflate as u16 => Ok(Self::Deflate),
             _ => Err(Error::Unsupported {
                 position,
                 feature: "compression method",

@@ -103,7 +103,7 @@ impl<'a> MemberHeader<'a> {
     fn common(&self, bytes: &mut Vec<u8>, crc: u32) {
         push16(bytes, version::ZIP64);
         push16(bytes, flags::UTF8);
-        push16(bytes, self.method.number());
+        push16(bytes, self.method as u16);
         push16(bytes, DEFAULT_TIME);
         push16(bytes, DEFAULT_DATE);
         push32(bytes, crc);

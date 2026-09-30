@@ -128,14 +128,6 @@ pub mod version {
     pub const ZIP64_V2: u16 = 62;
 }
 
-/// Compression method numbers (APPNOTE section 4.4.5).
-pub mod method {
-    /// Uncompressed data.
-    pub const STORED: u16 = 0;
-    /// Raw DEFLATE data.
-    pub const DEFLATE: u16 = 8;
-}
-
 /// Host-system identifiers in the high byte of "version made by" (APPNOTE section 4.4.2).
 pub mod host {
     /// MS-DOS and OS/2 FAT filesystems.
