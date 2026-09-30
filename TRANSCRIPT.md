@@ -17,6 +17,9 @@
   restores usability. Member preparation finishes before lending a payload.
 - Writing uses ZIP64 throughout, including small archives. The pending encoder
   requires seekable output and backpatches local headers without descriptors.
+- Per-file settings use `ArchiveBuilder::FileOptions` and
+  `Builder::add_file_with_options`. Plain `add_file` and recursive builds use
+  default options; `EntryMetadata` remains format-neutral.
 - Only added runtime dependency: `flate2` with the `zlib-rs` backend.
 
 ## Merged-layer audit
@@ -59,6 +62,8 @@ Test ownership after cleanup:
 - Development base `ww/zip-codec` is at `c6eafe4`: #122, #130, #123, #127, and
   cleanup #132 merged.
 - Pending feature stack #131: #124 (`ww/zip-encode`) then #125 (`ww/zip-docs`).
+- `ww/archive-file-options` adds the shared API and adapts format writers;
+  ZIP compression overrides will follow in `ww/zip-file-options`.
 
 ## Verification
 
@@ -74,3 +79,6 @@ Test ownership after cleanup:
   confined to obsolete progress notes; the merged audit is preserved.
 - All 5 encoder tests pass against the merged cleanup. The 29 merged-layer
   tests and their implementation are unchanged by the rebase.
+- File-options plumbing passes all 13 shared builder tests, 10 tar encoder
+  tests, and 5 ZIP encoder tests. Existing tests now check option forwarding,
+  collision rejection, and defaults for buffered and streamed recursive files.
