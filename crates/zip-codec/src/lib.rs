@@ -9,6 +9,7 @@
 #![forbid(unsafe_code)]
 
 pub mod decode;
+pub mod encode;
 mod payload;
 
 pub use archive_trait::{
@@ -17,4 +18,5 @@ pub use archive_trait::{
     Members, NameValidator, SpecialKind, TraversalError, builder, default_name_validator, extract,
 };
 pub use decode::{DecodeError, ZipArchive, ZipMemberPayload};
+pub use encode::{EncodeError, ZipEncoder};
 pub use zip_framing::{CompressionMethod, DirectoryEntry, Entry, Limits};
