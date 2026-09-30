@@ -26,14 +26,29 @@ concurrency:
 
 jobs:
   benchmark:
-    name: CodSpeed
-    runs-on: ubuntu-latest
+    name: CodSpeed (${{ matrix.bench }}, ${{ matrix.mode }})
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package: tar-framing
+            bench: framing
+            mode: simulation
+            runner: ubuntu-latest
+          - package: tar-codec
+            bench: comparison
+            mode: walltime
+            runner: codspeed-macro-arm64-graviton-ubuntu-22-04
     permissions:
       contents: read
       id-token: write # Authenticate uploads to CodSpeed with OIDC.
     env:
       RUSTUP_TOOLCHAIN: stable
+      PACKAGE: ${{ matrix.package }}
+      BENCHMARK: ${{ matrix.bench }}
+      MEASUREMENT_MODE: ${{ matrix.mode }}
       COMPARE_IMPLEMENTATIONS: >-
         ${{ (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'benchmarks:compare')) ||
             (github.event_name == 'workflow_dispatch' && inputs.compare) }}
@@ -51,18 +66,15 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Build benchmarks
-        run: |
-          uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
-          uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m simulation
+        run: uv run --only-dev --locked cargo codspeed build -p "$PACKAGE" --bench "$BENCHMARK" --locked -m "$MEASUREMENT_MODE"
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
-          mode: simulation
+          mode: ${{ matrix.mode }}
           run: |
-            uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
-            if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation
+            if [ "$BENCHMARK" = "comparison" ] && [ "$COMPARE_IMPLEMENTATIONS" != "true" ]; then
+              uv run --only-dev --locked cargo codspeed run -p "$PACKAGE" --bench "$BENCHMARK" -m "$MEASUREMENT_MODE" -- '/tar-codec(\]|$)'
             else
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation -- '/tar-codec(\]|$)'
+              uv run --only-dev --locked cargo codspeed run -p "$PACKAGE" --bench "$BENCHMARK" -m "$MEASUREMENT_MODE"
             fi

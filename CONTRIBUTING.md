@@ -88,9 +88,16 @@ cargo test -p tar-framing --bench framing --locked -- --test
 ### CodSpeed
 
 [The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
-and pushes to `main`, and supports manual runs. It uses CodSpeed simulation on a
-GitHub-hosted Linux runner with OIDC uploads. Enable the repository in CodSpeed
-to receive reports; no token secret is needed. The CLI comes from the locked
+and pushes to `main`, and supports manual runs. It runs two jobs:
+
+- `framing`: CPU simulation on a GitHub-hosted Linux runner.
+- `comparison`: walltime on a CodSpeed Graviton macro runner, including time
+  spent in filesystem operations and other system calls.
+
+Uploads use OIDC; no token secret is needed. Enable the repository in CodSpeed
+and allow public repositories in the organization's default runner group for
+[macro runner access](https://codspeed.io/docs/integrations/ci/github-actions/macro-runners).
+The CLI comes from the locked
 `astral-dev-toolchain-cargo-codspeed` development dependency, installed through
 `uv run`.
 
@@ -104,24 +111,23 @@ Build and check all instrumented benchmarks locally with:
 
 ```shell
 uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
-uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
-uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation
+uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
 ```
 
 To select only `tar-codec` in the comparison target, use:
 
 ```shell
-uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation -- '/tar-codec(\]|$)'
+uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
 ```
 
-Outside the CodSpeed runner, these commands check execution without collecting
-performance measurements. Add `--profile dev` to the build commands to check the
-instrumentation without an optimized build.
+Outside the CodSpeed runner, simulation runs check execution without collecting
+performance measurements; walltime runs collect local timings. Add `--profile dev`
+to the build commands to check without an optimized build. Add `-- --test` to
+the walltime run command to execute each case once without collecting timings.
 
-[Simulation measures user-space CPU work](https://codspeed.io/docs/instruments/cpu),
-excluding time spent in system calls. Its filesystem results do not measure disk
-latency or end-to-end extraction time. Use local wall-clock runs to assess those
-costs. See the [recorded wall-clock timings](crates/tar-codec/BENCHMARKS.md) for a
-dated implementation comparison. Those timings are not directly comparable to
-CodSpeed simulation results.
+Walltime results need a baseline from the same runner; earlier simulation
+results cannot serve as that baseline. See the
+[recorded local timings](crates/tar-codec/BENCHMARKS.md) for an implementation
+comparison on macOS.

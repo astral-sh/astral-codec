@@ -1,41 +1,33 @@
 # tar-codec benchmarks
 
-Benchmarks now use CodSpeed's Divan adapter. See
-[CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for local commands and the
-CodSpeed workflow.
+See [CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for benchmark instructions.
 
-## Local comparison (2026-09-30)
+## Results (2026-09-30)
 
-These tables retain measurements from the larger suite at source `7aeee4f`,
-using `tar` 0.4.46, `astral-tokio-tar` 0.7.0, and `codspeed-divan-compat` 5.0.2.
-They ran on macOS 26.7 with an Apple M5 Max (18 cores, 128 GiB RAM), APFS on the
-internal SSD, and Rust 1.98.1, using Cargo's default optimized bench profile.
+Wall-clock measurements at `7aeee4f`, built with Rust 1.98.1 and Cargo's default
+bench profile, using `tar` 0.4.46, `astral-tokio-tar` 0.7.0, and
+`codspeed-divan-compat` 5.0.2.
+The host was an Apple M5 Max (18 cores, 128 GiB RAM) running macOS 26.7, with
+APFS on the internal SSD.
 
-Each value is the median of six run medians. Runs alternated ascending and
-descending benchmark order. The original run also included workloads since
-removed from this suite. Divan used a minimum of one second and a maximum of
-1.2 seconds per case, including harness overhead in that time budget.
-Encoding used Divan's automatic
-sample sizing; extraction used one iteration per sample. Fixture generation,
-runtime construction, and extraction-directory setup and cleanup were outside
-the measured operations.
+Times are medians of six run medians, alternating benchmark order between runs.
+Parentheses give elapsed time relative to `tar-codec`; below 1.00× is faster.
 
-These are wall-clock timings, not CodSpeed simulation results. CPU placement,
-frequency, and background load were not controlled, and filesystem caches were
-not explicitly flushed. Results depend on the host and filesystem. Parentheses
-show elapsed time relative to `tar-codec`; values below 1.00× are faster.
+Divan used 1–1.2 seconds per case, including harness overhead. Encoding used
+automatic sample sizing; extraction used one iteration per sample. Fixture
+generation, runtime creation, and temporary-directory setup and cleanup were
+untimed.
 
-For a given case, the range of run medians reached about 20% of its reported
-median. This variation was larger than some of the smaller differences between
-implementations.
+CPU placement, frequency, and background load were uncontrolled; caches were not
+flushed. Per-case run medians spanned up to about 20% of the reported median,
+exceeding some of the differences between implementations.
 
 ### Recursive directory encoding
 
-This target walks the source directory and encodes into a sink that counts
-bytes without storing an archive. It does not measure archive output to disk.
-The many-small fixture spreads its files across 32 directories. The encoders use
-their default archive formats and metadata behavior, so their output is not
-format-equivalent.
+Encoding walks the source directory and writes to a counting sink; archive
+output is discarded. The many-small fixture uses 32 directories. `tar-codec`
+emits pax archives; `tar` and `astral-tokio-tar` use GNU headers. Each encoder
+uses its default metadata settings.
 
 | Workload | `tar-codec` | `tar` | `astral-tokio-tar` |
 | --- | ---: | ---: | ---: |
@@ -44,8 +36,8 @@ format-equivalent.
 
 ### Extraction
 
-All implementations extract the same in-memory USTAR archive into a fresh
-directory. The large and many-small fixtures have the same payload sizes as above.
+Extraction uses the same in-memory USTAR archive and a fresh destination for
+each implementation, with the file sizes and counts above.
 
 | Workload | `tar-codec` | `tar` | `astral-tokio-tar` |
 | --- | ---: | ---: | ---: |
@@ -54,11 +46,11 @@ directory. The large and many-small fixtures have the same payload sizes as abov
 
 ### Reproduction
 
-To refresh the retained workloads, run from the repository root:
+Run from the repository root:
 
 ```shell
 cargo bench -p tar-codec --bench comparison --locked -- --min-time 1 --max-time 1.2 --sort name
 ```
 
-Repeat for six rounds, replacing `--sort name` with `--sortr name` on even
-rounds. Aggregate each case using the median of the six reported medians.
+Run six times, alternating `--sort name` and `--sortr name`, and take the median
+of each case's six medians.
