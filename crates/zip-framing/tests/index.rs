@@ -4,9 +4,12 @@ use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
-use zip_framing::{DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits};
+use zip_framing::{
+    CompressionMethod, DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits,
+    write::{EntryKind, MemberHeader, end_records},
+};
 
-use support::{Fixture, Observed, Sparse, field, set16, set32};
+use support::{Fixture, Observed, Sparse, end_record, field, set32};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -55,17 +58,16 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 #[tokio::test]
 async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let extra = field(0xcafe, &[0x51; 257]);
-    let mut archive = Fixture {
+    let archive = Fixture {
         name: vec![b'n'; 258],
         local_extra: extra.clone(),
         central_extra: extra,
         member_comment: vec![b'c'; 259],
+        made_by: Some(0x1234),
+        external_attributes: 0x1234_5678,
         ..Fixture::default()
     }
     .build();
-    set16(&mut archive.bytes, archive.central + 4, 0x1234);
-    set32(&mut archive.bytes, archive.central + 38, 0x1234_5678);
-
     let mut reader = Cursor::new(archive.bytes);
     let index = read_validated(&mut reader, Limits::default()).await?;
     let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
@@ -80,21 +82,11 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
 
 #[tokio::test]
 async fn reads_and_bounds_archive_extra_record() -> TestResult {
-    let mut archive = Fixture::default().build();
-    let extra = field(0xcafe, &[0x51; 257]);
-    let mut record = 0x0806_4b50u32.to_le_bytes().to_vec();
-    record.extend_from_slice(&(extra.len() as u32).to_le_bytes());
-    record.extend_from_slice(&extra);
-    let record_length = record.len();
-
-    archive
-        .bytes
-        .splice(archive.central..archive.central, record);
-    set32(
-        &mut archive.bytes,
-        archive.end + record_length + 12,
-        (archive.end - archive.central + record_length) as u32,
-    );
+    let mut archive = Fixture {
+        archive_extra: Some(field(0xcafe, &[0x51; 257])),
+        ..Fixture::default()
+    }
+    .build();
 
     let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
     assert_eq!(index.entries()[0].directory().path(), "file");
@@ -138,9 +130,11 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
     for flags in [
         1, 2, 4, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x1000, 0x2000, 0x4000, 0x8000,
     ] {
-        let mut archive = Fixture::default().build();
-        set16(&mut archive.bytes, 6, flags);
-        set16(&mut archive.bytes, archive.central + 8, flags);
+        let archive = Fixture {
+            flags: Some(flags),
+            ..Fixture::default()
+        }
+        .build();
 
         assert!(
             read_validated(&mut Cursor::new(archive.bytes), Limits::default())
@@ -410,6 +404,7 @@ async fn requires_utf8_archive_and_member_comments() {
             for (member, flags) in [(false, 0x0800), (true, 0x0800), (true, 0)] {
                 let mut fixture = Fixture {
                     zip64,
+                    flags: Some(flags),
                     ..Fixture::default()
                 };
                 if member {
@@ -418,9 +413,7 @@ async fn requires_utf8_archive_and_member_comments() {
                     fixture.archive_comment = comment.to_vec();
                 }
 
-                let mut archive = fixture.build();
-                set16(&mut archive.bytes, 6, flags);
-                set16(&mut archive.bytes, archive.central + 8, flags);
+                let archive = fixture.build();
 
                 let (offset, expected) = if member {
                     (archive.central as u64, "non-UTF-8 member comment")
@@ -449,8 +442,7 @@ async fn requires_utf8_archive_and_member_comments() {
 
 #[tokio::test]
 async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResult {
-    let mut empty = vec![0; 22];
-    set32(&mut empty, 0, 0x0605_4b50);
+    let empty = end_record(0, 0, 0, &[]);
 
     assert!(
         read_validated(&mut Cursor::new(&empty), Limits::default())
@@ -459,9 +451,11 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
             .is_empty()
     );
 
-    let mut archive = Fixture::default().build();
-    set16(&mut archive.bytes, archive.end + 20, 22);
-    archive.bytes.extend(empty);
+    let archive = Fixture {
+        archive_comment: empty,
+        ..Fixture::default()
+    }
+    .build();
 
     assert!(
         read_validated(&mut Cursor::new(archive.bytes), Limits::default())
@@ -589,6 +583,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         name: b"next".to_vec(),
         local_extra: field(0x000d, &unix_data),
         descriptor: Some(true),
+        local_offset: first.central as u32,
         ..Fixture::default()
     }
     .build();
@@ -597,17 +592,11 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend_from_slice(&second.bytes[..second.central]);
 
     let central = bytes.len();
-    let mut second_header = second.bytes[second.central..second.end].to_vec();
-    set32(&mut second_header, 42, first.central as u32);
-    bytes.extend_from_slice(&second_header);
+    bytes.extend_from_slice(&second.bytes[second.central..second.end]);
     bytes.extend_from_slice(&first.bytes[first.central..first.end]);
 
     let end = bytes.len();
-    bytes.extend_from_slice(&first.bytes[first.end..]);
-    set16(&mut bytes, end + 8, 2);
-    set16(&mut bytes, end + 10, 2);
-    set32(&mut bytes, end + 12, (end - central) as u32);
-    set32(&mut bytes, end + 16, central as u32);
+    bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
     let mut index = Index::read(&mut source, Limits::default()).await?;
@@ -668,14 +657,17 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
             .is_err()
     );
 
-    bytes.drain(central..central + second_header.len());
-    let end = bytes.len() - 22;
-    set16(&mut bytes, end + 8, 1);
-    set16(&mut bytes, end + 10, 1);
-    set32(&mut bytes, end + 12, (end - central) as u32);
+    let mut unindexed = bytes[..central].to_vec();
+    unindexed.extend_from_slice(&first.bytes[first.central..first.end]);
+    unindexed.extend(end_record(
+        1,
+        central as u32,
+        (first.end - first.central) as u32,
+        &[],
+    ));
 
     assert!(
-        read_validated(&mut Cursor::new(bytes), Limits::default())
+        read_validated(&mut Cursor::new(unindexed), Limits::default())
             .await
             .is_err()
     );
@@ -685,29 +677,17 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 
 #[tokio::test]
 async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
-    let archive = Fixture {
-        zip64: true,
-        ..Fixture::default()
-    }
-    .build();
-
     let size = u64::from(u32::MAX) + 1;
-    let data_offset = archive.central - 7;
-    let mut prefix = archive.bytes[..data_offset].to_vec();
-    for offset in [38, 46] {
-        prefix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
-    }
-
-    let mut suffix = archive.bytes[archive.central..].to_vec();
-    for offset in [54, 62] {
-        suffix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
-    }
-
-    let central_size = 70;
-    let suffix_offset = data_offset as u64 + size;
-    suffix[central_size + 48..central_size + 56].copy_from_slice(&suffix_offset.to_le_bytes());
-    suffix[central_size + 56 + 8..central_size + 56 + 16]
-        .copy_from_slice(&(suffix_offset + central_size as u64).to_le_bytes());
+    let member = MemberHeader::new(
+        "file",
+        CompressionMethod::Stored,
+        EntryKind::File { executable: false },
+    )?
+    .finish(0, size, size, 0)?;
+    let prefix = member.local_header();
+    let mut suffix = member.central_header();
+    let suffix_offset = prefix.len() as u64 + size;
+    suffix.extend(end_records(1, suffix_offset, suffix.len() as u64)?);
 
     let mut source = Sparse {
         prefix,
@@ -753,13 +733,12 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         }
     }
 
-    let mut archive = Fixture {
+    let archive = Fixture {
         zip64: true,
+        zip64_version: Some(62),
         ..Fixture::default()
     }
     .build();
-    set16(&mut archive.bytes, archive.end - 76 + 14, 62);
-
     assert!(matches!(
         read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
         Err(FrameError::Unsupported {
@@ -799,18 +778,12 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
             )
         }),
     ) {
-        let mut archive = Fixture {
+        let archive = Fixture {
             zip64: true,
+            zip64_extensions: extension,
             ..Fixture::default()
         }
         .build();
-
-        let end_offset = archive.end - 76;
-        archive.bytes[end_offset + 4..end_offset + 12]
-            .copy_from_slice(&(44 + extension.len() as u64).to_le_bytes());
-        archive
-            .bytes
-            .splice(archive.end - 20..archive.end - 20, extension);
 
         let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
@@ -822,21 +795,15 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 
 #[tokio::test]
 async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
-    let mut archive = Fixture {
+    let archive = Fixture {
         zip64: true,
+        zip64_extensions: [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000),
         archive_comment: vec![b'a'; usize::from(u16::MAX)],
         ..Fixture::default()
     }
     .build();
-    let extension = [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000);
-    let end_size = 44 + extension.len() as u64;
-    let end_offset = archive.end - 76;
-    archive.bytes[end_offset + 4..end_offset + 12].copy_from_slice(&end_size.to_le_bytes());
-    archive
-        .bytes
-        .splice(archive.end - 20..archive.end - 20, extension);
-
-    let directory_budget = (end_offset - archive.central) as u64 + 12 + end_size;
+    let end_offset = archive.zip64_end.ok_or("missing ZIP64 end")?;
+    let directory_budget = (archive.end - 20 - archive.central) as u64;
     let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
     // Directory, ZIP64 end, and local metadata share one cumulative budget.
     for metadata_size in [total_budget - 1, total_budget] {
@@ -894,30 +861,24 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     for ordinal in 0..2000 {
         let fixture = Fixture {
             name: format!("file-{ordinal}").into_bytes(),
+            local_offset: bytes.len() as u32,
             ..Fixture::default()
         }
         .build();
         positions.push(bytes.len() as u64);
-        let mut central = fixture.bytes[fixture.central..fixture.end].to_vec();
-        set32(&mut central, 42, bytes.len() as u32);
-        directory.extend(central);
+        directory.extend_from_slice(&fixture.bytes[fixture.central..fixture.end]);
         bytes.extend_from_slice(&fixture.bytes[..fixture.central]);
     }
 
     // Keep the tail search outside both the directory and local records.
     let central = bytes.len();
     bytes.extend_from_slice(&directory);
-    let end = bytes.len();
-    let footer = Fixture {
-        archive_comment: vec![b'a'; usize::from(u16::MAX)],
-        ..Fixture::default()
-    }
-    .build();
-    bytes.extend_from_slice(&footer.bytes[footer.end..]);
-    set16(&mut bytes, end + 8, 2000);
-    set16(&mut bytes, end + 10, 2000);
-    set32(&mut bytes, end + 12, directory.len() as u32);
-    set32(&mut bytes, end + 16, central as u32);
+    bytes.extend(end_record(
+        2000,
+        central as u32,
+        directory.len() as u32,
+        &vec![b'a'; usize::from(u16::MAX)],
+    ));
     bytes[30] = b'x';
 
     let mut source = Observed::new(bytes);
