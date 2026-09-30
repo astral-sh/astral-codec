@@ -56,20 +56,41 @@ should be used primarily for small, pure private helpers.
 
 ## Benchmarking
 
-Run the headline public API comparison benchmarks with:
+The benchmarks use [CodSpeed's Divan adapter](https://codspeed.io/docs/reference/codspeed-rust/divan).
+Run local wall-clock benchmarks with:
 
 ```shell
-cargo bench -p tar-codec --bench comparison
+cargo bench -p tar-codec --bench comparison --locked
+cargo bench -p tar-framing --bench framing --locked
 ```
 
-The benchmarks compare `tar-codec` against `tar` and `astral-tokio-tar` for
-uncompressed encoding and extraction.
+The `comparison` target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
+recursive directory encoding and USTAR extraction.
 
-Run the larger filesystem extraction diagnostic matrix separately with:
+### CodSpeed
+
+[The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
+and pushes to `main`, and supports manual runs:
+
+- `framing`: CPU simulation on a GitHub-hosted Linux runner.
+- `comparison`: walltime on a CodSpeed Graviton macro runner, including time
+  spent in filesystem operations and other system calls.
+
+By default, the workflow runs all framing cases and the four `tar-codec` cases
+in `comparison`. Add the `benchmarks:compare` PR label or enable
+**Compare implementations** in a manual run to include the other implementations.
+
+Build and check all instrumented benchmarks locally with:
 
 ```shell
-cargo bench -p tar-codec --bench extraction_filesystem
+uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
+uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
+uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
 ```
 
-Run both targets when refreshing the benchmark snapshot in
-[BENCHMARKS](./crates/tar-codec/BENCHMARKS.md).
+To select only `tar-codec` in the comparison target, use:
+
+```shell
+uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
+```

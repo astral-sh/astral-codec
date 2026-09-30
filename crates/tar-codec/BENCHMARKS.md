@@ -1,32 +1,32 @@
 # tar-codec benchmarks
 
-> [!NOTE]
-> The benchmark results below are **not** a guarantee of performance
-> characteristics on end-user systems. Actual performance can vary
-> significantly by host OS and filesystem, system load, presence of
-> background processes, and so forth.
+See [CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for benchmark instructions.
 
-> [!NOTE]
-> The encoding benchmarks are not perfect "apples-to-apples"
-> comparisons, since `tar-codec` intentionally only emits
-> pax archives while `tar` and `astral-tokio-tar` emit GNU-style
-> archives by default.
+## Results (2026-09-30)
 
-The following ratios are calculated from Criterion median point estimates in
-the Ubuntu job of a
-[GitHub Actions snapshot](https://github.com/astral-sh/astral-codec/actions/runs/28186813074)
-on June 25, 2026. They measure uncompressed end-to-end filesystem operations.
-Each value is elapsed time relative to `tar-codec`, so values below 1.00x are
-faster and values above 1.00x are slower.
+Wall-clock measurements at `b6c7f43`, on a CodSpeed Graviton macro runner
+(ARM64, Ubuntu 22.04).
 
-| Recursive encoding | `tar-codec` | `tar` | `astral-tokio-tar` |
+Built with Rust 1.98.1 and Cargo's default bench profile, using `tar` 0.4.46,
+`astral-tokio-tar` 0.7.0, and `codspeed-divan-compat` 5.0.2.
+
+Times are medians of 100 samples from one run, with one iteration per sample.
+Parentheses give elapsed time relative to `tar-codec`; below 1.00× is faster.
+
+### Recursive directory encoding
+
+| Workload | `tar-codec` | `tar` | `astral-tokio-tar` |
 | --- | ---: | ---: | ---: |
-| large: 1 x 16 MiB | 1.00x | 1.12x | 41.66x |
-| many-small: 1,024 x 1 KiB | 1.00x | 1.72x | 27.18x |
+| large: 1 × 16 MiB | 9.21 ms | 6.44 ms (0.70×) | 67.16 ms (7.29×) |
+| many-small: 1,024 × 1 KiB | 20.91 ms | 37.27 ms (1.78×) | 178.10 ms (8.52×) |
 
-| Extraction | `tar-codec` | `tar` | `astral-tokio-tar` |
+### Extraction
+
+| Workload | `tar-codec` | `tar` | `astral-tokio-tar` |
 | --- | ---: | ---: | ---: |
-| pax large | 1.00x | 2.00x | 3.88x |
-| ustar large | 1.00x | 1.89x | 3.73x |
-| pax many-small | 1.00x | 1.55x | 4.25x |
-| ustar many-small | 1.00x | 1.53x | 4.42x |
+| ustar large | 46.12 ms | 46.46 ms (1.01×) | 45.46 ms (0.99×) |
+| ustar many-small | 64.33 ms | 101.62 ms (1.58×) | 138.32 ms (2.15×) |
+
+### Reproduction
+
+Run the Benchmarks workflow with **Compare implementations** enabled.

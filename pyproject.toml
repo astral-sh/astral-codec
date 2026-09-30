@@ -1,0 +1,12 @@
+[project]
+name = "astral-codec"
+version = "0.0.0"
+requires-python = ">=3.14"
+dependencies = []
+
+[dependency-groups]
+dev = ["astral-dev-toolchain-cargo-codspeed>=5.0.1"]
+
+[[tool.uv.index]]
+url = "https://pypi.org/simple"
+default = true

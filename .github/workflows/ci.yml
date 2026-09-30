@@ -40,4 +40,7 @@ jobs:
           persist-credentials: false
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
       - run: cargo test --workspace
-
+      - name: Smoke-test framing benchmarks
+        run: cargo test -p tar-framing --bench framing --locked -- --test
+      - name: Smoke-test codec benchmarks
+        run: cargo test -p tar-codec --bench comparison --locked -- --test
