@@ -65,25 +65,7 @@ cargo bench -p tar-framing --bench framing --locked
 ```
 
 The `comparison` target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
-recursive directory encoding and USTAR extraction. Each operation uses two
-fixtures: one 16 MiB file and 1,024 files of 1 KiB across 32 directories. This
-gives 12 comparison cases. The separate `framing` target measures in-memory
-framing, payload reading, and global pax updates.
-
-Fixture generation and runtime construction happen outside measurements.
-Extraction uses a fresh destination per iteration; temporary-directory creation
-and cleanup also happen outside measurements. Async operations include
-`Runtime::block_on` in each measured iteration. Local Divan runs report entry
-and byte throughput where applicable.
-
-Pass a name filter after `--`, or use `--test` to execute each case once. The
-smoke tests use the debug profile and also run in CI:
-
-```shell
-cargo bench -p tar-codec --bench comparison --locked -- many-small
-cargo test -p tar-codec --bench comparison --locked -- --test
-cargo test -p tar-framing --bench framing --locked -- --test
-```
+recursive directory encoding and USTAR extraction.
 
 ### CodSpeed
 
