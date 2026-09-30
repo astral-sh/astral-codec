@@ -6,9 +6,7 @@ use crate::{
     Error, Limits, add, check_limit,
     extra::Extras,
     invalid,
-    record::{
-        ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, read_at, u16_at, u32_at, u64_at,
-    },
+    record::{ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, u16_at, u32_at, u64_at},
 };
 
 mod entry;
@@ -153,7 +151,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
     let tail_start = length - tail_size as u64;
     let mut tail = vec![0; tail_size];
-    read_at(reader, tail_start, &mut tail, length).await?;
+    reader.read_at(tail_start, &mut tail, length).await?;
 
     let mut candidate = None;
     for offset in 0..=tail.len() - 22 {
@@ -181,7 +179,9 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     let mut boundary = position;
     let mut locator = [0; 20];
     let has_locator = if position >= 20 {
-        read_at(reader, position - 20, &mut locator, position).await?;
+        reader
+            .read_at(position - 20, &mut locator, position)
+            .await?;
         u32_at(&locator, 0) == LOCATOR
     } else {
         false
@@ -197,7 +197,7 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
 
         boundary = u64_at(&locator, 8);
         let mut zip64 = [0; 56];
-        read_at(reader, boundary, &mut zip64, position - 20).await?;
+        reader.read_at(boundary, &mut zip64, position - 20).await?;
         if u32_at(&zip64, 0) != ZIP64_END {
             return Err(invalid(boundary, "invalid ZIP64 end signature"));
         }
@@ -304,7 +304,7 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     let length = usize::try_from(end - position)
         .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
     let mut buffer = vec![0; length];
-    read_at(reader, position, &mut buffer, end).await?;
+    reader.read_at(position, &mut buffer, end).await?;
 
     let mut bytes = buffer.as_slice();
     let mut records = 0usize;
@@ -352,7 +352,7 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     // The archive extra record is part of the directory's declared size.
     if directory.size >= 8 {
         let mut header = [0; 8];
-        read_at(reader, position, &mut header, end).await?;
+        reader.read_at(position, &mut header, end).await?;
         if u32_at(&header, 0) == ARCHIVE_EXTRA {
             let length = u32_at(&header, 4) as usize;
             if add(position, 8 + length as u64)? > end {
@@ -360,7 +360,7 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
             }
 
             let mut bytes = vec![0; length];
-            read_at(reader, position + 8, &mut bytes, end).await?;
+            reader.read_at(position + 8, &mut bytes, end).await?;
             Extras::parse(&bytes, position)?;
             position += 8 + length as u64;
         }

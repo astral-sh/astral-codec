@@ -130,7 +130,12 @@ impl<'a> Extras<'a> {
         })
     }
 
-    pub(crate) fn name(&self, bytes: &[u8], flags: u16, position: u64) -> Result<String, Error> {
+    pub(crate) fn name<'name>(
+        &self,
+        bytes: &'name [u8],
+        flags: u16,
+        position: u64,
+    ) -> Result<&'name str, Error> {
         let name = parse_name(bytes, flags, position)?;
 
         if let Some(field) = self.fields.get(&0x7075) {
@@ -143,7 +148,7 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(name.to_owned())
+        Ok(name)
     }
 
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
