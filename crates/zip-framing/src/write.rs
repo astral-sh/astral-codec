@@ -4,9 +4,16 @@
 //! descriptors. Writers can reserve local header space before streaming data.
 
 use crate::{
-    CompressionMethod, Error, add, invalid,
-    record::{CENTRAL, END, LOCAL, LOCATOR, ZIP64_END, parse_name},
+    CompressionMethod, Error, ExtraHeaderId, add,
+    constants::{attributes, extra, flags, host, signature, size, version},
+    invalid,
+    record::parse_name,
 };
+
+const VERSION_MADE_BY: u16 = ((host::UNIX as u16) << 8) | version::ZIP64;
+// 00:00:00, 1980-01-01 in the DOS date/time format.
+const DEFAULT_TIME: u16 = 0;
+const DEFAULT_DATE: u16 = 0x0021;
 
 /// A portable file type represented by the encoder's Unix attributes.
 #[derive(Clone, Copy, Debug)]
@@ -33,7 +40,7 @@ impl<'a> MemberHeader<'a> {
             return Err(invalid(0, "empty or oversized filename"));
         }
 
-        parse_name(path.as_bytes(), 0x0800, 0)?;
+        parse_name(path.as_bytes(), flags::UTF8, 0)?;
         if path.ends_with('/') != matches!(kind, EntryKind::Directory) {
             return Err(invalid(0, "filename suffix disagrees with member kind"));
         }
@@ -47,7 +54,11 @@ impl<'a> MemberHeader<'a> {
 
     /// Returns total local and central metadata bytes.
     pub fn metadata_size(&self) -> u64 {
-        (30 + 20 + 46 + 28 + 2 * self.path.len()) as u64
+        (self.local_header_size()
+            + size::CENTRAL
+            + extra::HEADER_SIZE
+            + extra::ZIP64_CENTRAL_SIZE
+            + self.path.len()) as u64
     }
 
     /// Returns the payload compression method.
@@ -57,7 +68,7 @@ impl<'a> MemberHeader<'a> {
 
     /// Returns the space to reserve for the completed local header.
     pub fn local_header_size(&self) -> usize {
-        50 + self.path.len()
+        size::LOCAL + extra::HEADER_SIZE + extra::ZIP64_LOCAL_SIZE + self.path.len()
     }
 
     /// Completes metadata after the payload's CRC and sizes are known.
@@ -90,11 +101,11 @@ impl<'a> MemberHeader<'a> {
     }
 
     fn common(&self, bytes: &mut Vec<u8>, crc: u32) {
-        push16(bytes, 45);
-        push16(bytes, 0x0800); // UTF-8.
-        push16(bytes, self.method.number());
-        push16(bytes, 0); // 00:00:00, 1980-01-01.
-        push16(bytes, 0x0021);
+        push16(bytes, version::ZIP64);
+        push16(bytes, flags::UTF8);
+        push16(bytes, self.method as u16);
+        push16(bytes, DEFAULT_TIME);
+        push16(bytes, DEFAULT_DATE);
         push32(bytes, crc);
         push32(bytes, u32::MAX);
         push32(bytes, u32::MAX);
@@ -114,15 +125,18 @@ impl CompletedMember<'_> {
     /// Serializes the local header with the final CRC and sizes.
     pub fn local_header(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.header.local_header_size());
-        push32(&mut bytes, LOCAL);
+        push32(&mut bytes, signature::LOCAL);
         self.header.common(&mut bytes, self.crc);
         push16(&mut bytes, self.header.path.len() as u16);
-        push16(&mut bytes, 20);
+        push16(
+            &mut bytes,
+            (extra::HEADER_SIZE + extra::ZIP64_LOCAL_SIZE) as u16,
+        );
 
         bytes.extend_from_slice(self.header.path.as_bytes());
 
-        push16(&mut bytes, 1);
-        push16(&mut bytes, 16);
+        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
+        push16(&mut bytes, extra::ZIP64_LOCAL_SIZE as u16);
         push64(&mut bytes, self.uncompressed);
         push64(&mut bytes, self.compressed);
 
@@ -131,34 +145,42 @@ impl CompletedMember<'_> {
 
     /// Serializes the matching central-directory header.
     pub fn central_header(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(74 + self.header.path.len());
-        push32(&mut bytes, CENTRAL);
-        push16(&mut bytes, 0x032d); // Unix, ZIP 4.5.
+        let mut bytes = Vec::with_capacity(
+            size::CENTRAL + extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE + self.header.path.len(),
+        );
+        push32(&mut bytes, signature::CENTRAL);
+        push16(&mut bytes, VERSION_MADE_BY);
         self.header.common(&mut bytes, self.crc);
         push16(&mut bytes, self.header.path.len() as u16);
-        push16(&mut bytes, 28);
+        push16(
+            &mut bytes,
+            (extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE) as u16,
+        );
         push16(&mut bytes, 0); // Comment length.
         push16(&mut bytes, 0); // Starting disk.
         push16(&mut bytes, 0); // Internal attributes.
 
         let mode = match self.header.kind {
-            EntryKind::File { executable: true } => 0o100755,
-            EntryKind::File { executable: false } => 0o100644,
-            EntryKind::Directory => 0o040755,
-            EntryKind::SymbolicLink => 0o120777,
+            EntryKind::File { executable: true } => attributes::UNIX_REGULAR | 0o755,
+            EntryKind::File { executable: false } => attributes::UNIX_REGULAR | 0o644,
+            EntryKind::Directory => attributes::UNIX_DIRECTORY | 0o755,
+            EntryKind::SymbolicLink => attributes::UNIX_SYMLINK | 0o777,
         };
         let dos = if matches!(self.header.kind, EntryKind::Directory) {
-            0x10
+            attributes::DOS_DIRECTORY
         } else {
             0
         };
-        push32(&mut bytes, (mode << 16) | dos);
+        push32(
+            &mut bytes,
+            (u32::from(mode) << attributes::UNIX_MODE_SHIFT) | dos,
+        );
         push32(&mut bytes, u32::MAX);
 
         bytes.extend_from_slice(self.header.path.as_bytes());
 
-        push16(&mut bytes, 1);
-        push16(&mut bytes, 24);
+        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
+        push16(&mut bytes, extra::ZIP64_CENTRAL_SIZE as u16);
         push64(&mut bytes, self.uncompressed);
         push64(&mut bytes, self.compressed);
         push64(&mut bytes, self.offset);
@@ -170,11 +192,11 @@ impl CompletedMember<'_> {
 /// Serializes the ZIP64 end record, locator, and classic end record.
 pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
     let position = add(offset, size)?;
-    let mut bytes = Vec::with_capacity(98);
-    push32(&mut bytes, ZIP64_END);
-    push64(&mut bytes, 44);
-    push16(&mut bytes, 0x032d);
-    push16(&mut bytes, 45);
+    let mut bytes = Vec::with_capacity(size::ZIP64_END + size::ZIP64_LOCATOR + size::END);
+    push32(&mut bytes, signature::ZIP64_END);
+    push64(&mut bytes, size::ZIP64_END_BODY as u64);
+    push16(&mut bytes, VERSION_MADE_BY);
+    push16(&mut bytes, version::ZIP64);
     push32(&mut bytes, 0);
     push32(&mut bytes, 0);
     push64(&mut bytes, count);
@@ -182,12 +204,12 @@ pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error>
     push64(&mut bytes, size);
     push64(&mut bytes, offset);
 
-    push32(&mut bytes, LOCATOR);
+    push32(&mut bytes, signature::ZIP64_LOCATOR);
     push32(&mut bytes, 0);
     push64(&mut bytes, position);
     push32(&mut bytes, 1);
 
-    push32(&mut bytes, END);
+    push32(&mut bytes, signature::END);
     push16(&mut bytes, 0);
     push16(&mut bytes, 0);
     push16(&mut bytes, u16::MAX);
