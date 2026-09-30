@@ -94,18 +94,9 @@ and pushes to `main`, and supports manual runs:
 - `comparison`: walltime on a CodSpeed Graviton macro runner, including time
   spent in filesystem operations and other system calls.
 
-Uploads use OIDC; no token secret is needed. Enable the repository in CodSpeed
-and allow public repositories in the organization's default runner group for
-[macro runner access](https://codspeed.io/docs/integrations/ci/github-actions/macro-runners).
-The CLI comes from the locked
-`astral-dev-toolchain-cargo-codspeed` development dependency, installed through
-`uv run`.
-
 By default, the workflow runs all framing cases and the four `tar-codec` cases
 in `comparison`. Add the `benchmarks:compare` PR label or enable
 **Compare implementations** in a manual run to include the other implementations.
-Adding or removing the label reruns the workflow. To establish comparison
-baselines, dispatch it on `main` with **Compare implementations** enabled.
 
 Build and check all instrumented benchmarks locally with:
 
@@ -121,13 +112,3 @@ To select only `tar-codec` in the comparison target, use:
 ```shell
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
 ```
-
-Outside the CodSpeed runner, simulation runs check execution without collecting
-performance measurements; walltime runs collect local timings. Add `--profile dev`
-to the build commands to check without an optimized build. Add `-- --test` to
-the walltime run command to execute each case once without collecting timings.
-
-Walltime results need a baseline from the same runner; earlier simulation
-results cannot serve as that baseline. See the
-[recorded local timings](crates/tar-codec/BENCHMARKS.md) for an implementation
-comparison on macOS.
