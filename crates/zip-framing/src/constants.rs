@@ -166,6 +166,8 @@ pub mod attributes {
     pub const UNIX_BLOCK_DEVICE: u16 = 0o060000;
     /// UNIX named pipe.
     pub const UNIX_FIFO: u16 = 0o010000;
+    /// UNIX socket.
+    pub const UNIX_SOCKET: u16 = 0o140000;
     /// Any UNIX execute permission.
     pub const UNIX_EXECUTABLE: u16 = 0o111;
 }

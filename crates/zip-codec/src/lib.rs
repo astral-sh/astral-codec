@@ -19,4 +19,4 @@ pub use archive_trait::{
 };
 pub use decode::{DecodeError, ZipArchive, ZipMemberPayload};
 pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
-pub use zip_framing::{CompressionMethod, DirectoryEntry, Entry, IndexedEntry, Limits};
+pub use zip_framing::{CompressionMethod, DirectoryEntry, Entry, EntryKind, IndexedEntry, Limits};

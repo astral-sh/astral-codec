@@ -5,11 +5,11 @@ use std::{error::Error, io::Cursor};
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CompressionMethod, DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits,
-    write::{EntryKind, MemberHeader, end_records},
+    CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, Index, IndexedEntry, Limits,
+    write::{EntryKind as WriteEntryKind, MemberHeader, end_records},
 };
 
-use support::{Fixture, Observed, Sparse, end_record, field, set32};
+use support::{Fixture, Observed, Sparse, end_record, field, set16, set32};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -76,6 +76,236 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
     assert_eq!(entry.data_offset(), 30 + 258 + 261);
     assert_eq!(entry.directory().size(), 7);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResult {
+    for (name, host, attributes, expected, mode) in [
+        ("file", 3, 0, EntryKind::File, 0),
+        ("file", 3, 0o106755 << 16, EntryKind::File, 0o106755),
+        ("file", 0, 0o120777 << 16, EntryKind::File, 0),
+        ("file", 255, (0o040755 << 16) | 0x18, EntryKind::File, 0),
+        ("directory/", 3, 0, EntryKind::Directory, 0),
+        ("directory", 0, 0x10, EntryKind::Directory, 0),
+        (
+            "directory",
+            3,
+            0o040755 << 16,
+            EntryKind::Directory,
+            0o040755,
+        ),
+        (
+            "directory",
+            19,
+            0o040755 << 16,
+            EntryKind::Directory,
+            0o040755,
+        ),
+        ("link", 3, 0o120777 << 16, EntryKind::SymbolicLink, 0o120777),
+        (
+            "device",
+            3,
+            0o020600 << 16,
+            EntryKind::CharacterDevice,
+            0o020600,
+        ),
+        (
+            "device",
+            3,
+            0o060600 << 16,
+            EntryKind::BlockDevice,
+            0o060600,
+        ),
+        ("fifo", 3, 0o010600 << 16, EntryKind::Fifo, 0o010600),
+        ("socket", 3, 0o140600 << 16, EntryKind::Socket, 0o140600),
+        ("volume", 0, 0x08, EntryKind::VolumeLabel, 0),
+        (
+            "unknown",
+            3,
+            0o030600 << 16,
+            EntryKind::Unknown(0o030000),
+            0o030600,
+        ),
+    ] {
+        let archive = Fixture {
+            name: name.as_bytes().to_vec(),
+            payload: Some(if expected == EntryKind::SymbolicLink {
+                b"target".to_vec()
+            } else {
+                Vec::new()
+            }),
+            made_by: Some((host << 8) | 20),
+            external_attributes: attributes,
+            ..Fixture::default()
+        }
+        .build();
+        let mut source = Observed::new(archive.bytes);
+        let mut index = Index::read(&mut source, Limits::default()).await?;
+        assert!(index.entries()[0].resolved().is_none());
+
+        let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
+        assert_eq!(entry.kind(), expected, "{name}, host {host}");
+        assert_eq!(entry.unix_mode(), mode, "{name}, host {host}");
+
+        source.reads.clear();
+        let cached = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(cached.kind(), expected);
+        index.validate_all(&mut source).await?;
+        assert!(source.reads.is_empty());
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolves_link_kinds_from_reconciled_unix_data() -> TestResult {
+    for (mode, data, payload, expected) in [
+        (0, b"target".as_slice(), b"".as_slice(), EntryKind::HardLink),
+        (0o100644, b"target", b"data", EntryKind::HardLink),
+        (0o120777, b"target", b"", EntryKind::SymbolicLink),
+        (0o120777, b"target", b"target", EntryKind::SymbolicLink),
+        (0o100644, b"", b"data", EntryKind::File),
+        (0o020600, &[0; 8], b"", EntryKind::CharacterDevice),
+        (0o060600, &[0; 8], b"", EntryKind::BlockDevice),
+    ] {
+        let archive = Fixture {
+            payload: Some(payload.to_vec()),
+            external_attributes: mode << 16,
+            local_extra: field(0x000d, &[&[0; 12], data].concat()),
+            central_extra: field(0x000d, &[0; 12]),
+            ..Fixture::default()
+        }
+        .build();
+        let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), expected);
+        assert_eq!(entry.unix_extra_data(), Some(data));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> TestResult {
+    for (name, attributes, payload, data, version, expected) in [
+        (
+            "file",
+            (0o100644 << 16) | 0x10,
+            b"".as_slice(),
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "link/",
+            0o120777 << 16,
+            b"target",
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "directory/",
+            0,
+            b"data",
+            None,
+            20,
+            "non-file member has payload data",
+        ),
+        (
+            "fifo",
+            0o010600 << 16,
+            b"data",
+            None,
+            20,
+            "non-file member has payload data",
+        ),
+        (
+            "directory/",
+            0,
+            b"",
+            None,
+            10,
+            "directory requires extraction version 2.0",
+        ),
+        (
+            "link",
+            0o120777 << 16,
+            b"",
+            None,
+            20,
+            "empty symbolic-link target",
+        ),
+        (
+            "directory/",
+            0,
+            b"",
+            Some(b"target".as_slice()),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "fifo",
+            0o010600 << 16,
+            b"",
+            Some(b"target"),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "device",
+            0o020600 << 16,
+            b"",
+            Some(&[0; 7]),
+            20,
+            "invalid UNIX device numbers",
+        ),
+        (
+            "device",
+            0o060600 << 16,
+            b"",
+            Some(&[0; 9]),
+            20,
+            "invalid UNIX device numbers",
+        ),
+    ] {
+        let mut archive = Fixture {
+            name: name.as_bytes().to_vec(),
+            payload: Some(payload.to_vec()),
+            external_attributes: attributes,
+            local_extra: data
+                .map_or_else(Vec::new, |data| field(0x000d, &[&[0; 12], data].concat())),
+            ..Fixture::default()
+        }
+        .build();
+        set16(&mut archive.bytes, 4, version);
+        set16(&mut archive.bytes, archive.central + 6, version);
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(
+            &mut source,
+            Limits {
+                metadata_size: (archive.end - payload.len()) as u64,
+                ..Limits::default()
+            },
+        )
+        .await?;
+
+        // Each failure must leave enough budget to retry the same metadata.
+        for full_validation in [false, true, false] {
+            let result = if full_validation {
+                index.validate_all(&mut source).await
+            } else {
+                index.entry(&mut source, 0).await.map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected),
+                "{name}, attributes {attributes:#x}: {result:?}"
+            );
+            assert!(index.entries()[0].resolved().is_none());
+        }
+    }
 
     Ok(())
 }
@@ -485,13 +715,9 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         let index =
             read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
 
-        assert_eq!(
-            index.entries()[0]
-                .resolved()
-                .ok_or("unresolved entry")?
-                .unix_extra_data(),
-            Some(b"target".as_slice())
-        );
+        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), EntryKind::HardLink);
+        assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
     }
 
     for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
@@ -681,7 +907,7 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
     let member = MemberHeader::new(
         "file",
         CompressionMethod::Stored,
-        EntryKind::File { executable: false },
+        WriteEntryKind::File { executable: false },
     )?
     .finish(0, size, size, 0)?;
     let prefix = member.local_header();

@@ -11,6 +11,7 @@ use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 #[derive(Default)]
 pub(super) struct Fixture {
     pub(super) name: Vec<u8>,
+    pub(super) payload: Option<Vec<u8>>,
     pub(super) local_extra: Vec<u8>,
     pub(super) central_extra: Vec<u8>,
     pub(super) member_comment: Vec<u8>,
@@ -72,15 +73,20 @@ impl Fixture {
             self.name
         };
 
+        let payload = self.payload.unwrap_or_else(|| b"payload".to_vec());
         let mut crc = Crc::new();
-        crc.update(b"payload");
+        crc.update(&payload);
         let checksum = self.crc.unwrap_or_else(|| crc.sum());
 
         let version = if self.zip64 { 45 } else { 20 };
         let flags = self
             .flags
             .unwrap_or(0x0800 | if self.descriptor.is_some() { 8 } else { 0 });
-        let local_size = if self.descriptor.is_some() { 0u64 } else { 7 };
+        let local_size = if self.descriptor.is_some() {
+            0
+        } else {
+            payload.len() as u64
+        };
 
         let mut local_extra = self.local_extra;
         let mut central_extra = self.central_extra;
@@ -89,7 +95,7 @@ impl Fixture {
                 1,
                 &[local_size.to_le_bytes(), local_size.to_le_bytes()].concat(),
             ));
-            central_extra.extend(field(1, &[7u64.to_le_bytes(), 7u64.to_le_bytes()].concat()));
+            central_extra.extend(field(1, &(payload.len() as u64).to_le_bytes().repeat(2)));
         }
 
         let mut bytes = vec![0; 30];
@@ -118,7 +124,7 @@ impl Fixture {
 
         bytes.extend_from_slice(&name);
         bytes.extend(local_extra);
-        bytes.extend_from_slice(b"payload");
+        bytes.extend_from_slice(&payload);
 
         let descriptor = bytes.len();
         if let Some(signed) = self.descriptor {
@@ -128,9 +134,9 @@ impl Fixture {
 
             bytes.extend_from_slice(&checksum.to_le_bytes());
             if self.zip64 {
-                bytes.extend_from_slice(&7u64.to_le_bytes().repeat(2));
+                bytes.extend_from_slice(&(payload.len() as u64).to_le_bytes().repeat(2));
             } else {
-                bytes.extend_from_slice(&7u32.to_le_bytes().repeat(2));
+                bytes.extend_from_slice(&(payload.len() as u32).to_le_bytes().repeat(2));
             }
         }
 
@@ -147,7 +153,11 @@ impl Fixture {
         set16(&mut header, 8, flags);
         set32(&mut header, 16, checksum);
 
-        let size = if self.zip64 { u32::MAX } else { 7 };
+        let size = if self.zip64 {
+            u32::MAX
+        } else {
+            payload.len() as u32
+        };
         set32(&mut header, 20, size);
         set32(&mut header, 24, size);
         set16(&mut header, 28, name.len() as u16);

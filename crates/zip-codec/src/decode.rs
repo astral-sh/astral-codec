@@ -8,10 +8,7 @@ use std::{
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{
-    Entry, Index, IndexedEntry, Limits,
-    constants::{attributes, host, version},
-};
+use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -143,7 +140,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             return Ok(None);
         };
 
-        let kind = kind(&entry)?;
+        let kind = project_kind(&entry)?;
         let directory = entry.directory();
         let metadata = MemberMetadata {
             path: directory.path().to_owned(),
@@ -224,7 +221,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             .iter()
             .filter_map(IndexedEntry::resolved)
         {
-            kind(&entry)?;
+            project_kind(&entry)?;
         }
 
         Ok(())
@@ -336,67 +333,11 @@ enum Kind {
     Special(SpecialKind),
 }
 
-/// An extracted form of a central directory entry's "external attributes" field.
-///
-/// See [`zip_framing::index::DirectoryEntry::external_attributes`].
-struct ExternalAttributes {
-    /// The UNIX file mode.
-    ///
-    /// This is not standardized in the APPNOTE, but implementations that want to convey
-    /// UNIX-style file modes conventionally store the lower 16 bits of `st_mode` into
-    /// the upper 16 bits of the external attributes.
-    unix_mode: u16,
-
-    /// Whether the entry is marked with the DOS directory attribute.
-    ///
-    /// APPNOTE defines this for MS-DOS, but implementations widely use it to hint whether a
-    /// member is a directory regardless of host platform. We reconcile this attribute with the
-    /// conventional `/` suffix and the UNIX file type when determining the member's kind.
-    /// See [`self::kind`].
-    dos_directory: bool,
-
-    /// Whether the entry represents the disk/volume's name, rather than a regular file.
-    ///
-    /// We reject this as an unsupported feature.
-    dos_volume_label: bool,
-}
-
-impl ExternalAttributes {
-    fn new(host_system: u8, raw: u32) -> Self {
-        let has_dos_attributes = matches!(
-            host_system,
-            host::MS_DOS
-                | host::UNIX
-                | host::OS2_HPFS
-                | host::WINDOWS_NTFS
-                | host::VFAT
-                | host::OS_X
-        );
-
-        Self {
-            unix_mode: if matches!(host_system, host::UNIX | host::OS_X) {
-                (raw >> attributes::UNIX_MODE_SHIFT) as u16
-            } else {
-                0
-            },
-            dos_directory: has_dos_attributes && raw & attributes::DOS_DIRECTORY != 0,
-            dos_volume_label: has_dos_attributes && raw & attributes::DOS_VOLUME_LABEL != 0,
-        }
-    }
-}
-
-fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
+fn project_kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
     let directory = entry.directory();
-    let attributes =
-        ExternalAttributes::new(directory.host_system(), directory.external_attributes());
-    let mode = attributes.unix_mode;
-
-    let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
-    let link = if let Some(data) = extra
-        && matches!(
-            mode & attributes::UNIX_TYPE_MASK,
-            0 | attributes::UNIX_REGULAR | attributes::UNIX_SYMLINK
-        ) {
+    let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
+        && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
+    {
         let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
             position: directory.position(),
             reason: "non-UTF-8 UNIX link target",
@@ -413,82 +354,36 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         None
     };
 
-    let is_directory = directory.path().ends_with('/') || attributes.dos_directory;
-    if attributes.dos_volume_label {
-        return Err(DecodeError::Unsupported {
+    match entry.kind() {
+        EntryKind::File => Ok(Kind::File(
+            entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
+        )),
+        EntryKind::Directory => Ok(Kind::Directory),
+        EntryKind::HardLink => Ok(Kind::HardLink(link.ok_or(DecodeError::Integrity {
+            position: directory.position(),
+            reason: "missing UNIX hard-link target",
+        })?)),
+        EntryKind::SymbolicLink => {
+            if directory.size() > u64::from(u16::MAX) {
+                return Err(DecodeError::Integrity {
+                    position: directory.position(),
+                    reason: "oversized symbolic-link target",
+                });
+            }
+            Ok(Kind::SymbolicLink(link))
+        }
+        EntryKind::CharacterDevice => Ok(Kind::Special(SpecialKind::CharacterDevice)),
+        EntryKind::BlockDevice => Ok(Kind::Special(SpecialKind::BlockDevice)),
+        EntryKind::Fifo => Ok(Kind::Special(SpecialKind::Fifo)),
+        EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
             position: directory.position(),
             feature: "volume label",
-        });
-    }
-
-    let kind = match mode & attributes::UNIX_TYPE_MASK {
-        0 if is_directory => Kind::Directory,
-        0 | attributes::UNIX_REGULAR if !is_directory => match link {
-            Some(target) => Kind::HardLink(target),
-            None => Kind::File(mode & attributes::UNIX_EXECUTABLE != 0),
-        },
-        attributes::UNIX_DIRECTORY => Kind::Directory,
-        attributes::UNIX_SYMLINK if !is_directory => Kind::SymbolicLink(link),
-        attributes::UNIX_CHARACTER_DEVICE if !is_directory => {
-            Kind::Special(SpecialKind::CharacterDevice)
-        }
-        attributes::UNIX_BLOCK_DEVICE if !is_directory => Kind::Special(SpecialKind::BlockDevice),
-        attributes::UNIX_FIFO if !is_directory => Kind::Special(SpecialKind::Fifo),
-        _ => {
-            return Err(DecodeError::Unsupported {
-                position: directory.position(),
-                feature: "inconsistent or unsupported file attributes",
-            });
-        }
-    };
-
-    if matches!(kind, Kind::Directory | Kind::Special(_))
-        && (directory.size() != 0 || directory.crc32() != 0)
-    {
-        return Err(DecodeError::Integrity {
+        }),
+        _ => Err(DecodeError::Unsupported {
             position: directory.position(),
-            reason: "non-file member has payload data",
-        });
+            feature: "unsupported file attributes",
+        }),
     }
-
-    if matches!(kind, Kind::Directory) && directory.version_needed() < version::V2_0 {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "directory requires extraction version 2.0",
-        });
-    }
-
-    if matches!(kind, Kind::SymbolicLink(_))
-        && ((directory.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
-            || directory.size() > u64::from(u16::MAX))
-    {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "empty or oversized symbolic-link target",
-        });
-    }
-
-    if extra.is_some() && matches!(kind, Kind::Directory | Kind::Special(SpecialKind::Fifo)) {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "unexpected UNIX file-type data",
-        });
-    }
-
-    if let Some(data) = extra
-        && matches!(
-            kind,
-            Kind::Special(SpecialKind::CharacterDevice | SpecialKind::BlockDevice)
-        )
-        && data.len() != 8
-    {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "invalid UNIX device numbers",
-        });
-    }
-
-    Ok(kind)
 }
 
 /// A ZIP framing, payload, or member-projection failure.
@@ -519,36 +414,4 @@ pub enum DecodeError {
     /// A prior error or interrupted operation invalidated the cursor.
     #[error("ZIP reader is poisoned after an error or cancelled operation")]
     Poisoned,
-}
-
-#[cfg(test)]
-mod tests {
-    use super::ExternalAttributes;
-
-    #[test]
-    fn interprets_external_attributes_according_to_the_host() {
-        for (host, unix_mode, has_dos_attributes) in [
-            (0, 0, true),
-            (3, 0o100755, true),
-            (6, 0, true),
-            (10, 0, true),
-            (14, 0, true),
-            (19, 0o100755, true),
-            (1, 0, false),
-            (255, 0, false),
-        ] {
-            let attributes = ExternalAttributes::new(host, (0o100755 << 16) | 0x10);
-            assert_eq!(attributes.unix_mode, unix_mode, "host {host}");
-            assert_eq!(attributes.dos_directory, has_dos_attributes, "host {host}");
-            assert!(!attributes.dos_volume_label, "host {host}");
-
-            let attributes = ExternalAttributes::new(host, 0x08);
-            assert_eq!(attributes.unix_mode, 0, "host {host}");
-            assert!(!attributes.dos_directory, "host {host}");
-            assert_eq!(
-                attributes.dos_volume_label, has_dos_attributes,
-                "host {host}"
-            );
-        }
-    }
 }

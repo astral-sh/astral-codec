@@ -92,11 +92,12 @@ impl Index {
         Ok(Some(entry.resolve(reader, &mut self.budget).await?))
     }
 
-    /// Checks every local header and descriptor, including unselected members.
+    /// Checks every local header, descriptor, and kind, including unselected members.
     ///
     /// Success establishes complete, nonoverlapping record coverage and
-    /// agreement of redundant metadata. Payload sizes and CRCs still need to
-    /// be verified when decoding. Already checked members require no I/O.
+    /// agreement of redundant and kind-specific metadata. Payload sizes and
+    /// CRCs still need to be verified when decoding. Already checked members
+    /// require no I/O.
     pub async fn validate_all<R: AsyncRead + AsyncSeek + Unpin>(
         &mut self,
         reader: &mut R,

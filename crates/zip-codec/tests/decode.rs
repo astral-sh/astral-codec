@@ -11,10 +11,13 @@ use std::{
 use flate2::{Compression, Crc, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip_codec::{
-    Archive, CompressionMethod, DecodeError, Member, MemberPayload, ZipArchive,
-    extract::ExtractPolicy,
+    Archive, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, Member, MemberPayload,
+    ZipArchive, extract::ExtractPolicy,
 };
-use zip_framing::write::{EntryKind, MemberHeader, end_records};
+use zip_framing::{
+    Error as FrameError,
+    write::{EntryKind, MemberHeader, end_records},
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -51,6 +54,124 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
     }
 
     Ok(output)
+}
+
+fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut crc = Crc::new();
+    crc.update(payload);
+    let member = MemberHeader::new(
+        "member",
+        CompressionMethod::Stored,
+        EntryKind::File { executable: false },
+    )?
+    .finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
+    let mut bytes = member.local_header();
+    bytes.extend_from_slice(payload);
+    let offset = bytes.len() as u64;
+    let mut central = member.central_header();
+    central[38..42].copy_from_slice(&attributes.to_le_bytes());
+    let size = central.len() as u64;
+    bytes.extend(central);
+    bytes.extend(end_records(1, offset, size)?);
+
+    Ok(bytes)
+}
+
+#[tokio::test]
+async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
+    for (attributes, expected_kind, expected_error) in [
+        (0x08, Some(DecodedEntryKind::VolumeLabel), "volume label"),
+        (
+            0o140600 << 16,
+            Some(DecodedEntryKind::Socket),
+            "unsupported file attributes",
+        ),
+        (
+            0o030600 << 16,
+            Some(DecodedEntryKind::Unknown(0o030000)),
+            "unsupported file attributes",
+        ),
+        (
+            (0o100644 << 16) | 0x10,
+            None,
+            "inconsistent file attributes",
+        ),
+    ] {
+        let bytes = member_with_attributes(&[], attributes)?;
+        for full_validation in [false, true] {
+            let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+            let result = if full_validation {
+                archive.validate_all().await
+            } else {
+                archive.member(0).await.map(|_| ())
+            };
+
+            if let Some(expected_kind) = expected_kind {
+                assert!(
+                    matches!(result, Err(DecodeError::Unsupported { position: 0, feature }) if feature == expected_error)
+                );
+                assert_eq!(
+                    archive.entries()[0]
+                        .resolved()
+                        .ok_or("unresolved entry")?
+                        .kind(),
+                    expected_kind
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(DecodeError::Framing(FrameError::Invalid { position: 0, reason })) if reason == expected_error)
+                );
+                assert!(archive.entries()[0].resolved().is_none());
+            }
+
+            assert!(matches!(
+                archive.member(0).await,
+                Err(DecodeError::Poisoned)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
+    for length in [usize::from(u16::MAX), usize::from(u16::MAX) + 1] {
+        let bytes = member_with_attributes(&vec![b'x'; length], 0o120777 << 16)?;
+        for full_validation in [false, true] {
+            let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+            let result = if full_validation {
+                archive.validate_all().await
+            } else {
+                archive.member(0).await.map(|_| ())
+            };
+            assert_eq!(
+                archive.entries()[0]
+                    .resolved()
+                    .ok_or("unresolved entry")?
+                    .kind(),
+                DecodedEntryKind::SymbolicLink
+            );
+
+            if length == usize::from(u16::MAX) {
+                result?;
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(DecodeError::Integrity {
+                        position: 0,
+                        reason: "oversized symbolic-link target",
+                    })
+                ));
+                assert!(matches!(
+                    archive.member(0).await,
+                    Err(DecodeError::Poisoned)
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::test]

@@ -3,10 +3,11 @@ use std::ops::{Deref, Range};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    CompressionMethod, Error, add,
+    CompressionMethod, EntryKind, Error, add,
     constants::{signature, size},
     extra::{Extras, ResolvedExtras},
     invalid,
+    kind::ExternalAttributes,
     record::{Common, RecordReader, array_at, bytes_at},
 };
 
@@ -49,7 +50,7 @@ struct Metadata {
 }
 
 /// A member whose local file entry, extras, and optional data descriptor
-/// have been reconciled with the directory.
+/// have been reconciled with the directory and checked for a consistent kind.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a> {
     /// The indexed member.
@@ -59,6 +60,20 @@ pub struct Entry<'a> {
 }
 
 impl Entry<'_> {
+    /// Returns the member's kind, validated during local record resolution.
+    ///
+    /// This does not decode payloads or apply an extraction policy.
+    pub fn kind(&self) -> EntryKind {
+        self.resolved.kind
+    }
+
+    /// Returns the UNIX file type and permission bits from external attributes.
+    ///
+    /// This is zero for hosts other than UNIX and Darwin.
+    pub fn unix_mode(&self) -> u16 {
+        self.resolved.unix_mode
+    }
+
     /// Returns the absolute position of the encoded payload.
     pub fn data_offset(&self) -> u64 {
         self.resolved.data_offset
@@ -67,7 +82,7 @@ impl Entry<'_> {
     /// Returns reconciled APPNOTE UNIX data for links or device numbers.
     ///
     /// The timestamp/ownership prefix is excluded. Interpret this data with
-    /// the external Unix file type.
+    /// the member's [`Self::kind`]. Link-target contents have not been validated.
     pub fn unix_extra_data(&self) -> Option<&[u8]> {
         self.resolved.extras.unix_data()
     }
@@ -85,6 +100,8 @@ impl Deref for Entry<'_> {
 struct ResolvedMember {
     data_offset: u64,
     extras: ResolvedExtras,
+    kind: EntryKind,
+    unix_mode: u16,
 }
 
 /// Metadata retained from a member's central directory entry.
@@ -132,7 +149,7 @@ impl DirectoryEntry {
         (self.metadata.made_by >> 8) as u8
     }
 
-    /// Returns the external file attributes, interpreted according to the host.
+    /// Returns the raw external file attributes, whose meaning depends on the host.
     pub fn external_attributes(&self) -> u32 {
         self.metadata.attributes
     }
@@ -369,9 +386,17 @@ impl IndexedEntry {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
 
+        let attributes = ExternalAttributes::new(
+            self.directory.host_system(),
+            self.directory.external_attributes(),
+        );
+        let kind = EntryKind::resolve(&self.directory, extras.unix_data(), &attributes)?;
+
         Ok(ResolvedMember {
             data_offset,
             extras,
+            kind,
+            unix_mode: attributes.unix_mode,
         })
     }
 }

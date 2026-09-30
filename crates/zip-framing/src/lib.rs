@@ -1,7 +1,8 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
 //! [`Index::read`] indexes the directory; [`Index::entry`] checks local records
-//! on access. [`Index::validate_all`] checks all members without decoding payloads.
+//! and kind-specific metadata on access. [`Entry::kind`] returns the cached
+//! classification. [`Index::validate_all`] checks all members without decoding payloads.
 //! Filenames and archive/member comments must be UTF-8.
 //! It does not read file contents: consumers must verify decoded sizes and CRCs.
 //! The source must remain unchanged while the index and its payloads are used.
@@ -11,6 +12,7 @@
 pub mod constants;
 mod extra;
 mod index;
+mod kind;
 mod record;
 pub mod write;
 
@@ -19,6 +21,7 @@ use std::io;
 use thiserror::Error;
 
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
+pub use kind::EntryKind;
 
 /// A supported ZIP compression method.
 ///
