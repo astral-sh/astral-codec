@@ -20,6 +20,8 @@
 - Per-file settings use `ArchiveBuilder::FileOptions` and
   `Builder::add_file_with_options`. Plain `add_file` and recursive builds use
   default options; `EntryMetadata` remains format-neutral.
+- `ZipFileOptions::compression` overrides the method for one nonempty file.
+  Default options inherit the encoder's method; empty files remain stored.
 - Only added runtime dependency: `flate2` with the `zlib-rs` backend.
 
 ## Merged-layer audit
@@ -62,8 +64,9 @@ Test ownership after cleanup:
 - Development base `ww/zip-codec` is at `c6eafe4`: #122, #130, #123, #127, and
   cleanup #132 merged.
 - Pending feature stack #131: #124 (`ww/zip-encode`) then #125 (`ww/zip-docs`).
-- `ww/archive-file-options` adds the shared API and adapts format writers;
-  ZIP compression overrides will follow in `ww/zip-file-options`.
+- #133 (`ww/archive-file-options`) adds the shared API and adapts format writers;
+  #134 (`ww/zip-file-options`) adds ZIP compression overrides and a mixed-method
+  test above #125.
 
 ## Verification
 
@@ -74,11 +77,11 @@ Test ownership after cleanup:
   cancellation, interoperability, and extraction.
 - Workspace clippy, formatting, and ZIP documentation checks pass with warnings
   denied. The cleanup adds no dependencies, unsafe code, or public API changes.
-- After rebasing #124/#125 onto the cleanup, their source/documentation diffs
-  match the prior versions exactly, excluding this transcript. Conflicts were
-  confined to obsolete progress notes; the merged audit is preserved.
-- All 5 encoder tests pass against the merged cleanup. The 29 merged-layer
-  tests and their implementation are unchanged by the rebase.
-- File-options plumbing passes all 13 shared builder tests, 10 tar encoder
-  tests, and 5 ZIP encoder tests. Existing tests now check option forwarding,
-  collision rejection, and defaults for buffered and streamed recursive files.
+- File-options plumbing passes all 13 shared builder integration tests, 5
+  builder unit tests, and 10 tar encoder tests. Existing tests now check option
+  forwarding, collision rejection, and defaults for buffered and streamed
+  recursive files.
+- All 6 ZIP encoder tests pass. The new table-driven case checks mixed methods,
+  inherited defaults after overrides, and stored empty files with both encoder
+  defaults. Shared, tar, and ZIP docs build with warnings denied; workspace
+  clippy and formatting pass. No dependencies changed.
