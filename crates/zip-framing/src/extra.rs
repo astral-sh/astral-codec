@@ -4,7 +4,7 @@ use flate2::Crc;
 
 use crate::{
     Error, invalid,
-    record::{Common, parse_name, u16_at, u32_at, u64_at},
+    record::{Common, bytes_at, parse_name},
 };
 
 pub(crate) struct Extras<'a> {
@@ -28,14 +28,14 @@ impl<'a> Extras<'a> {
         let mut fields = BTreeMap::new();
 
         while !bytes.is_empty() {
-            if bytes.len() < 4 {
+            let Some((header, remaining)) = bytes.split_first_chunk::<4>() else {
                 return Err(invalid(position, "truncated extra-field header"));
-            }
+            };
 
-            let identifier = u16_at(bytes, 0);
-            let length = usize::from(u16_at(bytes, 2));
-            bytes = &bytes[4..];
-            let Some(data) = bytes.get(..length) else {
+            let [identifier_low, identifier_high, length_low, length_high] = *header;
+            let identifier = u16::from_le_bytes([identifier_low, identifier_high]);
+            let length = usize::from(u16::from_le_bytes([length_low, length_high]));
+            let Some((data, remaining)) = remaining.split_at_checked(length) else {
                 return Err(invalid(position, "truncated extra-field data"));
             };
 
@@ -59,7 +59,7 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated UNIX extra field"));
             }
 
-            bytes = &bytes[length..];
+            bytes = remaining;
         }
 
         Ok(Self { fields })
@@ -96,22 +96,24 @@ impl<'a> Extras<'a> {
         common.check_zip64(field.is_some(), position)?;
 
         let mut bytes = field.unwrap_or_default();
-        let mut take_size = |small: u32| {
+        let mut take_size = |small: u32| -> Result<u64, Error> {
             if small == u32::MAX {
-                let value = u64_at(bytes, 0);
-                bytes = &bytes[8..];
-                value
+                let (value, remaining) = bytes
+                    .split_first_chunk::<8>()
+                    .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
+                bytes = remaining;
+                Ok(u64::from_le_bytes(*value))
             } else {
-                u64::from(small)
+                Ok(u64::from(small))
             }
         };
 
-        let uncompressed = take_size(common.uncompressed);
-        let compressed = take_size(common.compressed);
-        let offset = offset.map(&mut take_size).unwrap_or_default();
+        let uncompressed = take_size(common.uncompressed)?;
+        let compressed = take_size(common.compressed)?;
+        let offset = offset.map(&mut take_size).transpose()?.unwrap_or_default();
 
         let disk = match disk {
-            Some(u16::MAX) => u32_at(bytes, 0),
+            Some(u16::MAX) => u32::from_le_bytes(bytes_at(bytes, 0, position)?),
             Some(disk) => u32::from(disk),
             None => 0,
         };
@@ -197,18 +199,21 @@ impl<'a> Extras<'a> {
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {
-    if field.len() < 5 || field[0] != 1 {
+    let Some((&1, field)) = field.split_first() else {
         return Err(invalid(position, "invalid Unicode extra field"));
-    }
+    };
+    let Some((expected_crc, value)) = field.split_first_chunk::<4>() else {
+        return Err(invalid(position, "invalid Unicode extra field"));
+    };
 
     let mut crc = Crc::new();
     crc.update(original);
-    if u32_at(field, 1) != crc.sum() {
+    if u32::from_le_bytes(*expected_crc) != crc.sum() {
         return Err(invalid(position, "Unicode extra field CRC mismatch"));
     }
 
-    let value = str::from_utf8(&field[5..])
-        .map_err(|_| invalid(position, "non-UTF-8 Unicode extra field"))?;
+    let value =
+        str::from_utf8(value).map_err(|_| invalid(position, "non-UTF-8 Unicode extra field"))?;
     if value.starts_with('\u{feff}') {
         return Err(invalid(position, "Unicode extra field contains a BOM"));
     }

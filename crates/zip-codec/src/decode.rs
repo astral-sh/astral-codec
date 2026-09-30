@@ -8,7 +8,7 @@ use std::{
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{DirectoryEntry, Entry, Index, Limits};
+use zip_framing::{Entry, Index, IndexedEntry, Limits};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -60,8 +60,8 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         })
     }
 
-    /// Returns directory metadata without fetching local records or payloads.
-    pub fn entries(&self) -> &[DirectoryEntry] {
+    /// Returns indexed members without fetching local records or payloads.
+    pub fn entries(&self) -> &[IndexedEntry] {
         self.state.index.entries()
     }
 
@@ -141,11 +141,12 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         };
 
         let kind = kind(&entry)?;
+        let directory = entry.directory();
         let metadata = MemberMetadata {
-            path: entry.path().to_owned(),
-            position: entry.position(),
+            path: directory.path().to_owned(),
+            position: directory.position(),
         };
-        let size = entry.size();
+        let size = directory.size();
 
         self.active = Some(Payload::new(&entry)?);
         self.reader
@@ -218,7 +219,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             .index
             .entries()
             .iter()
-            .filter_map(DirectoryEntry::resolved)
+            .filter_map(IndexedEntry::resolved)
         {
             kind(&entry)?;
         }
@@ -333,8 +334,9 @@ enum Kind {
 }
 
 fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
-    let attributes = entry.external_attributes();
-    let unix = matches!(entry.host_system(), 3 | 19);
+    let directory = entry.directory();
+    let attributes = directory.external_attributes();
+    let unix = matches!(directory.host_system(), 3 | 19);
     let mode = if unix { attributes >> 16 } else { 0 };
 
     let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
@@ -342,12 +344,12 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         && matches!(mode & 0o170000, 0 | 0o100000 | 0o120000)
     {
         let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "non-UTF-8 UNIX link target",
         })?;
         if target.contains('\0') {
             return Err(DecodeError::Integrity {
-                position: entry.position(),
+                position: directory.position(),
                 reason: "NUL in UNIX link target",
             });
         }
@@ -357,63 +359,63 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         None
     };
 
-    let dos = matches!(entry.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
-    let directory = entry.path().ends_with('/') || (dos && attributes & 0x10 != 0);
+    let dos = matches!(directory.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
+    let is_directory = directory.path().ends_with('/') || (dos && attributes & 0x10 != 0);
     if dos && attributes & 8 != 0 {
         return Err(DecodeError::Unsupported {
-            position: entry.position(),
+            position: directory.position(),
             feature: "volume label",
         });
     }
 
     let kind = match mode & 0o170000 {
-        0 if directory => Kind::Directory,
-        0 | 0o100000 if !directory => match link {
+        0 if is_directory => Kind::Directory,
+        0 | 0o100000 if !is_directory => match link {
             Some(target) => Kind::HardLink(target),
             None => Kind::File(mode & 0o111 != 0),
         },
         0o040000 => Kind::Directory,
-        0o120000 if !directory => Kind::SymbolicLink(link),
-        0o020000 if !directory => Kind::Special(SpecialKind::CharacterDevice),
-        0o060000 if !directory => Kind::Special(SpecialKind::BlockDevice),
-        0o010000 if !directory => Kind::Special(SpecialKind::Fifo),
+        0o120000 if !is_directory => Kind::SymbolicLink(link),
+        0o020000 if !is_directory => Kind::Special(SpecialKind::CharacterDevice),
+        0o060000 if !is_directory => Kind::Special(SpecialKind::BlockDevice),
+        0o010000 if !is_directory => Kind::Special(SpecialKind::Fifo),
         _ => {
             return Err(DecodeError::Unsupported {
-                position: entry.position(),
+                position: directory.position(),
                 feature: "inconsistent or unsupported file attributes",
             });
         }
     };
 
     if matches!(kind, Kind::Directory | Kind::Special(_))
-        && (entry.size() != 0 || entry.crc32() != 0)
+        && (directory.size() != 0 || directory.crc32() != 0)
     {
         return Err(DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "non-file member has payload data",
         });
     }
 
-    if matches!(kind, Kind::Directory) && entry.version_needed() < 20 {
+    if matches!(kind, Kind::Directory) && directory.version_needed() < 20 {
         return Err(DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "directory requires extraction version 2.0",
         });
     }
 
     if matches!(kind, Kind::SymbolicLink(_))
-        && ((entry.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
-            || entry.size() > u64::from(u16::MAX))
+        && ((directory.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
+            || directory.size() > u64::from(u16::MAX))
     {
         return Err(DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "empty or oversized symbolic-link target",
         });
     }
 
     if extra.is_some() && matches!(kind, Kind::Directory | Kind::Special(SpecialKind::Fifo)) {
         return Err(DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "unexpected UNIX file-type data",
         });
     }
@@ -426,7 +428,7 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         && data.len() != 8
     {
         return Err(DecodeError::Integrity {
-            position: entry.position(),
+            position: directory.position(),
             reason: "invalid UNIX device numbers",
         });
     }

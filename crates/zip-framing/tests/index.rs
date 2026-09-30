@@ -4,7 +4,7 @@ use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
-use zip_framing::{Error as FrameError, Index, Limits};
+use zip_framing::{DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits};
 
 use support::{Fixture, Observed, Sparse, field, set16, set32};
 
@@ -38,16 +38,75 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
             assert_eq!(index.entries().len(), 1);
 
             let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
-            assert_eq!(entry.path(), "file");
-            assert_eq!(entry.size(), 7);
-            assert_eq!(entry.compressed_size(), 7);
-            assert_eq!(entry.crc32(), 0x0807_4b50);
+            assert_eq!(entry.directory().path(), "file");
+            assert_eq!(entry.directory().size(), 7);
+            assert_eq!(entry.directory().compressed_size(), 7);
+            assert_eq!(entry.directory().crc32(), 0x0807_4b50);
             assert_eq!(
                 &archive.bytes[entry.data_offset() as usize..archive.descriptor],
                 b"payload"
             );
         }
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
+    let extra = field(0xcafe, &[0x51; 257]);
+    let mut archive = Fixture {
+        name: vec![b'n'; 258],
+        local_extra: extra.clone(),
+        central_extra: extra,
+        member_comment: vec![b'c'; 259],
+        ..Fixture::default()
+    }
+    .build();
+    set16(&mut archive.bytes, archive.central + 4, 0x1234);
+    set32(&mut archive.bytes, archive.central + 38, 0x1234_5678);
+
+    let mut reader = Cursor::new(archive.bytes);
+    let index = read_validated(&mut reader, Limits::default()).await?;
+    let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+    assert_eq!(entry.directory().path(), "n".repeat(258));
+    assert_eq!(entry.directory().host_system(), 0x12);
+    assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
+    assert_eq!(entry.data_offset(), 30 + 258 + 261);
+    assert_eq!(entry.directory().size(), 7);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_and_bounds_archive_extra_record() -> TestResult {
+    let mut archive = Fixture::default().build();
+    let extra = field(0xcafe, &[0x51; 257]);
+    let mut record = 0x0806_4b50u32.to_le_bytes().to_vec();
+    record.extend_from_slice(&(extra.len() as u32).to_le_bytes());
+    record.extend_from_slice(&extra);
+    let record_length = record.len();
+
+    archive
+        .bytes
+        .splice(archive.central..archive.central, record);
+    set32(
+        &mut archive.bytes,
+        archive.end + record_length + 12,
+        (archive.end - archive.central + record_length) as u32,
+    );
+
+    let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+    assert_eq!(index.entries()[0].directory().path(), "file");
+
+    set32(&mut archive.bytes, archive.central + 4, u32::MAX);
+    assert!(matches!(
+        Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "truncated archive extra record"
+        }) if position == archive.central as u64
+    ));
 
     Ok(())
 }
@@ -143,6 +202,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
             .await?
             .entries()[0]
+            .directory()
             .path(),
         "café"
     );
@@ -194,32 +254,93 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
 #[tokio::test]
 async fn enforces_resource_budgets_before_exposing_members() {
     let bytes = Fixture::default().build().bytes;
-    for limits in [
-        Limits {
-            archive_size: 1,
-            ..Limits::default()
-        },
-        Limits {
-            entries: 0,
-            ..Limits::default()
-        },
-        Limits {
-            metadata_size: 1,
-            ..Limits::default()
-        },
-        Limits {
-            member_size: 6,
-            ..Limits::default()
-        },
-        Limits {
-            total_size: 6,
-            ..Limits::default()
-        },
+    for (limits, expected_resource, expected_limit) in [
+        (
+            Limits {
+                archive_size: 1,
+                ..Limits::default()
+            },
+            "archive bytes",
+            1,
+        ),
+        (
+            Limits {
+                entries: 0,
+                ..Limits::default()
+            },
+            "entry count",
+            0,
+        ),
+        (
+            Limits {
+                metadata_size: 1,
+                ..Limits::default()
+            },
+            "metadata bytes",
+            1,
+        ),
+        (
+            Limits {
+                member_size: 6,
+                ..Limits::default()
+            },
+            "decoded member bytes",
+            6,
+        ),
+        (
+            Limits {
+                total_size: 6,
+                ..Limits::default()
+            },
+            "total decoded bytes",
+            6,
+        ),
     ] {
         assert!(matches!(
             read_validated(&mut Cursor::new(&bytes), limits).await,
-            Err(FrameError::Limit { .. })
+            Err(FrameError::Limit { resource, limit })
+                if resource == expected_resource && limit == expected_limit
         ));
+    }
+}
+
+#[tokio::test]
+async fn rejects_directory_limits_before_reading_entries() {
+    for zip64 in [false, true] {
+        let archive = Fixture {
+            zip64,
+            archive_comment: vec![b'a'; usize::from(u16::MAX)],
+            ..Fixture::default()
+        }
+        .build();
+        let directory_size = (archive.end - archive.central - if zip64 { 76 } else { 0 }) as u64;
+
+        for (limits, expected_resource) in [
+            (
+                Limits {
+                    entries: 0,
+                    ..Limits::default()
+                },
+                "entry count",
+            ),
+            (
+                Limits {
+                    metadata_size: directory_size - 1,
+                    ..Limits::default()
+                },
+                "metadata bytes",
+            ),
+        ] {
+            let mut source = Observed::new(archive.bytes.clone());
+            // Keep the end-record scan separate from the directory body, and
+            // fail if parsing reaches that body before enforcing the limits.
+            source.fail_at = Some(archive.central as u64);
+            assert!(matches!(
+                Index::read(&mut source, limits).await,
+                Err(FrameError::Limit { resource, .. }) if resource == expected_resource
+            ));
+            assert_eq!(source.fail_at, Some(archive.central as u64));
+        }
     }
 }
 
@@ -454,17 +575,40 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     set32(&mut bytes, end + 12, (end - central) as u32);
     set32(&mut bytes, end + 16, central as u32);
 
-    let index = read_validated(&mut Cursor::new(&bytes), Limits::default()).await?;
+    let mut source = Cursor::new(&bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+
+    let entries: &[IndexedEntry] = index.entries();
+    let directory: &DirectoryEntry = entries[0].directory();
+    assert_eq!(directory.path(), "next");
+    assert_eq!(
+        entries[0].record_range(),
+        first.central as u64..central as u64
+    );
+    assert_eq!(entries[1].record_range(), 0..first.central as u64);
+    assert!(entries.iter().all(|entry| entry.resolved().is_none()));
+
+    let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
+    assert_eq!(entry.directory().path(), "next");
+    assert_eq!(entry.record_range(), first.central as u64..central as u64);
+    assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
+    assert!(index.entries()[0].resolved().is_some());
+    assert!(index.entries()[1].resolved().is_none());
+
+    index.validate_all(&mut source).await?;
 
     assert_eq!(
         index
             .entries()
             .iter()
-            .map(|entry| entry.path())
+            .map(|entry| entry.directory().path())
             .collect::<Vec<_>>(),
         ["next", "file"]
     );
-    assert_eq!(index.entries()[0].position(), first.central as u64);
+    assert_eq!(
+        index.entries()[0].directory().position(),
+        first.central as u64
+    );
     assert_eq!(
         index.entries()[0]
             .resolved()
@@ -472,7 +616,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
             .unix_extra_data(),
         Some(b"target".as_slice())
     );
-    assert_eq!(index.entries()[1].position(), 0);
+    assert_eq!(index.entries()[1].directory().position(), 0);
     assert_eq!(
         index.entries()[1]
             .resolved()
@@ -540,8 +684,8 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
     };
 
     let index = read_validated(&mut source, Limits::default()).await?;
-    assert_eq!(index.entries()[0].size(), size);
-    assert_eq!(index.entries()[0].compressed_size(), size);
+    assert_eq!(index.entries()[0].directory().size(), size);
+    assert_eq!(index.entries()[0].directory().compressed_size(), size);
     assert!(source.bytes_read < 70_000);
 
     Ok(())
@@ -551,21 +695,28 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
 async fn rejects_malformed_extras_and_zip64_version_two() {
     for extra in [
         vec![0],
+        vec![0, 0],
+        vec![0, 0, 0],
         vec![1, 0, 8, 0],
+        vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         [field(0xbeef, &[]), field(0xbeef, &[])].concat(),
     ] {
-        let archive = Fixture {
-            central_extra: extra,
-            ..Fixture::default()
-        }
-        .build();
+        for local in [false, true] {
+            let mut fixture = Fixture::default();
+            if local {
+                fixture.local_extra.clone_from(&extra);
+            } else {
+                fixture.central_extra.clone_from(&extra);
+            }
 
-        assert!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
-                .await
-                .is_err()
-        );
+            assert!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                    .await
+                    .is_err(),
+                "extra {extra:?}, local={local}"
+            );
+        }
     }
 
     let mut archive = Fixture {
@@ -609,6 +760,72 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 
         assert_eq!(result.is_ok(), valid);
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
+    let mut archive = Fixture {
+        zip64: true,
+        archive_comment: vec![b'a'; usize::from(u16::MAX)],
+        ..Fixture::default()
+    }
+    .build();
+    let extension = [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000);
+    let end_size = 44 + extension.len() as u64;
+    let end_offset = archive.end - 76;
+    archive.bytes[end_offset + 4..end_offset + 12].copy_from_slice(&end_size.to_le_bytes());
+    archive
+        .bytes
+        .splice(archive.end - 20..archive.end - 20, extension);
+
+    let directory_budget = (end_offset - archive.central) as u64 + 12 + end_size;
+    let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
+    // Directory, ZIP64 end, and local metadata share one cumulative budget.
+    for metadata_size in [total_budget - 1, total_budget] {
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(
+            &mut source,
+            Limits {
+                metadata_size,
+                ..Limits::default()
+            },
+        )
+        .await?;
+        let result = index.validate_all(&mut source).await;
+        if metadata_size == total_budget {
+            result?;
+        } else {
+            assert!(matches!(
+                result,
+                Err(FrameError::Limit {
+                    resource: "metadata bytes",
+                    limit,
+                }) if limit == metadata_size
+            ));
+        }
+    }
+
+    let mut source = Observed::new(archive.bytes);
+    // The extension exceeds the read-ahead window and requires its own read.
+    // The combined directory and end-record charge must precede that read.
+    source.fail_at = Some(end_offset as u64 + 56);
+    assert!(matches!(
+        read_validated(
+            &mut source,
+            Limits {
+                metadata_size: directory_budget - 1,
+                ..Limits::default()
+            },
+        )
+        .await,
+        Err(FrameError::Limit {
+            resource: "metadata bytes",
+            limit,
+        }) if limit == directory_budget - 1
+    ));
+    assert_eq!(source.fail_at, Some(end_offset as u64 + 56));
 
     Ok(())
 }
@@ -667,7 +884,7 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
 
     source.reads.clear();
     let entry = index.entry(&mut source, 7).await?.ok_or("missing member")?;
-    assert_eq!(entry.path(), "file-7");
+    assert_eq!(entry.directory().path(), "file-7");
     assert_eq!(source.reads.len(), 1);
     assert_eq!(source.reads[0], positions[7]..positions[8]);
     assert_eq!(entry.record_range(), positions[7]..positions[8]);

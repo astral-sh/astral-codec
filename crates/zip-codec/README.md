@@ -43,8 +43,9 @@ at byte zero. Use `std::io::Cursor<Vec<u8>>` for an in-memory archive.
 `add_file`, and recursive builds use the encoder's configured compression method.
 Empty files are always stored.
 
-`ZipArchive::entries` exposes indexed metadata and `ZipArchive::member(index)`
-selects an entry. Sequential iteration resumes after the selected entry.
+`ZipArchive::entries` exposes indexed members; call `directory()` on an entry
+to access its central-directory metadata. `ZipArchive::member(index)` selects
+an entry. Sequential iteration resumes after the selected entry.
 `open_with_limits` and `ZipEncoder::limits` configure resource budgets.
 
 Opening validates the directory. Selecting a member reconciles its local

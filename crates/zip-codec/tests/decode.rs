@@ -152,6 +152,8 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
     for bytes in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
         assert_eq!(archive.entries().len(), 5);
+        assert_eq!(archive.entries()[1].directory().path(), "directory/file");
+        assert!(archive.entries()[1].resolved().is_none());
 
         {
             let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
@@ -162,6 +164,12 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
             assert!(payload.next_chunk(&mut chunk, 1).await?);
             assert_eq!(chunk, b"h");
         }
+
+        let entry = archive.entries()[1].resolved().ok_or("unresolved entry")?;
+        assert_eq!(entry.directory().path(), "directory/file");
+        assert_eq!(entry.directory().size(), 140_000);
+        assert!(entry.data_offset() > entry.directory().position());
+        assert!(archive.entries()[2].resolved().is_none());
 
         // Source access drains the preceding payload and permits explicit
         // prefetching or seeking before the next member restores its cursor.
@@ -274,7 +282,7 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
     archive.validate_all().await?;
     let entry = archive.entries()[0].resolved().ok_or("unresolved entry")?;
     let start = entry.data_offset() as usize;
-    let length = entry.compressed_size() as usize;
+    let length = entry.directory().compressed_size() as usize;
     let encoded = &bytes[start..start + length];
 
     for (label, payload, size) in [
@@ -498,7 +506,7 @@ async fn local_metadata_errors_poison_selection_and_full_validation() -> TestRes
     let original = STORED;
     let archive = ZipArchive::open(Cursor::new(original)).await?;
     let mut corrupt = original.to_vec();
-    corrupt[archive.entries()[1].position() as usize + 30] ^= 1;
+    corrupt[archive.entries()[1].directory().position() as usize + 30] ^= 1;
 
     for full_validation in [false, true] {
         let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;

@@ -140,7 +140,11 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
         assert_eq!(archive.entries().len(), cases.len());
 
         for (index, (path, _, contents, method)) in cases.into_iter().enumerate() {
-            assert_eq!(archive.entries()[index].method(), method, "{path}");
+            assert_eq!(
+                archive.entries()[index].directory().method(),
+                method,
+                "{path}"
+            );
 
             let Some(Member::File {
                 metadata,
