@@ -153,19 +153,19 @@ pub mod attributes {
     /// Bit offset of the UNIX mode in external file attributes.
     pub const UNIX_MODE_SHIFT: u32 = 16;
     /// UNIX file-type mask, applied after shifting out the DOS attributes.
-    pub const UNIX_TYPE_MASK: u32 = 0o170000;
+    pub const UNIX_TYPE_MASK: u16 = 0o170000;
     /// UNIX regular file.
-    pub const UNIX_REGULAR: u32 = 0o100000;
+    pub const UNIX_REGULAR: u16 = 0o100000;
     /// UNIX directory.
-    pub const UNIX_DIRECTORY: u32 = 0o040000;
+    pub const UNIX_DIRECTORY: u16 = 0o040000;
     /// UNIX symbolic link.
-    pub const UNIX_SYMLINK: u32 = 0o120000;
+    pub const UNIX_SYMLINK: u16 = 0o120000;
     /// UNIX character device.
-    pub const UNIX_CHARACTER_DEVICE: u32 = 0o020000;
+    pub const UNIX_CHARACTER_DEVICE: u16 = 0o020000;
     /// UNIX block device.
-    pub const UNIX_BLOCK_DEVICE: u32 = 0o060000;
+    pub const UNIX_BLOCK_DEVICE: u16 = 0o060000;
     /// UNIX named pipe.
-    pub const UNIX_FIFO: u32 = 0o010000;
+    pub const UNIX_FIFO: u16 = 0o010000;
     /// Any UNIX execute permission.
-    pub const UNIX_EXECUTABLE: u32 = 0o111;
+    pub const UNIX_EXECUTABLE: u16 = 0o111;
 }

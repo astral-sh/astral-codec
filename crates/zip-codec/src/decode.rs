@@ -336,9 +336,28 @@ enum Kind {
     Special(SpecialKind),
 }
 
+/// An extracted form of a central directory entry's "external attributes" field.
+///
+/// See [`zip_framing::index::DirectoryEntry::external_attributes`].
 struct ExternalAttributes {
-    unix_mode: u32,
+    /// The UNIX file mode.
+    ///
+    /// This is not standardized in the APPNOTE, but implementations that want to convey
+    /// UNIX-style file modes conventionally store the lower 16 bits of `st_mode` into
+    /// the upper 16 bits of the external attributes.
+    unix_mode: u16,
+
+    /// Whether the entry is marked with the DOS directory attribute.
+    ///
+    /// APPNOTE defines this for MS-DOS, but implementations widely use it to hint whether a
+    /// member is a directory regardless of host platform. We reconcile this attribute with the
+    /// conventional `/` suffix and the UNIX file type when determining the member's kind.
+    /// See [`self::kind`].
     dos_directory: bool,
+
+    /// Whether the entry represents the disk/volume's name, rather than a regular file.
+    ///
+    /// We reject this as an unsupported feature.
     dos_volume_label: bool,
 }
 
@@ -356,7 +375,7 @@ impl ExternalAttributes {
 
         Self {
             unix_mode: if matches!(host_system, host::UNIX | host::OS_X) {
-                raw >> attributes::UNIX_MODE_SHIFT
+                (raw >> attributes::UNIX_MODE_SHIFT) as u16
             } else {
                 0
             },

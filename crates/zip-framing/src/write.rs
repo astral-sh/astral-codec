@@ -171,7 +171,10 @@ impl CompletedMember<'_> {
         } else {
             0
         };
-        push32(&mut bytes, (mode << attributes::UNIX_MODE_SHIFT) | dos);
+        push32(
+            &mut bytes,
+            (u32::from(mode) << attributes::UNIX_MODE_SHIFT) | dos,
+        );
         push32(&mut bytes, u32::MAX);
 
         bytes.extend_from_slice(self.header.path.as_bytes());
