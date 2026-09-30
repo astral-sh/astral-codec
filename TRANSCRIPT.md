@@ -1,54 +1,71 @@
 # ZIP implementation
 
-## Sparse ZIP access
-
-- User approved buffering and lazy local-header validation for HTTP range inputs.
-- `ww/zip-index` builds on the merged framing layer in `ww/zip-codec`; it belongs
-  below decoder PR #123. Directory metadata and checked entries are distinct.
-- `Index::entry` resolves and caches one member; `validate_all` retains the full
-  metadata-validation path. Limits charge local metadata only after success.
-- Source reads use bounded windows: 64 KiB for directory records and 4 KiB for
-  selected local records. Declared record spans support explicit prefetching.
-- Framing tests: 16 pass, including a 2,000-member read-count test, deferred
-  local corruption, cached resolution, and metadata-budget retry behavior.
-- Decoder integration: `ZipArchive::member` resolves local records on demand;
-  `validate_all` checks all metadata and member kinds. `reader_mut().await` drains
-  the active payload before exposing the source for prefetching.
-- Decoder tests cover cancellation in payload, local resolution, full validation,
-  and source lending, plus poisoned local failures and preserved drain checks.
-- Remaining: documentation, full-stack checks, and stack push.
-
 ## Scope and decisions
 
-- Target: PKWARE APPNOTE 6.3.3, stored and DEFLATE, UTF-8 paths, safe Rust,
+- PKWARE APPNOTE 6.3.3; stored/DEFLATE, UTF-8 paths/comments, safe Rust,
   asynchronous seekable input, and `archive-trait` construction/extraction.
 - Reject encryption, signatures, patched data, multi-volume archives, and
-  inconsistent redundant records. The user also approved rejecting unaccounted
-  bytes (including SFX prefixes/padding) and ZIP64 version-2 directories.
-- `zip-framing` owns records, ZIP64, descriptors, and index consistency.
-  `zip-codec` owns payload compression/integrity and format-neutral adapters.
-- Only new runtime dependency: `flate2`, with defaults disabled and `zlib-rs`.
-- Resource limits are checked before allocation/decompression. Dropped payloads
-  are drained and checked before advancing; interrupted operations fail closed.
+  inconsistent redundant records. Approved exclusions also include unaccounted
+  bytes (SFX/padding) and ZIP64 version-2 directories.
+- Opening checks end records and central metadata. Local checks are deferred
+  until selection or `validate_all`; payload integrity is checked on consumption.
+- Directory reads use 64 KiB windows; selected local records use 4 KiB windows
+  bounded by their declared spans. The source must remain immutable.
+- `reader_mut().await` drains an active payload before lending the source for
+  explicit prefetching/seeking. HTTP cache policy remains caller-controlled.
+- A private decoder operation guard poisons before I/O; consuming `commit`
+  restores usability. Member preparation finishes before lending a payload.
+- Writing uses ZIP64 throughout, including small archives. The pending encoder
+  requires seekable output and backpatches local headers without descriptors.
+- Only added runtime dependency: `flate2` with the `zlib-rs` backend.
+
+## Merged-layer audit
+
+Reviewed the merged framing, index, extras, decoder, payload, and serialization
+implementations, their integration tests and fixtures, and crate dependencies.
+Compared ownership boundaries with tar-codec and archive-trait contracts.
+
+- Framing owns record bounds, ZIP64 resolution, redundant metadata agreement,
+  and budgets. `DirectoryEntry` remains distinct from checked `Entry`; resolved
+  extras and cached local metadata are published only after successful checks.
+- The codec owns member projection, decompression, CRC/decoded-size checks,
+  lending, draining, and poisoning. Extraction policy stays in `archive-trait`.
+- Serialization uses validated `MemberHeader` and `CompletedMember` states to
+  emit consistent local/central records. Streaming and I/O belong to the encoder.
+- Cleanup: move buffered reads onto `RecordReader`; return borrowed validated
+  filenames and allocate only the directory's retained name. Public APIs and
+  accepted/rejected input behavior are unchanged.
+
+Test ownership after cleanup:
+
+- Framing index tests own layout permutations, malformed records, metadata
+  limits, sparse access, cache publication, and retry accounting (16 tests).
+- Framing write tests own construction validation and record serialization
+  round-trips (3 tests). These exercise the writer's independent entry points.
+- Decoder tests own projection, integrity, navigation, poisoning and buffer
+  contracts (10 tests). Keep all six Python layouts in the interoperability test;
+  seeking and corrupt-payload workflows use one fixture per compression method.
+- EOF assertions live in one focused test, covering first/repeated EOF for
+  nonempty, empty, and encoded-empty payloads, plus bounded chunk requests.
+  The separate empty-directory test covers validation during member selection.
+- Retain failure/cancellation cases for each public operation: they verify
+  distinct guard/drain paths. Framing rejects malformed metadata; codec tests
+  additionally verify that those errors poison the lending archive.
+- Keep one extraction smoke test. Filesystem containment and link-policy cases
+  remain owned by `archive-trait`, rather than repeated for ZIP.
 
 ## Stack
 
-1. `ww/zip-framing`: bounded indexing and physical record validation.
-2. `ww/zip-decode`: ZIP decoding and `Archive` integration.
-3. Planned: ZIP encoding and `ArchiveBuilder` integration.
-4. Planned: interoperability, adversarial coverage, and security documentation.
+- Development base `ww/zip-codec` is at `8e93c75`: #122, #130, #123, and #127 merged.
+- `ww/zip-cleanup` targets that base for this audit, before further feature merges.
+- Pending feature stack #131: #124 (`ww/zip-encode`) then #125 (`ww/zip-docs`).
 
-## Verification / remaining work
+## Verification
 
-- Read CONTRIBUTING.md, archive-trait contracts, tar implementations/tests,
-  and APPNOTE sections 4, 7.3, and appendices C/D.
-- Framing implemented: bounded EOCD lookup, ZIP64, UTF-8/Unicode-field agreement,
-  local/central consistency, descriptors, and complete nonoverlapping coverage.
-- `cargo test -p zip-framing --test index`: 7 tests passed, including table-driven
-  field mutations and every truncation of classic/ZIP64 descriptor fixtures.
-- Decoding implemented: raw DEFLATE via zlib-rs, CRC/exact-size/exact-stream
-  checks, 64 KiB processing, poisoned cancellation, lending/random access.
-- `cargo test -p zip-codec --test decode`: 6 tests passed against reproducible
-  Python fixtures, corruption, size lies, trailing streams, and partial-I/O
-  cancellation.
-- Next: audit Unix extra-field link metadata, then encoding.
+- `cargo test -p zip-framing -p zip-codec --tests`: 29 tests pass. Rechecked the
+  empty-directory test after removing its redundant empty-file assertion.
+- Existing checks cover buffering/read counts, retry budgets, exact record
+  coverage, unsupported features, UTF-8, ZIP64/descriptors, payload integrity,
+  cancellation, interoperability, and extraction.
+- Workspace clippy, formatting, and ZIP documentation checks pass with warnings
+  denied. The cleanup adds no dependencies, unsafe code, or public API changes.
