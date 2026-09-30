@@ -3,7 +3,9 @@ use std::{collections::BTreeMap, str};
 use flate2::Crc;
 
 use crate::{
-    Error, invalid,
+    Error,
+    constants::extra,
+    invalid,
     record::{Common, bytes_at, parse_name},
 };
 
@@ -28,7 +30,8 @@ impl<'a> Extras<'a> {
         let mut fields = BTreeMap::new();
 
         while !bytes.is_empty() {
-            let Some((header, remaining)) = bytes.split_first_chunk::<4>() else {
+            let Some((header, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
+            else {
                 return Err(invalid(position, "truncated extra-field header"));
             };
 
@@ -40,11 +43,15 @@ impl<'a> Extras<'a> {
             };
 
             let unsupported = match identifier {
-                0x0007 => Some("authenticity verification"),
-                0x000f => Some("patch descriptor"),
-                0x0014..=0x0016 => Some("digital signature"),
-                0x0017 | 0x0019 | 0x9901 => Some("encryption extra field"),
-                0x0008 => Some("alternate name encoding"),
+                extra::AV_INFO => Some("authenticity verification"),
+                extra::PATCH_DESCRIPTOR => Some("patch descriptor"),
+                extra::PKCS7_STORE | extra::X509_FILE | extra::X509_DIRECTORY => {
+                    Some("digital signature")
+                }
+                extra::STRONG_ENCRYPTION | extra::ENCRYPTION_RECIPIENTS | extra::AES => {
+                    Some("encryption extra field")
+                }
+                extra::EXTENDED_LANGUAGE_ENCODING => Some("alternate name encoding"),
                 _ => None,
             };
             if let Some(feature) = unsupported {
@@ -55,7 +62,7 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
 
-            if identifier == 0x000d && data.len() < 12 {
+            if identifier == extra::UNIX && data.len() < extra::UNIX_PREFIX_SIZE {
                 return Err(invalid(position, "truncated UNIX extra field"));
             }
 
@@ -66,7 +73,9 @@ impl<'a> Extras<'a> {
     }
 
     fn unix_data(&self) -> Option<&[u8]> {
-        self.fields.get(&0x000d).map(|data| &data[12..])
+        self.fields
+            .get(&extra::UNIX)
+            .map(|data| &data[extra::UNIX_PREFIX_SIZE..])
     }
 
     pub(crate) fn zip64(
@@ -89,7 +98,7 @@ impl<'a> Extras<'a> {
         expected += usize::from(offset == Some(u32::MAX)) * 8;
         expected += usize::from(disk == Some(u16::MAX)) * 4;
 
-        let field = self.fields.get(&1).copied();
+        let field = self.fields.get(&extra::ZIP64).copied();
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
@@ -140,7 +149,7 @@ impl<'a> Extras<'a> {
     ) -> Result<&'name str, Error> {
         let name = parse_name(bytes, flags, position)?;
 
-        if let Some(field) = self.fields.get(&0x7075) {
+        if let Some(field) = self.fields.get(&extra::UNICODE_PATH) {
             let unicode = unicode_field(field, bytes, position)?;
             if unicode != name {
                 return Err(invalid(
@@ -156,7 +165,7 @@ impl<'a> Extras<'a> {
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
         str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 member comment"))?;
 
-        if let Some(field) = self.fields.get(&0x6375) {
+        if let Some(field) = self.fields.get(&extra::UNICODE_COMMENT) {
             unicode_field(field, bytes, position)?;
         }
 
@@ -175,13 +184,13 @@ impl<'a> Extras<'a> {
 
             // APPNOTE and Info-ZIP define shorter central forms for these
             // fields. ZIP64 values are resolved and compared separately.
-            let equal = match identifier {
-                1 => true,
-                0x000d | 0x5855 => local.get(..other.len()) == Some(*other),
-                0x5455 => {
+            let equal = match *identifier {
+                extra::ZIP64 => true,
+                extra::UNIX | extra::INFO_ZIP_UNIX => local.get(..other.len()) == Some(*other),
+                extra::EXTENDED_TIMESTAMP => {
                     local.first() == other.first() && local.get(..other.len()) == Some(*other)
                 }
-                0x7855 => other.is_empty() || local == other,
+                extra::INFO_ZIP_UNIX_NEW => other.is_empty() || local == other,
                 _ => local == other,
             };
             if !equal {
@@ -199,7 +208,7 @@ impl<'a> Extras<'a> {
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {
-    let Some((&1, field)) = field.split_first() else {
+    let Some((&extra::UNICODE_VERSION, field)) = field.split_first() else {
         return Err(invalid(position, "invalid Unicode extra field"));
     };
     let Some((expected_crc, value)) = field.split_first_chunk::<4>() else {

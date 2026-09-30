@@ -518,6 +518,40 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
+async fn reconciles_shortened_info_zip_extras() -> TestResult {
+    for (identifier, local, central) in [
+        (0x5855, vec![1; 12], vec![1; 8]),
+        (0x5455, vec![7; 13], vec![7; 5]),
+        (0x7855, vec![1; 4], Vec::new()),
+    ] {
+        let fixture = Fixture {
+            local_extra: field(identifier, &local),
+            central_extra: field(identifier, &central),
+            ..Fixture::default()
+        };
+        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+
+        let fixture = Fixture {
+            local_extra: field(identifier, &local),
+            central_extra: field(identifier, &[0]),
+            ..Fixture::default()
+        };
+        assert!(
+            matches!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "local and central extra fields disagree",
+                    ..
+                })
+            ),
+            "extra {identifier:#x}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn requires_complete_agreement_for_opaque_member_extras() {
     for (local, central, valid) in [
         (b"same".as_slice(), b"same".as_slice(), true),
@@ -741,8 +775,30 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
         ([0xef, 0xbe, 0, 0, 0, 0].repeat(2048), true),
         (vec![0xef], false),
         (vec![0xef, 0xbe, 1, 0, 0, 0], false),
-        (vec![0x14, 0, 0, 0, 0, 0], false),
-    ] {
+    ]
+    .into_iter()
+    .chain(
+        [
+            (0x000fu16, false),
+            (0x0013, true),
+            (0x0014, false),
+            (0x0015, false),
+            (0x0016, false),
+            (0x0017, false),
+            (0x0018, true),
+            (0x0019, false),
+            (0x001a, true),
+            (0x9900, true),
+            (0x9901, false),
+            (0x9902, true),
+        ]
+        .map(|(identifier, valid)| {
+            (
+                [identifier.to_le_bytes().as_slice(), &[0; 4]].concat(),
+                valid,
+            )
+        }),
+    ) {
         let mut archive = Fixture {
             zip64: true,
             ..Fixture::default()

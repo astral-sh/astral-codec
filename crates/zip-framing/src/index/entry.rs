@@ -4,9 +4,10 @@ use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
     CompressionMethod, Error, add,
+    constants::{signature, size},
     extra::{Extras, ResolvedExtras},
     invalid,
-    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, array_at, bytes_at},
+    record::{Common, RecordReader, array_at, bytes_at},
 };
 
 use super::Budget;
@@ -183,13 +184,13 @@ impl IndexedEntry {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(
-            30 + directory.metadata.path.len() as u64,
+            size::LOCAL as u64 + directory.metadata.path.len() as u64,
             directory.compressed_size(),
         )?;
         let minimum = add(
             minimum,
             if directory.metadata.common.descriptor() {
-                12
+                size::DESCRIPTOR as u64
             } else {
                 0
             },
@@ -235,19 +236,19 @@ impl DirectoryEntry {
         end: u64,
         budget: &mut Budget,
     ) -> Result<(Self, u64), Error> {
-        let mut header = [0; 46];
+        let mut header = [0; size::CENTRAL];
         reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != CENTRAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(&array_at::<6, 22, _>(&header), position)?;
+        let common = Common::parse(&array_at::<6, { size::COMMON }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
         let variable = reader
             .read_vec(
-                position + 46,
+                position + size::CENTRAL as u64,
                 name_length + extra_length + comment_length,
                 end,
             )
@@ -286,7 +287,10 @@ impl DirectoryEntry {
             extra: variable[name_length..name_length + extra_length].to_vec(),
         };
 
-        Ok((entry, position + 46 + variable.len() as u64))
+        Ok((
+            entry,
+            position + size::CENTRAL as u64 + variable.len() as u64,
+        ))
     }
 }
 
@@ -299,19 +303,23 @@ impl IndexedEntry {
         let metadata = &self.directory.metadata;
         let boundary = self.boundary;
         let position = metadata.local_offset;
-        let mut header = [0; 30];
+        let mut header = [0; size::LOCAL];
         reader.read_at(position, &mut header, boundary).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != LOCAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&array_at::<4, 22, _>(&header), position)?;
+        let common = Common::parse(&array_at::<4, { size::COMMON }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
-        budget.metadata(30 + (name_length + extra_length) as u64)?;
+        budget.metadata((size::LOCAL + name_length + extra_length) as u64)?;
 
         let variable = reader
-            .read_vec(position + 30, name_length + extra_length, boundary)
+            .read_vec(
+                position + size::LOCAL as u64,
+                name_length + extra_length,
+                boundary,
+            )
             .await?;
 
         let extras = Extras::parse(&variable[name_length..], position)?;
@@ -346,7 +354,7 @@ impl IndexedEntry {
             return Err(invalid(position, "local and central CRC or sizes disagree"));
         }
 
-        let data_offset = add(position, 30 + variable.len() as u64)?;
+        let data_offset = add(position, size::LOCAL as u64 + variable.len() as u64)?;
         let data_end = add(data_offset, metadata.compressed_size)?;
         if data_end > boundary {
             return Err(invalid(position, "payload overlaps the next record"));
@@ -375,25 +383,29 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     end: u64,
     zip64: bool,
 ) -> Result<(), Error> {
-    let unsigned_length = if zip64 { 20 } else { 12 };
+    let unsigned_length = if zip64 {
+        size::ZIP64_DESCRIPTOR as u64
+    } else {
+        size::DESCRIPTOR as u64
+    };
     let length = end - position;
-    if length != unsigned_length && length != unsigned_length + 4 {
+    if length != unsigned_length && length != unsigned_length + size::SIGNATURE as u64 {
         return Err(invalid(position, "invalid data descriptor length"));
     }
 
-    let mut bytes = [0; 24];
+    let mut bytes = [0; size::SIGNATURE + size::ZIP64_DESCRIPTOR];
     reader
         .read_at(position, &mut bytes[..length as usize], end)
         .await?;
 
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
-    let offset = if length == unsigned_length + 4 {
-        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != DESCRIPTOR {
+    let offset = if length == unsigned_length + size::SIGNATURE as u64 {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != signature::DESCRIPTOR {
             return Err(invalid(position, "invalid data descriptor signature"));
         }
 
-        4
+        size::SIGNATURE
     } else {
         0
     };

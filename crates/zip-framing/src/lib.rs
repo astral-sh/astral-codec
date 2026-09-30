@@ -8,6 +8,7 @@
 
 #![forbid(unsafe_code)]
 
+pub mod constants;
 mod extra;
 mod index;
 mod record;
@@ -17,6 +18,7 @@ use std::io;
 
 use thiserror::Error;
 
+use constants::method;
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 
 /// A supported ZIP compression method.
@@ -36,15 +38,15 @@ impl CompressionMethod {
     /// Returns the APPNOTE method number.
     pub fn number(self) -> u16 {
         match self {
-            Self::Stored => 0,
-            Self::Deflate => 8,
+            Self::Stored => method::STORED,
+            Self::Deflate => method::DEFLATE,
         }
     }
 
     pub(crate) fn parse(value: u16, position: u64) -> Result<Self, Error> {
         match value {
-            0 => Ok(Self::Stored),
-            8 => Ok(Self::Deflate),
+            method::STORED => Ok(Self::Stored),
+            method::DEFLATE => Ok(Self::Deflate),
             _ => Err(Error::Unsupported {
                 position,
                 feature: "compression method",

@@ -8,7 +8,10 @@ use std::{
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, Index, IndexedEntry, Limits};
+use zip_framing::{
+    Entry, Index, IndexedEntry, Limits,
+    constants::{attributes, host, version},
+};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -336,13 +339,19 @@ enum Kind {
 fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
     let directory = entry.directory();
     let attributes = directory.external_attributes();
-    let unix = matches!(directory.host_system(), 3 | 19);
-    let mode = if unix { attributes >> 16 } else { 0 };
+    let unix = matches!(directory.host_system(), host::UNIX | host::OS_X);
+    let mode = if unix {
+        attributes >> attributes::UNIX_MODE_SHIFT
+    } else {
+        0
+    };
 
     let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
     let link = if let Some(data) = extra
-        && matches!(mode & 0o170000, 0 | 0o100000 | 0o120000)
-    {
+        && matches!(
+            mode & attributes::UNIX_TYPE_MASK,
+            0 | attributes::UNIX_REGULAR | attributes::UNIX_SYMLINK
+        ) {
         let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
             position: directory.position(),
             reason: "non-UTF-8 UNIX link target",
@@ -359,26 +368,32 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         None
     };
 
-    let dos = matches!(directory.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
-    let is_directory = directory.path().ends_with('/') || (dos && attributes & 0x10 != 0);
-    if dos && attributes & 8 != 0 {
+    let dos = matches!(
+        directory.host_system(),
+        host::MS_DOS | host::UNIX | host::OS2_HPFS | host::WINDOWS_NTFS | host::VFAT | host::OS_X
+    );
+    let is_directory =
+        directory.path().ends_with('/') || (dos && attributes & attributes::DOS_DIRECTORY != 0);
+    if dos && attributes & attributes::DOS_VOLUME_LABEL != 0 {
         return Err(DecodeError::Unsupported {
             position: directory.position(),
             feature: "volume label",
         });
     }
 
-    let kind = match mode & 0o170000 {
+    let kind = match mode & attributes::UNIX_TYPE_MASK {
         0 if is_directory => Kind::Directory,
-        0 | 0o100000 if !is_directory => match link {
+        0 | attributes::UNIX_REGULAR if !is_directory => match link {
             Some(target) => Kind::HardLink(target),
-            None => Kind::File(mode & 0o111 != 0),
+            None => Kind::File(mode & attributes::UNIX_EXECUTABLE != 0),
         },
-        0o040000 => Kind::Directory,
-        0o120000 if !is_directory => Kind::SymbolicLink(link),
-        0o020000 if !is_directory => Kind::Special(SpecialKind::CharacterDevice),
-        0o060000 if !is_directory => Kind::Special(SpecialKind::BlockDevice),
-        0o010000 if !is_directory => Kind::Special(SpecialKind::Fifo),
+        attributes::UNIX_DIRECTORY => Kind::Directory,
+        attributes::UNIX_SYMLINK if !is_directory => Kind::SymbolicLink(link),
+        attributes::UNIX_CHARACTER_DEVICE if !is_directory => {
+            Kind::Special(SpecialKind::CharacterDevice)
+        }
+        attributes::UNIX_BLOCK_DEVICE if !is_directory => Kind::Special(SpecialKind::BlockDevice),
+        attributes::UNIX_FIFO if !is_directory => Kind::Special(SpecialKind::Fifo),
         _ => {
             return Err(DecodeError::Unsupported {
                 position: directory.position(),
@@ -396,7 +411,7 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         });
     }
 
-    if matches!(kind, Kind::Directory) && directory.version_needed() < 20 {
+    if matches!(kind, Kind::Directory) && directory.version_needed() < version::V2_0 {
         return Err(DecodeError::Integrity {
             position: directory.position(),
             reason: "directory requires extraction version 2.0",
