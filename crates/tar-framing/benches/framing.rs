@@ -1,6 +1,9 @@
-use std::{hint::black_box, sync::Arc, time::Duration};
+use std::{fmt, hint::black_box, sync::Arc};
 
-use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use divan::{
+    Bencher,
+    counter::{BytesCount, ItemsCount},
+};
 use tar_framing::{
     BLOCK_SIZE, PaxKeyword, UstarKind,
     logical::TarReader,
@@ -88,36 +91,15 @@ struct FramingFixture {
     members: Vec<FramingMember>,
 }
 
-impl FramingFixture {
-    fn benchmark_id(&self) -> String {
-        format!("{}-{}-members", self.id, self.members.len())
-    }
-
-    fn throughput(&self) -> Throughput {
-        Throughput::Elements(
-            u64::try_from(self.members.len())
-                .expect("framing fixture member count should be representable"),
-        )
+impl fmt::Display for FramingFixture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}-{}-members", self.id, self.members.len())
     }
 }
 
-impl Fixture {
-    fn benchmark_id(&self) -> String {
-        format!("{}-{}-entries", self.id, self.entries.len())
-    }
-
-    fn entry_throughput(&self) -> Throughput {
-        Throughput::Elements(
-            u64::try_from(self.entries.len()).expect("fixture entry count should be representable"),
-        )
-    }
-
-    fn payload_throughput(&self) -> Throughput {
-        Throughput::ElementsAndBytes {
-            elements: u64::try_from(self.entries.len())
-                .expect("fixture entry count should be representable"),
-            bytes: self.payload_bytes,
-        }
+impl fmt::Display for Fixture {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}-{}-entries", self.id, self.entries.len())
     }
 }
 
@@ -128,13 +110,13 @@ enum DecodeMode {
     Skip,
 }
 
-impl DecodeMode {
-    fn id(self) -> &'static str {
-        match self {
+impl fmt::Display for DecodeMode {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
             Self::Block => "next_block",
             Self::Chunk => "next_chunk",
             Self::Skip => "skip",
-        }
+        })
     }
 }
 
@@ -592,88 +574,106 @@ async fn decode_trailing_global_pax(archive: &[u8]) -> usize {
     archive.len()
 }
 
-fn bench_encode_pax_framing(criterion: &mut Criterion, fixtures: &[Fixture]) {
-    let mut group = criterion.benchmark_group("encode_pax_framing");
-    for fixture in fixtures {
-        group.throughput(fixture.entry_throughput());
-        group.bench_with_input(
-            BenchmarkId::from_parameter(fixture.benchmark_id()),
-            fixture,
-            |bencher, fixture| bencher.iter(|| black_box(encode_pax_framing(fixture))),
-        );
-    }
-    group.finish();
+#[divan::bench(name = "encode_pax_framing", args = fixtures())]
+fn bench_encode_pax_framing(bencher: Bencher, fixture: &Fixture) {
+    bencher
+        .counter(ItemsCount::new(fixture.entries.len()))
+        .bench_local(|| {
+            black_box(encode_pax_framing(black_box(fixture)));
+        });
 }
 
-fn bench_encode_pax_metadata(criterion: &mut Criterion, fixtures: &[FramingFixture]) {
-    let mut group = criterion.benchmark_group("encode_pax_metadata");
-    for fixture in fixtures {
-        group.throughput(fixture.throughput());
-        group.bench_with_input(
-            BenchmarkId::from_parameter(fixture.benchmark_id()),
-            fixture,
-            |bencher, fixture| bencher.iter(|| black_box(encode_pax_metadata(fixture))),
-        );
-    }
-    group.finish();
+#[divan::bench(name = "encode_pax_metadata", args = framing_fixtures())]
+fn bench_encode_pax_metadata(bencher: Bencher, fixture: &FramingFixture) {
+    bencher
+        .counter(ItemsCount::new(fixture.members.len()))
+        .bench_local(|| {
+            black_box(encode_pax_metadata(black_box(fixture)));
+        });
 }
 
-fn bench_decode_payload(criterion: &mut Criterion, runtime: &Runtime, fixtures: &[Fixture]) {
-    let mut group = criterion.benchmark_group("decode_payload");
-    group.measurement_time(Duration::from_secs(6));
-    for fixture in fixtures {
-        group.throughput(fixture.payload_throughput());
-        for mode in [DecodeMode::Block, DecodeMode::Chunk, DecodeMode::Skip] {
-            group.bench_with_input(
-                BenchmarkId::new(mode.id(), fixture.benchmark_id()),
-                fixture,
-                |bencher, fixture| {
-                    bencher
-                        .to_async(runtime)
-                        .iter(|| async { black_box(decode_payload(fixture, mode).await) });
-                },
-            );
-        }
-    }
-    group.finish();
+struct DecodeCase {
+    fixture: Fixture,
+    mode: DecodeMode,
 }
 
-fn bench_global_pax_updates(criterion: &mut Criterion, runtime: &Runtime) {
-    let mut group = criterion.benchmark_group("global_pax_updates");
-    for record_count in GLOBAL_PAX_RECORD_COUNTS {
-        for (mode, replace) in [("unique", false), ("replace", true)] {
-            let archive = global_pax_archive(record_count, replace);
-            let updates = if replace {
-                record_count * 2
-            } else {
-                record_count
-            };
-            group.throughput(Throughput::Elements(
-                u64::try_from(updates).expect("fixture record count should be representable"),
-            ));
-            group.bench_with_input(
-                BenchmarkId::new(mode, record_count),
-                &archive,
-                |bencher, archive| {
-                    bencher.to_async(runtime).iter(|| async {
-                        black_box(decode_trailing_global_pax(black_box(archive)).await)
-                    });
-                },
-            );
-        }
+impl fmt::Display for DecodeCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.fixture, self.mode)
     }
-    group.finish();
 }
 
-fn framing(criterion: &mut Criterion) {
+fn decode_cases() -> impl Iterator<Item = DecodeCase> {
+    [DecodeMode::Block, DecodeMode::Chunk, DecodeMode::Skip]
+        .into_iter()
+        .flat_map(|mode| {
+            fixtures()
+                .into_iter()
+                .map(move |fixture| DecodeCase { fixture, mode })
+        })
+}
+
+#[divan::bench(name = "decode_payload", args = decode_cases())]
+fn bench_decode_payload(bencher: Bencher, case: &DecodeCase) {
     let runtime = runtime();
-    let fixtures = fixtures();
-    let framing_fixtures = framing_fixtures();
-    bench_encode_pax_framing(criterion, &fixtures);
-    bench_encode_pax_metadata(criterion, &framing_fixtures);
-    bench_decode_payload(criterion, &runtime, &fixtures);
-    bench_global_pax_updates(criterion, &runtime);
+    let fixture = &case.fixture;
+    assert_eq!(
+        runtime.block_on(decode_payload(fixture, case.mode)),
+        (
+            u64::try_from(fixture.entries.len())
+                .expect("fixture entry count should be representable"),
+            fixture.payload_bytes
+        ),
+    );
+    bencher
+        .counter(ItemsCount::new(fixture.entries.len()))
+        .counter(BytesCount::new(fixture.payload_bytes))
+        .bench_local(|| {
+            black_box(runtime.block_on(decode_payload(black_box(fixture), case.mode)));
+        });
 }
 
-criterion_group!(benches, framing);
-criterion_main!(benches);
+struct GlobalPaxCase {
+    record_count: usize,
+    replace: bool,
+}
+
+impl fmt::Display for GlobalPaxCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}/{}",
+            if self.replace { "replace" } else { "unique" },
+            self.record_count
+        )
+    }
+}
+
+fn global_pax_cases() -> impl Iterator<Item = GlobalPaxCase> {
+    GLOBAL_PAX_RECORD_COUNTS
+        .into_iter()
+        .flat_map(|record_count| {
+            [false, true].into_iter().map(move |replace| GlobalPaxCase {
+                record_count,
+                replace,
+            })
+        })
+}
+
+#[divan::bench(name = "global_pax_updates", args = global_pax_cases())]
+fn bench_global_pax_updates(bencher: Bencher, case: &GlobalPaxCase) {
+    let runtime = runtime();
+    let archive = global_pax_archive(case.record_count, case.replace);
+    let updates = if case.replace {
+        case.record_count * 2
+    } else {
+        case.record_count
+    };
+    bencher.counter(ItemsCount::new(updates)).bench_local(|| {
+        black_box(runtime.block_on(decode_trailing_global_pax(black_box(&archive))));
+    });
+}
+
+fn main() {
+    divan::main();
+}

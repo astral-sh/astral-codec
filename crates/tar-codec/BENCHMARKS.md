@@ -1,5 +1,14 @@
 # tar-codec benchmarks
 
+Benchmarks now use CodSpeed's Divan adapter. See
+[CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for local commands and the
+CodSpeed workflow.
+
+## Recorded Criterion timings (2026-06-25)
+
+These results predate the Divan migration and are not directly comparable to
+Divan or CodSpeed simulation results.
+
 > [!NOTE]
 > The benchmark results below are **not** a guarantee of performance
 > characteristics on end-user systems. Actual performance can vary

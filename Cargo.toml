@@ -24,9 +24,7 @@ async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 astral-tokio-tar = "0.7"
 cap-std = "4.0.2"
 clap = "4.6"
-criterion = { version = "0.8.2", features = [
-    "async_tokio",
-], default-features = false }
+divan = { package = "codspeed-divan-compat", version = "5.0.2" }
 junction = "2.0.0"
 tar = "0.4.46"
 tempfile = "3"

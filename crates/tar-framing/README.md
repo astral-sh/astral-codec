@@ -41,9 +41,11 @@ blocks without performing I/O.
 Run the internal framing benchmarks with:
 
 ```shell
-cargo bench -p tar-framing --bench framing
+cargo bench -p tar-framing --bench framing --locked
 ```
 
 `encode_pax_framing` measures reusable pure-pax framing without payload reads.
 `decode_payload` compares lossless block iteration, validated chunk reads, and
 payload skipping over in-memory archives.
+
+See [CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for CodSpeed and smoke-test commands.

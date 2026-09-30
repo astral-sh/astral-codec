@@ -1,26 +1,28 @@
 mod support;
 
 use std::{
-    fs,
+    fmt, fs,
     hint::black_box,
     io::{self, Write},
     path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
-    time::Duration,
 };
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
+use divan::{
+    Bencher,
+    counter::{BytesCount, ItemsCount},
+};
 use support::{
-    Entry, SMALL_FILE_BYTES, SMALL_FILE_COUNT, configure_tar_header, payload, payload_throughput,
-    runtime, ustar_archive_entries,
+    Entry, SMALL_FILE_BYTES, SMALL_FILE_COUNT, configure_tar_header, payload, runtime,
+    ustar_archive_entries,
 };
 use tar_codec::{
     Archive as _, ArchiveBuilder as _, EntryMetadata, TarArchive, TarEncoder,
     extract::ExtractPolicy,
 };
 use tempfile::{TempDir, tempdir};
-use tokio::{io::AsyncWrite, runtime::Runtime};
+use tokio::io::AsyncWrite;
 
 const LARGE_FILE_BYTES: usize = 16 * 1024 * 1024;
 const SMALL_DIRECTORY_COUNT: usize = 32;
@@ -79,34 +81,105 @@ struct Fixture {
     payload_bytes: u64,
 }
 
-impl Fixture {
-    fn benchmark_id(&self) -> String {
-        format!("{}-{}-entries", self.id, self.entries.len())
-    }
+#[derive(Clone, Copy)]
+enum Workload {
+    Large,
+    ManySmall,
+}
 
-    fn entry_throughput(&self) -> Throughput {
-        Throughput::Elements(
-            u64::try_from(self.entries.len()).expect("fixture entry count should be representable"),
-        )
-    }
-
-    fn payload_throughput(&self) -> Throughput {
-        payload_throughput(self.entries.len(), self.payload_bytes)
+impl fmt::Display for Workload {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Large => formatter.write_str("large-1-entries"),
+            Self::ManySmall => write!(formatter, "many-small-{SMALL_FILE_COUNT}-entries"),
+        }
     }
 }
 
-struct DecodeInput {
-    id: &'static str,
-    bytes: Vec<u8>,
+#[derive(Clone, Copy)]
+enum Implementation {
+    TarCodec,
+    Tar,
+    TokioTar,
 }
 
-fn fixtures() -> Vec<Fixture> {
-    vec![
-        fixture(
+impl fmt::Display for Implementation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TarCodec => "tar-codec",
+            Self::Tar => "tar",
+            Self::TokioTar => "astral-tokio-tar",
+        })
+    }
+}
+
+struct Case {
+    workload: Workload,
+    implementation: Implementation,
+}
+
+impl fmt::Display for Case {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.workload, self.implementation)
+    }
+}
+
+fn cases() -> impl Iterator<Item = Case> {
+    [Workload::Large, Workload::ManySmall]
+        .into_iter()
+        .flat_map(|workload| {
+            [
+                Implementation::TarCodec,
+                Implementation::Tar,
+                Implementation::TokioTar,
+            ]
+            .into_iter()
+            .map(move |implementation| Case {
+                workload,
+                implementation,
+            })
+        })
+}
+
+#[derive(Clone, Copy)]
+enum Format {
+    Pax,
+    Ustar,
+}
+
+impl fmt::Display for Format {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Pax => "pax",
+            Self::Ustar => "ustar",
+        })
+    }
+}
+
+struct ExtractionCase {
+    case: Case,
+    format: Format,
+}
+
+impl fmt::Display for ExtractionCase {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}/{}", self.format, self.case)
+    }
+}
+
+fn extraction_cases() -> impl Iterator<Item = ExtractionCase> {
+    [Format::Pax, Format::Ustar]
+        .into_iter()
+        .flat_map(|format| cases().map(move |case| ExtractionCase { case, format }))
+}
+
+fn workload_fixture(workload: Workload) -> Fixture {
+    match workload {
+        Workload::Large => fixture(
             "large",
             vec![("payload.bin".to_owned(), payload(LARGE_FILE_BYTES, 0))],
         ),
-        fixture(
+        Workload::ManySmall => fixture(
             "many-small",
             (0..SMALL_FILE_COUNT)
                 .map(|index| {
@@ -120,7 +193,7 @@ fn fixtures() -> Vec<Fixture> {
                 })
                 .collect(),
         ),
-    ]
+    }
 }
 
 fn fixture(id: &'static str, files: Vec<(String, Vec<u8>)>) -> Fixture {
@@ -278,164 +351,85 @@ fn ustar_archive(fixture: &Fixture) -> Vec<u8> {
     ustar_archive_entries(&fixture.entries)
 }
 
-fn bench_encode_entries_framing(
-    criterion: &mut Criterion,
-    runtime: &Runtime,
-    fixtures: &[Fixture],
-) {
-    let mut group = criterion.benchmark_group("encode_entries_framing");
-    for fixture in fixtures {
-        group.throughput(fixture.entry_throughput());
-        let benchmark_id = fixture.benchmark_id();
-        group.bench_with_input(
-            BenchmarkId::new("tar-codec", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher
-                    .to_async(runtime)
-                    .iter(|| async { black_box(encode_entries_tar_codec(fixture).await) });
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("tar", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher.iter(|| black_box(encode_entries_tar(fixture)));
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("astral-tokio-tar", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher
-                    .to_async(runtime)
-                    .iter(|| async { black_box(encode_entries_tokio_tar(fixture).await) });
-            },
-        );
-    }
-    group.finish();
-}
-
-fn bench_encode_directory(criterion: &mut Criterion, runtime: &Runtime, fixtures: &[Fixture]) {
-    let mut group = criterion.benchmark_group("encode_directory");
-    group.measurement_time(Duration::from_secs(6));
-    for fixture in fixtures {
-        group.throughput(fixture.payload_throughput());
-        let benchmark_id = fixture.benchmark_id();
-        group.bench_with_input(
-            BenchmarkId::new("tar-codec", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher
-                    .to_async(runtime)
-                    .iter(|| async { black_box(encode_directory_tar_codec(fixture).await) });
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("tar", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher.iter(|| black_box(encode_directory_tar(fixture)));
-            },
-        );
-        group.bench_with_input(
-            BenchmarkId::new("astral-tokio-tar", &benchmark_id),
-            fixture,
-            |bencher, fixture| {
-                bencher
-                    .to_async(runtime)
-                    .iter(|| async { black_box(encode_directory_tokio_tar(fixture).await) });
-            },
-        );
-    }
-    group.finish();
-}
-
-fn bench_extract(criterion: &mut Criterion, runtime: &Runtime, fixtures: &[Fixture]) {
-    let mut group = criterion.benchmark_group("extract");
-    group
-        .sample_size(20)
-        .measurement_time(Duration::from_secs(6));
-    for fixture in fixtures {
-        let inputs = [
-            DecodeInput {
-                id: "pax",
-                bytes: runtime.block_on(pax_archive(fixture)),
-            },
-            DecodeInput {
-                id: "ustar",
-                bytes: ustar_archive(fixture),
-            },
-        ];
-        for input in &inputs {
-            group.throughput(fixture.payload_throughput());
-            let benchmark_id = format!("{}/{}", input.id, fixture.benchmark_id());
-            group.bench_with_input(
-                BenchmarkId::new("tar-codec", &benchmark_id),
-                input,
-                |bencher, input| {
-                    bencher.to_async(runtime).iter_batched_ref(
-                        || tempdir().expect("temporary extraction directory should be created"),
-                        |temp| {
-                            let destination = temp.path().join("out");
-                            async move {
-                                TarArchive::new(input.bytes.as_slice())
-                                    .extract_in(destination, ExtractPolicy::default())
-                                    .await
-                                    .expect("tar-codec should extract fixture archive");
-                            }
-                        },
-                        BatchSize::PerIteration,
-                    );
-                },
-            );
-            group.bench_with_input(
-                BenchmarkId::new("tar", &benchmark_id),
-                input,
-                |bencher, input| {
-                    bencher.iter_batched_ref(
-                        || tempdir().expect("temporary extraction directory should be created"),
-                        |temp| {
-                            let destination = temp.path().join("out");
-                            tar::Archive::new(input.bytes.as_slice())
-                                .unpack(destination)
-                                .expect("tar should extract fixture archive");
-                        },
-                        BatchSize::PerIteration,
-                    );
-                },
-            );
-            group.bench_with_input(
-                BenchmarkId::new("astral-tokio-tar", &benchmark_id),
-                input,
-                |bencher, input| {
-                    bencher.to_async(runtime).iter_batched_ref(
-                        || tempdir().expect("temporary extraction directory should be created"),
-                        |temp| {
-                            let destination = temp.path().join("out");
-                            async move {
-                                tokio_tar::Archive::new(input.bytes.as_slice())
-                                    .unpack(destination)
-                                    .await
-                                    .expect("astral-tokio-tar should extract fixture archive");
-                            }
-                        },
-                        BatchSize::PerIteration,
-                    );
-                },
-            );
-        }
-    }
-    group.finish();
-}
-
-fn comparison(criterion: &mut Criterion) {
+#[divan::bench(args = cases())]
+fn encode_entries_framing(bencher: Bencher, case: &Case) {
     let runtime = runtime();
-    let fixtures = fixtures();
-    bench_encode_entries_framing(criterion, &runtime, &fixtures);
-    bench_encode_directory(criterion, &runtime, &fixtures);
-    bench_extract(criterion, &runtime, &fixtures);
+    let fixture = workload_fixture(case.workload);
+    let bencher = bencher.counter(ItemsCount::new(fixture.entries.len()));
+    match case.implementation {
+        Implementation::TarCodec => bencher.bench_local(|| {
+            black_box(runtime.block_on(encode_entries_tar_codec(black_box(&fixture))));
+        }),
+        Implementation::Tar => bencher.bench_local(|| {
+            black_box(encode_entries_tar(black_box(&fixture)));
+        }),
+        Implementation::TokioTar => bencher.bench_local(|| {
+            black_box(runtime.block_on(encode_entries_tokio_tar(black_box(&fixture))));
+        }),
+    }
 }
 
-criterion_group!(benches, comparison);
-criterion_main!(benches);
+#[divan::bench(args = cases())]
+fn encode_directory(bencher: Bencher, case: &Case) {
+    let runtime = runtime();
+    let fixture = workload_fixture(case.workload);
+    let bencher = bencher
+        .counter(ItemsCount::new(fixture.entries.len()))
+        .counter(BytesCount::new(fixture.payload_bytes));
+    match case.implementation {
+        Implementation::TarCodec => bencher.bench_local(|| {
+            black_box(runtime.block_on(encode_directory_tar_codec(black_box(&fixture))));
+        }),
+        Implementation::Tar => bencher.bench_local(|| {
+            black_box(encode_directory_tar(black_box(&fixture)));
+        }),
+        Implementation::TokioTar => bencher.bench_local(|| {
+            black_box(runtime.block_on(encode_directory_tokio_tar(black_box(&fixture))));
+        }),
+    }
+}
+
+#[divan::bench(args = extraction_cases(), sample_size = 1)]
+fn extract(bencher: Bencher, case: &ExtractionCase) {
+    let runtime = runtime();
+    let fixture = workload_fixture(case.case.workload);
+    let input = match case.format {
+        Format::Pax => runtime.block_on(pax_archive(&fixture)),
+        Format::Ustar => ustar_archive(&fixture),
+    };
+    // Prepare and remove each destination outside the measurement.
+    let bencher = bencher
+        .counter(ItemsCount::new(fixture.entries.len()))
+        .counter(BytesCount::new(fixture.payload_bytes))
+        .with_inputs(|| tempdir().expect("temporary extraction directory should be created"));
+    match case.case.implementation {
+        Implementation::TarCodec => bencher.bench_local_refs(|temp| {
+            let destination = temp.path().join("out");
+            runtime.block_on(async {
+                TarArchive::new(black_box(input.as_slice()))
+                    .extract_in(destination, ExtractPolicy::default())
+                    .await
+                    .expect("tar-codec should extract fixture archive");
+            });
+        }),
+        Implementation::Tar => bencher.bench_local_refs(|temp| {
+            let destination = temp.path().join("out");
+            tar::Archive::new(black_box(input.as_slice()))
+                .unpack(destination)
+                .expect("tar should extract fixture archive");
+        }),
+        Implementation::TokioTar => bencher.bench_local_refs(|temp| {
+            let destination = temp.path().join("out");
+            runtime.block_on(async {
+                tokio_tar::Archive::new(black_box(input.as_slice()))
+                    .unpack(destination)
+                    .await
+                    .expect("astral-tokio-tar should extract fixture archive");
+            });
+        }),
+    }
+}
+
+fn main() {
+    divan::main();
+}

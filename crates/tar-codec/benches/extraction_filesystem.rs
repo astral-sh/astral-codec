@@ -1,15 +1,14 @@
 mod support;
 
-use std::{fs, time::Duration};
+use std::{fmt, fs};
 
-use criterion::{BatchSize, BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use support::{
-    Entry, SMALL_FILE_BYTES, SMALL_FILE_COUNT, payload, payload_throughput, runtime,
-    ustar_archive_entries,
+use divan::{
+    Bencher,
+    counter::{BytesCount, ItemsCount},
 };
+use support::{Entry, SMALL_FILE_BYTES, SMALL_FILE_COUNT, payload, runtime, ustar_archive_entries};
 use tar_codec::{Archive as _, TarArchive, extract::ExtractPolicy};
 use tempfile::{TempDir, tempdir};
-use tokio::runtime::Runtime;
 
 const DIRECTORY_HEAVY_FILE_COUNT: usize = 256;
 const BUFFERED_BOUNDARY_FILE_COUNT: usize = 16;
@@ -22,14 +21,55 @@ struct ExtractionFixture {
     prepopulate_destination: bool,
 }
 
-impl ExtractionFixture {
-    fn benchmark_id(&self) -> String {
-        format!("{}-{}-entries", self.id, self.entries.len())
-    }
+#[derive(Clone, Copy)]
+enum Implementation {
+    TarCodec,
+    Tar,
+    TarNoMtime,
+}
 
-    fn payload_throughput(&self) -> Throughput {
-        payload_throughput(self.entries.len(), self.payload_bytes)
+impl fmt::Display for Implementation {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::TarCodec => "tar-codec",
+            Self::Tar => "tar",
+            Self::TarNoMtime => "tar-no-mtime",
+        })
     }
+}
+
+struct Case {
+    fixture: ExtractionFixture,
+    implementation: Implementation,
+}
+
+impl fmt::Display for Case {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(
+            formatter,
+            "{}-{}-entries/{}",
+            self.fixture.id,
+            self.fixture.entries.len(),
+            self.implementation
+        )
+    }
+}
+
+fn cases() -> impl Iterator<Item = Case> {
+    [
+        Implementation::TarCodec,
+        Implementation::Tar,
+        Implementation::TarNoMtime,
+    ]
+    .into_iter()
+    .flat_map(|implementation| {
+        extraction_filesystem_fixtures()
+            .into_iter()
+            .map(move |fixture| Case {
+                fixture,
+                implementation,
+            })
+    })
 }
 
 fn extraction_filesystem_fixtures() -> Vec<ExtractionFixture> {
@@ -155,73 +195,46 @@ fn extraction_temp(fixture: &ExtractionFixture) -> TempDir {
     temp
 }
 
-fn bench_extract_filesystem(
-    criterion: &mut Criterion,
-    runtime: &Runtime,
-    fixtures: &[ExtractionFixture],
-) {
-    let mut group = criterion.benchmark_group("extract_filesystem");
-    group
-        .sample_size(20)
-        .measurement_time(Duration::from_secs(4));
-    for fixture in fixtures {
-        if !fixture.entries.is_empty() {
-            group.throughput(fixture.payload_throughput());
-        }
-        // Use one-header USTAR members so metadata framing does not obscure
-        // filesystem and task-scheduling costs.
-        let input = ustar_archive_entries(&fixture.entries);
-        let benchmark_id = fixture.benchmark_id();
-        group.bench_with_input(
-            BenchmarkId::new("tar-codec", &benchmark_id),
-            &input,
-            |bencher, input| {
-                bencher.to_async(runtime).iter_batched_ref(
-                    || extraction_temp(fixture),
-                    |temp| {
-                        let destination = temp.path().join("out");
-                        async move {
-                            TarArchive::new(input.as_slice())
-                                .extract_in(destination, ExtractPolicy::default())
-                                .await
-                                .expect("tar-codec should extract filesystem fixture");
-                        }
-                    },
-                    BatchSize::PerIteration,
-                );
-            },
-        );
+#[divan::bench(args = cases(), sample_size = 1)]
+fn extract_filesystem(bencher: Bencher, case: &Case) {
+    let runtime = runtime();
+    let fixture = &case.fixture;
+    // Use one-header USTAR members so metadata framing does not obscure
+    // filesystem and task-scheduling costs.
+    let input = ustar_archive_entries(&fixture.entries);
+    let mut bencher = bencher;
+    if !fixture.entries.is_empty() {
+        bencher = bencher.counter(ItemsCount::new(fixture.entries.len()));
+    }
+    if fixture.payload_bytes != 0 {
+        bencher = bencher.counter(BytesCount::new(fixture.payload_bytes));
+    }
+    // Prepare and remove each destination outside the measurement.
+    let bencher = bencher.with_inputs(|| extraction_temp(fixture));
+    match case.implementation {
+        Implementation::TarCodec => bencher.bench_local_refs(|temp| {
+            let destination = temp.path().join("out");
+            runtime.block_on(async {
+                TarArchive::new(input.as_slice())
+                    .extract_in(destination, ExtractPolicy::default())
+                    .await
+                    .expect("tar-codec should extract filesystem fixture");
+            });
+        }),
         // Keep the default tar policy alongside a leaner reference that
         // disables tar's additional mtime restoration. Other metadata semantics
         // still differ between the extractors.
-        for (implementation, preserve_mtime) in [("tar", true), ("tar-no-mtime", false)] {
-            group.bench_with_input(
-                BenchmarkId::new(implementation, &benchmark_id),
-                &input,
-                move |bencher, input| {
-                    bencher.iter_batched_ref(
-                        || extraction_temp(fixture),
-                        |temp| {
-                            let destination = temp.path().join("out");
-                            let mut archive = tar::Archive::new(input.as_slice());
-                            archive.set_preserve_mtime(preserve_mtime);
-                            archive
-                                .unpack(destination)
-                                .expect("tar should extract filesystem fixture");
-                        },
-                        BatchSize::PerIteration,
-                    );
-                },
-            );
-        }
+        Implementation::Tar | Implementation::TarNoMtime => bencher.bench_local_refs(|temp| {
+            let destination = temp.path().join("out");
+            let mut archive = tar::Archive::new(input.as_slice());
+            archive.set_preserve_mtime(matches!(case.implementation, Implementation::Tar));
+            archive
+                .unpack(destination)
+                .expect("tar should extract filesystem fixture");
+        }),
     }
-    group.finish();
 }
 
-fn extraction_filesystem(criterion: &mut Criterion) {
-    let runtime = runtime();
-    bench_extract_filesystem(criterion, &runtime, &extraction_filesystem_fixtures());
+fn main() {
+    divan::main();
 }
-
-criterion_group!(benches, extraction_filesystem);
-criterion_main!(benches);
