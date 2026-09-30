@@ -140,7 +140,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             return Ok(None);
         };
 
-        let kind = project_kind(&entry)?;
+        let kind = Kind::try_from(&entry)?;
         let directory = entry.directory();
         let metadata = MemberMetadata {
             path: directory.path().to_owned(),
@@ -221,7 +221,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             .iter()
             .filter_map(IndexedEntry::resolved)
         {
-            project_kind(&entry)?;
+            Kind::try_from(&entry)?;
         }
 
         Ok(())
@@ -333,56 +333,60 @@ enum Kind {
     Special(SpecialKind),
 }
 
-fn project_kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
-    let directory = entry.directory();
-    let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
-        && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
-    {
-        let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
-            position: directory.position(),
-            reason: "non-UTF-8 UNIX link target",
-        })?;
-        if target.contains('\0') {
-            return Err(DecodeError::Integrity {
+impl TryFrom<&Entry<'_>> for Kind {
+    type Error = DecodeError;
+
+    fn try_from(entry: &Entry<'_>) -> Result<Self, Self::Error> {
+        let directory = entry.directory();
+        let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
+            && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
+        {
+            let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
                 position: directory.position(),
-                reason: "NUL in UNIX link target",
-            });
-        }
-
-        Some(target.to_owned())
-    } else {
-        None
-    };
-
-    match entry.kind() {
-        EntryKind::File => Ok(Kind::File(
-            entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
-        )),
-        EntryKind::Directory => Ok(Kind::Directory),
-        EntryKind::HardLink => Ok(Kind::HardLink(link.ok_or(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "missing UNIX hard-link target",
-        })?)),
-        EntryKind::SymbolicLink => {
-            if directory.size() > u64::from(u16::MAX) {
+                reason: "non-UTF-8 UNIX link target",
+            })?;
+            if target.contains('\0') {
                 return Err(DecodeError::Integrity {
                     position: directory.position(),
-                    reason: "oversized symbolic-link target",
+                    reason: "NUL in UNIX link target",
                 });
             }
-            Ok(Kind::SymbolicLink(link))
+
+            Some(target.to_owned())
+        } else {
+            None
+        };
+
+        match entry.kind() {
+            EntryKind::File => Ok(Self::File(
+                entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
+            )),
+            EntryKind::Directory => Ok(Self::Directory),
+            EntryKind::HardLink => Ok(Self::HardLink(link.ok_or(DecodeError::Integrity {
+                position: directory.position(),
+                reason: "missing UNIX hard-link target",
+            })?)),
+            EntryKind::SymbolicLink => {
+                if directory.size() > u64::from(u16::MAX) {
+                    return Err(DecodeError::Integrity {
+                        position: directory.position(),
+                        reason: "oversized symbolic-link target",
+                    });
+                }
+                Ok(Self::SymbolicLink(link))
+            }
+            EntryKind::CharacterDevice => Ok(Self::Special(SpecialKind::CharacterDevice)),
+            EntryKind::BlockDevice => Ok(Self::Special(SpecialKind::BlockDevice)),
+            EntryKind::Fifo => Ok(Self::Special(SpecialKind::Fifo)),
+            EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "volume label",
+            }),
+            _ => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "unsupported file attributes",
+            }),
         }
-        EntryKind::CharacterDevice => Ok(Kind::Special(SpecialKind::CharacterDevice)),
-        EntryKind::BlockDevice => Ok(Kind::Special(SpecialKind::BlockDevice)),
-        EntryKind::Fifo => Ok(Kind::Special(SpecialKind::Fifo)),
-        EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
-            position: directory.position(),
-            feature: "volume label",
-        }),
-        _ => Err(DecodeError::Unsupported {
-            position: directory.position(),
-            feature: "unsupported file attributes",
-        }),
     }
 }
 
