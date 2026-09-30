@@ -18,13 +18,19 @@ Build an archive with seekable output, without buffering whole files:
 
 ```rust,no_run
 # async fn example() -> Result<(), Box<dyn std::error::Error>> {
-use zip_codec::{ArchiveBuilder, CompressionMethod, EntryMetadata, ZipEncoder};
+use zip_codec::{ArchiveBuilder, CompressionMethod, EntryMetadata, ZipEncoder, ZipFileOptions};
 
 let output = tokio::fs::File::create("output.zip").await?;
 let mut builder = ZipEncoder::new(output)
     .compression(CompressionMethod::Deflate)
     .builder();
 builder.add_file("hello.txt", &b"hello\n"[..], EntryMetadata::default()).await?;
+builder.add_file_with_options(
+    "raw.bin",
+    &b"store these bytes"[..],
+    EntryMetadata::default(),
+    ZipFileOptions::default().compression(CompressionMethod::Stored),
+).await?;
 builder.finish().await?;
 # Ok(())
 # }
@@ -32,6 +38,10 @@ builder.finish().await?;
 
 The output must implement `AsyncWrite + AsyncSeek + Unpin`, be empty, and start
 at byte zero. Use `std::io::Cursor<Vec<u8>>` for an in-memory archive.
+
+`ZipFileOptions` overrides compression for one file. Default options, plain
+`add_file`, and recursive builds use the encoder's configured compression method.
+Empty files are always stored.
 
 `ZipArchive::entries` exposes indexed metadata and `ZipArchive::member(index)`
 selects an entry. Sequential iteration resumes after the selected entry.

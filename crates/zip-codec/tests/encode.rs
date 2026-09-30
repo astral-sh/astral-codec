@@ -11,7 +11,7 @@ use std::{
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
     Archive, ArchiveBuilder, BuildError, CompressionMethod, EntryMetadata, FilePayload, Limits,
-    Member, MemberPayload, ZipArchive, ZipEncoder,
+    Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
 };
 
 #[cfg(unix)]
@@ -83,6 +83,82 @@ async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> Te
 
             assert_eq!(decoded, source, "{method:?}, length={length}");
             assert!(archive.next_member().await?.is_none());
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResult {
+    let source = b"contents contents contents".as_slice();
+
+    for default_method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
+        let cases = [
+            (
+                "stored",
+                ZipFileOptions::default().compression(CompressionMethod::Stored),
+                source,
+                CompressionMethod::Stored,
+            ),
+            (
+                "default-after-stored",
+                ZipFileOptions::default(),
+                source,
+                default_method,
+            ),
+            (
+                "deflated",
+                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                source,
+                CompressionMethod::Deflate,
+            ),
+            (
+                "default-after-deflated",
+                ZipFileOptions::default(),
+                source,
+                default_method,
+            ),
+            (
+                "empty",
+                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                b"".as_slice(),
+                CompressionMethod::Stored,
+            ),
+        ];
+        let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
+            .compression(default_method)
+            .builder();
+
+        for (path, options, contents, _) in cases {
+            builder
+                .add_file_with_options(path, contents, EntryMetadata::default(), options)
+                .await?;
+        }
+
+        let mut archive = ZipArchive::open(builder.finish_into_inner().await?.into_inner()).await?;
+        assert_eq!(archive.entries().len(), cases.len());
+
+        for (index, (path, _, contents, method)) in cases.into_iter().enumerate() {
+            assert_eq!(archive.entries()[index].method(), method, "{path}");
+
+            let Some(Member::File {
+                metadata,
+                mut payload,
+                ..
+            }) = archive.next_member().await?
+            else {
+                return Err(io::Error::other("expected encoded file").into());
+            };
+            assert_eq!(metadata.path, path);
+
+            let mut decoded = Vec::new();
+            let mut chunk = Vec::new();
+            while payload.next_chunk(&mut chunk, usize::MAX).await? {
+                decoded.extend_from_slice(&chunk);
+            }
+
+            assert_eq!(decoded, contents, "{path}");
         }
     }
 

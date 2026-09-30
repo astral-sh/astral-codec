@@ -18,5 +18,5 @@ pub use archive_trait::{
     Members, NameValidator, SpecialKind, TraversalError, builder, default_name_validator, extract,
 };
 pub use decode::{DecodeError, ZipArchive, ZipMemberPayload};
-pub use encode::{EncodeError, ZipEncoder};
+pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{CompressionMethod, DirectoryEntry, Entry, Limits};
