@@ -3,10 +3,11 @@ use std::str;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Error, Limits, add,
+    Error, ExtraHeaderId, Limits, add,
+    constants::{signature, size, version},
     extra::Extras,
     invalid,
-    record::{ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, array_at},
+    record::{RecordReader, array_at},
 };
 
 mod entry;
@@ -91,11 +92,12 @@ impl Index {
         Ok(Some(entry.resolve(reader, &mut self.budget).await?))
     }
 
-    /// Checks every local header and descriptor, including unselected members.
+    /// Checks every local header, descriptor, and kind, including unselected members.
     ///
     /// Success establishes complete, nonoverlapping record coverage and
-    /// agreement of redundant metadata. Payload sizes and CRCs still need to
-    /// be verified when decoding. Already checked members require no I/O.
+    /// agreement of redundant and kind-specific metadata. Payload sizes and
+    /// CRCs still need to be verified when decoding. Already checked members
+    /// require no I/O.
     pub async fn validate_all<R: AsyncRead + AsyncSeek + Unpin>(
         &mut self,
         reader: &mut R,
@@ -224,20 +226,22 @@ impl CentralDirectory {
     ) -> Result<Self, Error> {
         let length = reader.length().await?;
         budget.check_archive_size(length)?;
-        if length < 22 {
+        if length < size::END as u64 {
             return Err(invalid(0, "missing end of central directory"));
         }
 
         // EOCD has a 16-bit comment length. Never scan the payload for signatures.
-        let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
+        let tail_size = length.min(size::END as u64 + u64::from(u16::MAX)) as usize;
         let tail_start = length - tail_size as u64;
         let tail = reader.read_vec(tail_start, tail_size, length).await?;
 
         let mut candidate = None;
-        for (offset, header) in tail.windows(22).enumerate() {
-            if header.starts_with(&END.to_le_bytes())
-                && let Some(header) = header.first_chunk::<22>()
-                && offset + 22 + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+        for (offset, header) in tail.windows(size::END).enumerate() {
+            if header.starts_with(&signature::END.to_le_bytes())
+                && let Some(header) = header.first_chunk::<{ size::END }>()
+                && offset
+                    + size::END
+                    + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
                     == tail.len()
                 && candidate.replace((offset, header)).is_some()
             {
@@ -248,7 +252,7 @@ impl CentralDirectory {
         let (offset, end) =
             candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
         let position = tail_start + offset as u64;
-        str::from_utf8(&tail[offset + 22..])
+        str::from_utf8(&tail[offset + size::END..])
             .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
 
         let mut offset = u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end)));
@@ -256,12 +260,16 @@ impl CentralDirectory {
         let mut count = u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end)));
 
         let mut boundary = position;
-        let mut locator = [0; 20];
-        let has_locator = if position >= 20 {
+        let mut locator = [0; size::ZIP64_LOCATOR];
+        let has_locator = if position >= size::ZIP64_LOCATOR as u64 {
             reader
-                .read_at(position - 20, &mut locator, position)
+                .read_at(
+                    position - size::ZIP64_LOCATOR as u64,
+                    &mut locator,
+                    position,
+                )
                 .await?;
-            u32::from_le_bytes(array_at::<0, 4, _>(&locator)) == LOCATOR
+            u32::from_le_bytes(array_at::<0, 4, _>(&locator)) == signature::ZIP64_LOCATOR
         } else {
             false
         };
@@ -271,30 +279,35 @@ impl CentralDirectory {
                 || u32::from_le_bytes(array_at::<16, 4, _>(&locator)) != 1
             {
                 return Err(Error::Unsupported {
-                    position: position - 20,
+                    position: position - size::ZIP64_LOCATOR as u64,
                     feature: "multiple volumes",
                 });
             }
 
             boundary = u64::from_le_bytes(array_at::<8, 8, _>(&locator));
-            let mut zip64 = [0; 56];
-            reader.read_at(boundary, &mut zip64, position - 20).await?;
-            if u32::from_le_bytes(array_at::<0, 4, _>(&zip64)) != ZIP64_END {
+            let mut zip64 = [0; size::ZIP64_END];
+            reader
+                .read_at(boundary, &mut zip64, position - size::ZIP64_LOCATOR as u64)
+                .await?;
+            if u32::from_le_bytes(array_at::<0, 4, _>(&zip64)) != signature::ZIP64_END {
                 return Err(invalid(boundary, "invalid ZIP64 end signature"));
             }
 
             let end_size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
-            if end_size < 44 || add(boundary, add(12, end_size)?)? != position - 20 {
+            if end_size < size::ZIP64_END_BODY as u64
+                || add(boundary, add(size::ZIP64_END_PREFIX as u64, end_size)?)?
+                    != position - size::ZIP64_LOCATOR as u64
+            {
                 return Err(invalid(boundary, "invalid ZIP64 end length"));
             }
 
-            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= 62 {
+            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= version::ZIP64_V2 {
                 return Err(Error::Unsupported {
                     position: boundary,
                     feature: "ZIP64 version-2 directory",
                 });
             }
-            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) != 45 {
+            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) != version::ZIP64 {
                 return Err(invalid(boundary, "invalid ZIP64 extraction version"));
             }
 
@@ -383,13 +396,18 @@ impl CentralDirectory {
         let mut pending_budget = *budget;
         pending_budget.check_entry_count(count)?;
         pending_budget.metadata(size)?;
-        if count > size / 46 {
+        if count > size / size::CENTRAL as u64 {
             return Err(invalid(offset, "entry count exceeds directory capacity"));
         }
 
         if has_locator {
-            pending_budget.metadata(position - 20 - boundary)?;
-            read_extensible_sector(reader, boundary + 56, position - 20).await?;
+            pending_budget.metadata(position - size::ZIP64_LOCATOR as u64 - boundary)?;
+            read_extensible_sector(
+                reader,
+                boundary + size::ZIP64_END as u64,
+                position - size::ZIP64_LOCATOR as u64,
+            )
+            .await?;
         }
 
         *budget = pending_budget;
@@ -417,7 +435,8 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     let mut bytes = buffer.as_slice();
     let mut records = 0usize;
     while !bytes.is_empty() {
-        let Some((header, remaining)) = bytes.split_first_chunk::<6>() else {
+        let Some((header, remaining)) = bytes.split_first_chunk::<{ size::ZIP64_EXTENSION }>()
+        else {
             return Err(invalid(position, "truncated ZIP64 extension header"));
         };
 
@@ -429,8 +448,14 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             length_2,
             length_3,
         ] = *header;
-        match u16::from_le_bytes([identifier_low, identifier_high]) {
-            0x000f | 0x0014..=0x0017 | 0x0019 | 0x9901 => {
+        match ExtraHeaderId::from(u16::from_le_bytes([identifier_low, identifier_high])) {
+            ExtraHeaderId::PatchDescriptor
+            | ExtraHeaderId::Pkcs7Store
+            | ExtraHeaderId::X509File
+            | ExtraHeaderId::X509Directory
+            | ExtraHeaderId::StrongEncryption
+            | ExtraHeaderId::EncryptionRecipients
+            | ExtraHeaderId::Aes => {
                 return Err(Error::Unsupported {
                     position,
                     feature: "ZIP64 security or patch extension",
@@ -443,7 +468,7 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
         bytes = remaining
             .get(length..)
             .ok_or_else(|| invalid(position, "truncated ZIP64 extension"))?;
-        position += 6 + length as u64;
+        position += size::ZIP64_EXTENSION as u64 + length as u64;
         records += 1;
 
         // Parsing buffered records performs no I/O. Periodically yield to give
@@ -471,18 +496,20 @@ impl CentralDirectory {
         let mut entries = Vec::new();
 
         // The archive extra record is part of the directory's declared size.
-        if self.size >= 8 {
-            let mut header = [0; 8];
+        if self.size >= size::ARCHIVE_EXTRA as u64 {
+            let mut header = [0; size::ARCHIVE_EXTRA];
             reader.read_at(position, &mut header, end).await?;
-            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == ARCHIVE_EXTRA {
+            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == signature::ARCHIVE_EXTRA {
                 let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
-                if add(position, 8 + length as u64)? > end {
+                if add(position, size::ARCHIVE_EXTRA as u64 + length as u64)? > end {
                     return Err(invalid(position, "truncated archive extra record"));
                 }
 
-                let bytes = reader.read_vec(position + 8, length, end).await?;
+                let bytes = reader
+                    .read_vec(position + size::ARCHIVE_EXTRA as u64, length, end)
+                    .await?;
                 Extras::parse(&bytes, position)?;
-                position += 8 + length as u64;
+                position += size::ARCHIVE_EXTRA as u64 + length as u64;
             }
         }
 

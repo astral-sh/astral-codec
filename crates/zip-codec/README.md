@@ -50,10 +50,13 @@ an entry. Sequential iteration resumes after the selected entry.
 
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks
-metadata for every member, including unselected members. Payload reads check
-CRC-32, exact decoded size, and exact DEFLATE stream consumption. Advancing or
-selecting another member drains and validates an unfinished payload. Errors or
-cancellation poison the reader.
+metadata and codec projection policy for every member, including unselected
+members. Resolved entries expose their ZIP-native kind through `Entry::kind()`;
+the codec maps these kinds into `archive-trait` members. Inconsistent kind
+metadata is a framing error; unrepresentable kinds are codec errors. Payload
+reads check CRC-32, exact decoded size, and exact DEFLATE stream consumption.
+Advancing or selecting another member drains and validates an unfinished payload.
+Errors or cancellation poison the reader.
 
 `Limits` bounds archive size, entry count, metadata, per-member output, and total
 output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited to

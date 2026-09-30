@@ -4,9 +4,13 @@ use std::{error::Error, io::Cursor};
 
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
-use zip_framing::{DirectoryEntry, Error as FrameError, Index, IndexedEntry, Limits};
+use zip_framing::{
+    CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, HostSystem, Index,
+    IndexedEntry, Limits,
+    write::{EntryKind as WriteEntryKind, MemberHeader, end_records},
+};
 
-use support::{Fixture, Observed, Sparse, field, set16, set32};
+use support::{Fixture, Observed, Sparse, end_record, field, set16, set32};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -55,22 +59,21 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 #[tokio::test]
 async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let extra = field(0xcafe, &[0x51; 257]);
-    let mut archive = Fixture {
+    let archive = Fixture {
         name: vec![b'n'; 258],
         local_extra: extra.clone(),
         central_extra: extra,
         member_comment: vec![b'c'; 259],
+        made_by: Some(0x1234),
+        external_attributes: 0x1234_5678,
         ..Fixture::default()
     }
     .build();
-    set16(&mut archive.bytes, archive.central + 4, 0x1234);
-    set32(&mut archive.bytes, archive.central + 38, 0x1234_5678);
-
     let mut reader = Cursor::new(archive.bytes);
     let index = read_validated(&mut reader, Limits::default()).await?;
     let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
     assert_eq!(entry.directory().path(), "n".repeat(258));
-    assert_eq!(entry.directory().host_system(), 0x12);
+    assert_eq!(entry.directory().host_system(), HostSystem::Os400);
     assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
     assert_eq!(entry.data_offset(), 30 + 258 + 261);
     assert_eq!(entry.directory().size(), 7);
@@ -79,22 +82,242 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
 }
 
 #[tokio::test]
-async fn reads_and_bounds_archive_extra_record() -> TestResult {
-    let mut archive = Fixture::default().build();
-    let extra = field(0xcafe, &[0x51; 257]);
-    let mut record = 0x0806_4b50u32.to_le_bytes().to_vec();
-    record.extend_from_slice(&(extra.len() as u32).to_le_bytes());
-    record.extend_from_slice(&extra);
-    let record_length = record.len();
+async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResult {
+    for (name, host, attributes, expected, mode) in [
+        ("file", 3, 0, EntryKind::File, 0),
+        ("file", 3, 0o106755 << 16, EntryKind::File, 0o106755),
+        ("file", 0, 0o120777 << 16, EntryKind::File, 0),
+        ("file", 255, (0o040755 << 16) | 0x18, EntryKind::File, 0),
+        ("directory/", 3, 0, EntryKind::Directory, 0),
+        ("directory", 0, 0x10, EntryKind::Directory, 0),
+        (
+            "directory",
+            3,
+            0o040755 << 16,
+            EntryKind::Directory,
+            0o040755,
+        ),
+        (
+            "directory",
+            19,
+            0o040755 << 16,
+            EntryKind::Directory,
+            0o040755,
+        ),
+        ("link", 3, 0o120777 << 16, EntryKind::SymbolicLink, 0o120777),
+        (
+            "device",
+            3,
+            0o020600 << 16,
+            EntryKind::CharacterDevice,
+            0o020600,
+        ),
+        (
+            "device",
+            3,
+            0o060600 << 16,
+            EntryKind::BlockDevice,
+            0o060600,
+        ),
+        ("fifo", 3, 0o010600 << 16, EntryKind::Fifo, 0o010600),
+        ("socket", 3, 0o140600 << 16, EntryKind::Socket, 0o140600),
+        ("volume", 0, 0x08, EntryKind::VolumeLabel, 0),
+        (
+            "unknown",
+            3,
+            0o030600 << 16,
+            EntryKind::Unknown(0o030000),
+            0o030600,
+        ),
+    ] {
+        let archive = Fixture {
+            name: name.as_bytes().to_vec(),
+            payload: Some(if expected == EntryKind::SymbolicLink {
+                b"target".to_vec()
+            } else {
+                Vec::new()
+            }),
+            made_by: Some((host << 8) | 20),
+            external_attributes: attributes,
+            ..Fixture::default()
+        }
+        .build();
+        let mut source = Observed::new(archive.bytes);
+        let mut index = Index::read(&mut source, Limits::default()).await?;
+        assert!(index.entries()[0].resolved().is_none());
 
-    archive
-        .bytes
-        .splice(archive.central..archive.central, record);
-    set32(
-        &mut archive.bytes,
-        archive.end + record_length + 12,
-        (archive.end - archive.central + record_length) as u32,
-    );
+        let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
+        assert_eq!(entry.kind(), expected, "{name}, host {host}");
+        assert_eq!(entry.unix_mode(), mode, "{name}, host {host}");
+
+        source.reads.clear();
+        let cached = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(cached.kind(), expected);
+        index.validate_all(&mut source).await?;
+        assert!(source.reads.is_empty());
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn resolves_link_kinds_from_reconciled_unix_data() -> TestResult {
+    for (mode, data, payload, expected) in [
+        (0, b"target".as_slice(), b"".as_slice(), EntryKind::HardLink),
+        (0o100644, b"target", b"data", EntryKind::HardLink),
+        (0o120777, b"target", b"", EntryKind::SymbolicLink),
+        (0o120777, b"target", b"target", EntryKind::SymbolicLink),
+        (0o100644, b"", b"data", EntryKind::File),
+        (0o020600, &[0; 8], b"", EntryKind::CharacterDevice),
+        (0o060600, &[0; 8], b"", EntryKind::BlockDevice),
+    ] {
+        let archive = Fixture {
+            payload: Some(payload.to_vec()),
+            external_attributes: mode << 16,
+            local_extra: field(0x000d, &[&[0; 12], data].concat()),
+            central_extra: field(0x000d, &[0; 12]),
+            ..Fixture::default()
+        }
+        .build();
+        let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), expected);
+        assert_eq!(entry.unix_extra_data(), Some(data));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> TestResult {
+    for (name, attributes, payload, data, version, expected) in [
+        (
+            "file",
+            (0o100644 << 16) | 0x10,
+            b"".as_slice(),
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "link/",
+            0o120777 << 16,
+            b"target",
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "directory/",
+            0,
+            b"data",
+            None,
+            20,
+            "non-file member has payload data",
+        ),
+        (
+            "fifo",
+            0o010600 << 16,
+            b"data",
+            None,
+            20,
+            "non-file member has payload data",
+        ),
+        (
+            "directory/",
+            0,
+            b"",
+            None,
+            10,
+            "directory requires extraction version 2.0",
+        ),
+        (
+            "link",
+            0o120777 << 16,
+            b"",
+            None,
+            20,
+            "empty symbolic-link target",
+        ),
+        (
+            "directory/",
+            0,
+            b"",
+            Some(b"target".as_slice()),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "fifo",
+            0o010600 << 16,
+            b"",
+            Some(b"target"),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "device",
+            0o020600 << 16,
+            b"",
+            Some(&[0; 7]),
+            20,
+            "invalid UNIX device numbers",
+        ),
+        (
+            "device",
+            0o060600 << 16,
+            b"",
+            Some(&[0; 9]),
+            20,
+            "invalid UNIX device numbers",
+        ),
+    ] {
+        let mut archive = Fixture {
+            name: name.as_bytes().to_vec(),
+            payload: Some(payload.to_vec()),
+            external_attributes: attributes,
+            local_extra: data
+                .map_or_else(Vec::new, |data| field(0x000d, &[&[0; 12], data].concat())),
+            ..Fixture::default()
+        }
+        .build();
+        set16(&mut archive.bytes, 4, version);
+        set16(&mut archive.bytes, archive.central + 6, version);
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(
+            &mut source,
+            Limits {
+                metadata_size: (archive.end - payload.len()) as u64,
+                ..Limits::default()
+            },
+        )
+        .await?;
+
+        // Each failure must leave enough budget to retry the same metadata.
+        for full_validation in [false, true, false] {
+            let result = if full_validation {
+                index.validate_all(&mut source).await
+            } else {
+                index.entry(&mut source, 0).await.map(|_| ())
+            };
+            assert!(
+                matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected),
+                "{name}, attributes {attributes:#x}: {result:?}"
+            );
+            assert!(index.entries()[0].resolved().is_none());
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reads_and_bounds_archive_extra_record() -> TestResult {
+    let mut archive = Fixture {
+        archive_extra: Some(field(0xcafe, &[0x51; 257])),
+        ..Fixture::default()
+    }
+    .build();
 
     let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
     assert_eq!(index.entries()[0].directory().path(), "file");
@@ -138,9 +361,11 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
     for flags in [
         1, 2, 4, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x1000, 0x2000, 0x4000, 0x8000,
     ] {
-        let mut archive = Fixture::default().build();
-        set16(&mut archive.bytes, 6, flags);
-        set16(&mut archive.bytes, archive.central + 8, flags);
+        let archive = Fixture {
+            flags: Some(flags),
+            ..Fixture::default()
+        }
+        .build();
 
         assert!(
             read_validated(&mut Cursor::new(archive.bytes), Limits::default())
@@ -410,6 +635,7 @@ async fn requires_utf8_archive_and_member_comments() {
             for (member, flags) in [(false, 0x0800), (true, 0x0800), (true, 0)] {
                 let mut fixture = Fixture {
                     zip64,
+                    flags: Some(flags),
                     ..Fixture::default()
                 };
                 if member {
@@ -418,9 +644,7 @@ async fn requires_utf8_archive_and_member_comments() {
                     fixture.archive_comment = comment.to_vec();
                 }
 
-                let mut archive = fixture.build();
-                set16(&mut archive.bytes, 6, flags);
-                set16(&mut archive.bytes, archive.central + 8, flags);
+                let archive = fixture.build();
 
                 let (offset, expected) = if member {
                     (archive.central as u64, "non-UTF-8 member comment")
@@ -449,8 +673,7 @@ async fn requires_utf8_archive_and_member_comments() {
 
 #[tokio::test]
 async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResult {
-    let mut empty = vec![0; 22];
-    set32(&mut empty, 0, 0x0605_4b50);
+    let empty = end_record(0, 0, 0, &[]);
 
     assert!(
         read_validated(&mut Cursor::new(&empty), Limits::default())
@@ -459,9 +682,11 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
             .is_empty()
     );
 
-    let mut archive = Fixture::default().build();
-    set16(&mut archive.bytes, archive.end + 20, 22);
-    archive.bytes.extend(empty);
+    let archive = Fixture {
+        archive_comment: empty,
+        ..Fixture::default()
+    }
+    .build();
 
     assert!(
         read_validated(&mut Cursor::new(archive.bytes), Limits::default())
@@ -491,13 +716,9 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         let index =
             read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
 
-        assert_eq!(
-            index.entries()[0]
-                .resolved()
-                .ok_or("unresolved entry")?
-                .unix_extra_data(),
-            Some(b"target".as_slice())
-        );
+        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), EntryKind::HardLink);
+        assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
     }
 
     for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
@@ -518,6 +739,40 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
+async fn reconciles_shortened_info_zip_extras() -> TestResult {
+    for (identifier, local, central) in [
+        (0x5855, vec![1; 12], vec![1; 8]),
+        (0x5455, vec![7; 13], vec![7; 5]),
+        (0x7855, vec![1; 4], Vec::new()),
+    ] {
+        let fixture = Fixture {
+            local_extra: field(identifier, &local),
+            central_extra: field(identifier, &central),
+            ..Fixture::default()
+        };
+        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+
+        let fixture = Fixture {
+            local_extra: field(identifier, &local),
+            central_extra: field(identifier, &[0]),
+            ..Fixture::default()
+        };
+        assert!(
+            matches!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "local and central extra fields disagree",
+                    ..
+                })
+            ),
+            "extra {identifier:#x}"
+        );
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn requires_complete_agreement_for_opaque_member_extras() {
     for (local, central, valid) in [
         (b"same".as_slice(), b"same".as_slice(), true),
@@ -525,8 +780,10 @@ async fn requires_complete_agreement_for_opaque_member_extras() {
         (b"prefix-suffix", b"prefix", false),
     ] {
         let fixture = Fixture {
-            local_extra: field(0xbeef, local),
-            central_extra: field(0xbeef, central),
+            // Distinct unknown IDs must remain separate keys, independent of
+            // their order in each header or their shared low byte.
+            local_extra: [field(0xbeef, local), field(0xcaef, b"other field")].concat(),
+            central_extra: [field(0xcaef, b"other field"), field(0xbeef, central)].concat(),
             ..Fixture::default()
         };
 
@@ -555,6 +812,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         name: b"next".to_vec(),
         local_extra: field(0x000d, &unix_data),
         descriptor: Some(true),
+        local_offset: first.central as u32,
         ..Fixture::default()
     }
     .build();
@@ -563,17 +821,11 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend_from_slice(&second.bytes[..second.central]);
 
     let central = bytes.len();
-    let mut second_header = second.bytes[second.central..second.end].to_vec();
-    set32(&mut second_header, 42, first.central as u32);
-    bytes.extend_from_slice(&second_header);
+    bytes.extend_from_slice(&second.bytes[second.central..second.end]);
     bytes.extend_from_slice(&first.bytes[first.central..first.end]);
 
     let end = bytes.len();
-    bytes.extend_from_slice(&first.bytes[first.end..]);
-    set16(&mut bytes, end + 8, 2);
-    set16(&mut bytes, end + 10, 2);
-    set32(&mut bytes, end + 12, (end - central) as u32);
-    set32(&mut bytes, end + 16, central as u32);
+    bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
     let mut index = Index::read(&mut source, Limits::default()).await?;
@@ -634,14 +886,17 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
             .is_err()
     );
 
-    bytes.drain(central..central + second_header.len());
-    let end = bytes.len() - 22;
-    set16(&mut bytes, end + 8, 1);
-    set16(&mut bytes, end + 10, 1);
-    set32(&mut bytes, end + 12, (end - central) as u32);
+    let mut unindexed = bytes[..central].to_vec();
+    unindexed.extend_from_slice(&first.bytes[first.central..first.end]);
+    unindexed.extend(end_record(
+        1,
+        central as u32,
+        (first.end - first.central) as u32,
+        &[],
+    ));
 
     assert!(
-        read_validated(&mut Cursor::new(bytes), Limits::default())
+        read_validated(&mut Cursor::new(unindexed), Limits::default())
             .await
             .is_err()
     );
@@ -651,29 +906,17 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 
 #[tokio::test]
 async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
-    let archive = Fixture {
-        zip64: true,
-        ..Fixture::default()
-    }
-    .build();
-
     let size = u64::from(u32::MAX) + 1;
-    let data_offset = archive.central - 7;
-    let mut prefix = archive.bytes[..data_offset].to_vec();
-    for offset in [38, 46] {
-        prefix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
-    }
-
-    let mut suffix = archive.bytes[archive.central..].to_vec();
-    for offset in [54, 62] {
-        suffix[offset..offset + 8].copy_from_slice(&size.to_le_bytes());
-    }
-
-    let central_size = 70;
-    let suffix_offset = data_offset as u64 + size;
-    suffix[central_size + 48..central_size + 56].copy_from_slice(&suffix_offset.to_le_bytes());
-    suffix[central_size + 56 + 8..central_size + 56 + 16]
-        .copy_from_slice(&(suffix_offset + central_size as u64).to_le_bytes());
+    let member = MemberHeader::new(
+        "file",
+        CompressionMethod::Stored,
+        WriteEntryKind::File { executable: false },
+    )?
+    .finish(0, size, size, 0)?;
+    let prefix = member.local_header();
+    let mut suffix = member.central_header();
+    let suffix_offset = prefix.len() as u64 + size;
+    suffix.extend(end_records(1, suffix_offset, suffix.len() as u64)?);
 
     let mut source = Sparse {
         prefix,
@@ -719,13 +962,12 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         }
     }
 
-    let mut archive = Fixture {
+    let archive = Fixture {
         zip64: true,
+        zip64_version: Some(62),
         ..Fixture::default()
     }
     .build();
-    set16(&mut archive.bytes, archive.end - 76 + 14, 62);
-
     assert!(matches!(
         read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
         Err(FrameError::Unsupported {
@@ -741,20 +983,36 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
         ([0xef, 0xbe, 0, 0, 0, 0].repeat(2048), true),
         (vec![0xef], false),
         (vec![0xef, 0xbe, 1, 0, 0, 0], false),
-        (vec![0x14, 0, 0, 0, 0, 0], false),
-    ] {
-        let mut archive = Fixture {
+    ]
+    .into_iter()
+    .chain(
+        [
+            (0x000fu16, false),
+            (0x0013, true),
+            (0x0014, false),
+            (0x0015, false),
+            (0x0016, false),
+            (0x0017, false),
+            (0x0018, true),
+            (0x0019, false),
+            (0x001a, true),
+            (0x9900, true),
+            (0x9901, false),
+            (0x9902, true),
+        ]
+        .map(|(identifier, valid)| {
+            (
+                [identifier.to_le_bytes().as_slice(), &[0; 4]].concat(),
+                valid,
+            )
+        }),
+    ) {
+        let archive = Fixture {
             zip64: true,
+            zip64_extensions: extension,
             ..Fixture::default()
         }
         .build();
-
-        let end_offset = archive.end - 76;
-        archive.bytes[end_offset + 4..end_offset + 12]
-            .copy_from_slice(&(44 + extension.len() as u64).to_le_bytes());
-        archive
-            .bytes
-            .splice(archive.end - 20..archive.end - 20, extension);
 
         let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
 
@@ -766,21 +1024,15 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 
 #[tokio::test]
 async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
-    let mut archive = Fixture {
+    let archive = Fixture {
         zip64: true,
+        zip64_extensions: [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000),
         archive_comment: vec![b'a'; usize::from(u16::MAX)],
         ..Fixture::default()
     }
     .build();
-    let extension = [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000);
-    let end_size = 44 + extension.len() as u64;
-    let end_offset = archive.end - 76;
-    archive.bytes[end_offset + 4..end_offset + 12].copy_from_slice(&end_size.to_le_bytes());
-    archive
-        .bytes
-        .splice(archive.end - 20..archive.end - 20, extension);
-
-    let directory_budget = (end_offset - archive.central) as u64 + 12 + end_size;
+    let end_offset = archive.zip64_end.ok_or("missing ZIP64 end")?;
+    let directory_budget = (archive.end - 20 - archive.central) as u64;
     let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
     // Directory, ZIP64 end, and local metadata share one cumulative budget.
     for metadata_size in [total_budget - 1, total_budget] {
@@ -838,30 +1090,24 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     for ordinal in 0..2000 {
         let fixture = Fixture {
             name: format!("file-{ordinal}").into_bytes(),
+            local_offset: bytes.len() as u32,
             ..Fixture::default()
         }
         .build();
         positions.push(bytes.len() as u64);
-        let mut central = fixture.bytes[fixture.central..fixture.end].to_vec();
-        set32(&mut central, 42, bytes.len() as u32);
-        directory.extend(central);
+        directory.extend_from_slice(&fixture.bytes[fixture.central..fixture.end]);
         bytes.extend_from_slice(&fixture.bytes[..fixture.central]);
     }
 
     // Keep the tail search outside both the directory and local records.
     let central = bytes.len();
     bytes.extend_from_slice(&directory);
-    let end = bytes.len();
-    let footer = Fixture {
-        archive_comment: vec![b'a'; usize::from(u16::MAX)],
-        ..Fixture::default()
-    }
-    .build();
-    bytes.extend_from_slice(&footer.bytes[footer.end..]);
-    set16(&mut bytes, end + 8, 2000);
-    set16(&mut bytes, end + 10, 2000);
-    set32(&mut bytes, end + 12, directory.len() as u32);
-    set32(&mut bytes, end + 16, central as u32);
+    bytes.extend(end_record(
+        2000,
+        central as u32,
+        directory.len() as u32,
+        &vec![b'a'; usize::from(u16::MAX)],
+    ));
     bytes[30] = b'x';
 
     let mut source = Observed::new(bytes);

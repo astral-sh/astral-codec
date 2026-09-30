@@ -3,10 +3,12 @@ use std::ops::{Deref, Range};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    CompressionMethod, Error, add,
+    CompressionMethod, EntryKind, Error, HostSystem, add,
+    constants::{signature, size},
     extra::{Extras, ResolvedExtras},
     invalid,
-    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, array_at, bytes_at},
+    kind::ExternalAttributes,
+    record::{Common, RecordReader, array_at, bytes_at},
 };
 
 use super::Budget;
@@ -48,7 +50,7 @@ struct Metadata {
 }
 
 /// A member whose local file entry, extras, and optional data descriptor
-/// have been reconciled with the directory.
+/// have been reconciled with the directory and checked for a consistent kind.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a> {
     /// The indexed member.
@@ -58,6 +60,20 @@ pub struct Entry<'a> {
 }
 
 impl Entry<'_> {
+    /// Returns the member's kind, validated during local record resolution.
+    ///
+    /// This does not decode payloads or apply an extraction policy.
+    pub fn kind(&self) -> EntryKind {
+        self.resolved.kind
+    }
+
+    /// Returns the UNIX file type and permission bits from external attributes.
+    ///
+    /// This is zero for hosts other than UNIX and Darwin.
+    pub fn unix_mode(&self) -> u16 {
+        self.resolved.unix_mode
+    }
+
     /// Returns the absolute position of the encoded payload.
     pub fn data_offset(&self) -> u64 {
         self.resolved.data_offset
@@ -66,7 +82,7 @@ impl Entry<'_> {
     /// Returns reconciled APPNOTE UNIX data for links or device numbers.
     ///
     /// The timestamp/ownership prefix is excluded. Interpret this data with
-    /// the external Unix file type.
+    /// the member's [`Self::kind`]. Link-target contents have not been validated.
     pub fn unix_extra_data(&self) -> Option<&[u8]> {
         self.resolved.extras.unix_data()
     }
@@ -84,6 +100,8 @@ impl Deref for Entry<'_> {
 struct ResolvedMember {
     data_offset: u64,
     extras: ResolvedExtras,
+    kind: EntryKind,
+    unix_mode: u16,
 }
 
 /// Metadata retained from a member's central directory entry.
@@ -126,12 +144,14 @@ impl DirectoryEntry {
         self.metadata.local_offset
     }
 
-    /// Returns the host-system identifier for the external attributes.
-    pub fn host_system(&self) -> u8 {
-        (self.metadata.made_by >> 8) as u8
+    /// Returns the host-system interpretation of the external attributes.
+    ///
+    /// Unrecognized identifiers are preserved as [`HostSystem::Unknown`].
+    pub fn host_system(&self) -> HostSystem {
+        HostSystem::from((self.metadata.made_by >> 8) as u8)
     }
 
-    /// Returns the external file attributes, interpreted according to the host.
+    /// Returns the raw external file attributes, whose meaning depends on the host.
     pub fn external_attributes(&self) -> u32 {
         self.metadata.attributes
     }
@@ -183,13 +203,13 @@ impl IndexedEntry {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(
-            30 + directory.metadata.path.len() as u64,
+            size::LOCAL as u64 + directory.metadata.path.len() as u64,
             directory.compressed_size(),
         )?;
         let minimum = add(
             minimum,
             if directory.metadata.common.descriptor() {
-                12
+                size::DESCRIPTOR as u64
             } else {
                 0
             },
@@ -235,19 +255,19 @@ impl DirectoryEntry {
         end: u64,
         budget: &mut Budget,
     ) -> Result<(Self, u64), Error> {
-        let mut header = [0; 46];
+        let mut header = [0; size::CENTRAL];
         reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != CENTRAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(&array_at::<6, 22, _>(&header), position)?;
+        let common = Common::parse(&array_at::<6, { size::COMMON }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
         let variable = reader
             .read_vec(
-                position + 46,
+                position + size::CENTRAL as u64,
                 name_length + extra_length + comment_length,
                 end,
             )
@@ -286,7 +306,10 @@ impl DirectoryEntry {
             extra: variable[name_length..name_length + extra_length].to_vec(),
         };
 
-        Ok((entry, position + 46 + variable.len() as u64))
+        Ok((
+            entry,
+            position + size::CENTRAL as u64 + variable.len() as u64,
+        ))
     }
 }
 
@@ -299,19 +322,23 @@ impl IndexedEntry {
         let metadata = &self.directory.metadata;
         let boundary = self.boundary;
         let position = metadata.local_offset;
-        let mut header = [0; 30];
+        let mut header = [0; size::LOCAL];
         reader.read_at(position, &mut header, boundary).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != LOCAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&array_at::<4, 22, _>(&header), position)?;
+        let common = Common::parse(&array_at::<4, { size::COMMON }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
-        budget.metadata(30 + (name_length + extra_length) as u64)?;
+        budget.metadata((size::LOCAL + name_length + extra_length) as u64)?;
 
         let variable = reader
-            .read_vec(position + 30, name_length + extra_length, boundary)
+            .read_vec(
+                position + size::LOCAL as u64,
+                name_length + extra_length,
+                boundary,
+            )
             .await?;
 
         let extras = Extras::parse(&variable[name_length..], position)?;
@@ -346,7 +373,7 @@ impl IndexedEntry {
             return Err(invalid(position, "local and central CRC or sizes disagree"));
         }
 
-        let data_offset = add(position, 30 + variable.len() as u64)?;
+        let data_offset = add(position, size::LOCAL as u64 + variable.len() as u64)?;
         let data_end = add(data_offset, metadata.compressed_size)?;
         if data_end > boundary {
             return Err(invalid(position, "payload overlaps the next record"));
@@ -361,9 +388,17 @@ impl IndexedEntry {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
 
+        let attributes = ExternalAttributes::new(
+            self.directory.host_system(),
+            self.directory.external_attributes(),
+        );
+        let kind = EntryKind::resolve(&self.directory, extras.unix_data(), &attributes)?;
+
         Ok(ResolvedMember {
             data_offset,
             extras,
+            kind,
+            unix_mode: attributes.unix_mode,
         })
     }
 }
@@ -375,25 +410,29 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     end: u64,
     zip64: bool,
 ) -> Result<(), Error> {
-    let unsigned_length = if zip64 { 20 } else { 12 };
+    let unsigned_length = if zip64 {
+        size::ZIP64_DESCRIPTOR as u64
+    } else {
+        size::DESCRIPTOR as u64
+    };
     let length = end - position;
-    if length != unsigned_length && length != unsigned_length + 4 {
+    if length != unsigned_length && length != unsigned_length + size::SIGNATURE as u64 {
         return Err(invalid(position, "invalid data descriptor length"));
     }
 
-    let mut bytes = [0; 24];
+    let mut bytes = [0; size::SIGNATURE + size::ZIP64_DESCRIPTOR];
     reader
         .read_at(position, &mut bytes[..length as usize], end)
         .await?;
 
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
-    let offset = if length == unsigned_length + 4 {
-        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != DESCRIPTOR {
+    let offset = if length == unsigned_length + size::SIGNATURE as u64 {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != signature::DESCRIPTOR {
             return Err(invalid(position, "invalid data descriptor signature"));
         }
 
-        4
+        size::SIGNATURE
     } else {
         0
     };
