@@ -162,18 +162,6 @@ impl Budget {
         Ok(())
     }
 
-    /// Check the ZIP64 end record's declared size without debiting metadata.
-    fn check_zip64_end_size(&self, size: u64) -> Result<(), Error> {
-        if size > self.limits.metadata_size {
-            return Err(Error::Limit {
-                resource: "ZIP64 end bytes",
-                limit: self.limits.metadata_size,
-            });
-        }
-
-        Ok(())
-    }
-
     /// Debit from the metadata budget.
     fn metadata(&mut self, length: u64) -> Result<(), Error> {
         let metadata = add(self.metadata, length)?;
@@ -227,8 +215,9 @@ struct CentralDirectory {
 impl CentralDirectory {
     /// Reads the central directory's location and extent from the end records.
     ///
-    /// Validates its bounds and entry count, and charges its metadata size
-    /// before returning. Failed or cancelled reads leave the budget unchanged.
+    /// Validates its bounds and entry count, and charges directory and ZIP64 end
+    /// metadata before returning. Failed or cancelled reads leave the budget
+    /// unchanged.
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
@@ -363,8 +352,6 @@ impl CentralDirectory {
                     return Err(invalid(position, "classic and ZIP64 end records disagree"));
                 }
             }
-
-            read_extensible_sector(reader, boundary + 56, position - 20, budget).await?;
         } else {
             if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
                 || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
@@ -400,6 +387,11 @@ impl CentralDirectory {
             return Err(invalid(offset, "entry count exceeds directory capacity"));
         }
 
+        if has_locator {
+            pending_budget.metadata(position - 20 - boundary)?;
+            read_extensible_sector(reader, boundary + 56, position - 20).await?;
+        }
+
         *budget = pending_budget;
         Ok(Self {
             offset,
@@ -413,14 +405,10 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut RecordReader<'_, R>,
     mut position: u64,
     end: u64,
-    budget: &Budget,
 ) -> Result<(), Error> {
     let length = end
         .checked_sub(position)
         .ok_or_else(|| invalid(position, "invalid ZIP64 extension bounds"))?;
-    // The declared ZIP64 end size includes 44 fixed bytes before the extensions.
-    // This is an independent cap, not a charge to cumulative metadata usage.
-    budget.check_zip64_end_size(add(44, length)?)?;
     let length = usize::try_from(length)
         .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
     // Buffer extensions once so tiny fields cannot force millions of seeks.

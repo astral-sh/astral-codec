@@ -765,7 +765,7 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 }
 
 #[tokio::test]
-async fn checks_zip64_end_size_without_charging_metadata() -> TestResult {
+async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
     let mut archive = Fixture {
         zip64: true,
         archive_comment: vec![b'a'; usize::from(u16::MAX)],
@@ -780,34 +780,50 @@ async fn checks_zip64_end_size_without_charging_metadata() -> TestResult {
         .bytes
         .splice(archive.end - 20..archive.end - 20, extension);
 
-    // The end record fills its independent limit. Directory and local metadata
-    // must still fit their cumulative budget without being charged for it.
-    read_validated(
-        &mut Cursor::new(&archive.bytes),
-        Limits {
-            metadata_size: end_size,
-            ..Limits::default()
-        },
-    )
-    .await?;
+    let directory_budget = (end_offset - archive.central) as u64 + 12 + end_size;
+    let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
+    // Directory, ZIP64 end, and local metadata share one cumulative budget.
+    for metadata_size in [total_budget - 1, total_budget] {
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(
+            &mut source,
+            Limits {
+                metadata_size,
+                ..Limits::default()
+            },
+        )
+        .await?;
+        let result = index.validate_all(&mut source).await;
+        if metadata_size == total_budget {
+            result?;
+        } else {
+            assert!(matches!(
+                result,
+                Err(FrameError::Limit {
+                    resource: "metadata bytes",
+                    limit,
+                }) if limit == metadata_size
+            ));
+        }
+    }
 
     let mut source = Observed::new(archive.bytes);
     // The extension exceeds the read-ahead window and requires its own read.
-    // Its size limit must be checked before that read is attempted.
+    // The combined directory and end-record charge must precede that read.
     source.fail_at = Some(end_offset as u64 + 56);
     assert!(matches!(
         read_validated(
             &mut source,
             Limits {
-                metadata_size: end_size - 1,
+                metadata_size: directory_budget - 1,
                 ..Limits::default()
             },
         )
         .await,
         Err(FrameError::Limit {
-            resource: "ZIP64 end bytes",
+            resource: "metadata bytes",
             limit,
-        }) if limit == end_size - 1
+        }) if limit == directory_budget - 1
     ));
     assert_eq!(source.fail_at, Some(end_offset as u64 + 56));
 

@@ -64,7 +64,8 @@ pub struct Limits {
     pub archive_size: u64,
     /// Maximum number of members (default: 100,000).
     pub entries: usize,
-    /// Total central and resolved local metadata bytes (default: 64 MiB).
+    /// Total central directory, resolved local, and ZIP64 end record metadata
+    /// bytes (default: 64 MiB).
     pub metadata_size: u64,
     /// Maximum decoded size of one member (default: 8 GiB).
     pub member_size: u64,
