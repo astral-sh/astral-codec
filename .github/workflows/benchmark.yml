@@ -53,7 +53,7 @@ jobs:
       - name: Build benchmarks
         run: |
           uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
-          uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --bench extraction_filesystem --locked -m simulation
+          uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m simulation
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
@@ -62,7 +62,7 @@ jobs:
           run: |
             uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
             if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison --bench extraction_filesystem -m simulation
+              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation
             else
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison --bench extraction_filesystem -m simulation -- '/tar-codec(\]|$)'
+              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m simulation -- '/tar-codec(\]|$)'
             fi
