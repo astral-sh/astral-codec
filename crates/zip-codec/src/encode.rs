@@ -15,6 +15,24 @@ use zip_framing::{
 
 use crate::payload::CHUNK_SIZE;
 
+/// Per-file ZIP settings for [`archive_trait::Builder::add_file_with_options`].
+///
+/// Default options inherit the method configured by [`ZipEncoder::compression`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ZipFileOptions {
+    compression: Option<CompressionMethod>,
+}
+
+impl ZipFileOptions {
+    /// Selects the compression method for this file.
+    ///
+    /// Empty files are always stored, regardless of this setting.
+    pub fn compression(mut self, method: CompressionMethod) -> Self {
+        self.compression = Some(method);
+        self
+    }
+}
+
 /// A streaming UTF-8 ZIP64 writer for [`ArchiveBuilder::builder`].
 ///
 /// Output must be seekable, empty, and positioned at byte zero. Payloads are
@@ -48,7 +66,9 @@ impl<W> ZipEncoder<W> {
         }
     }
 
-    /// Selects the compression method for nonempty regular files.
+    /// Selects the default compression method for nonempty regular files.
+    ///
+    /// Individual files can override this with [`ZipFileOptions::compression`].
     pub fn compression(mut self, method: CompressionMethod) -> Self {
         self.method = method;
         self
@@ -229,7 +249,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type Error = EncodeError;
-    type FileOptions = ();
+    type FileOptions = ZipFileOptions;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         if self.finished {
@@ -268,12 +288,12 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         path: &str,
         payload: &mut FilePayload<'_>,
         metadata: EntryMetadata,
-        _options: Self::FileOptions,
+        options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         let method = if payload.size() == 0 {
             CompressionMethod::Stored
         } else {
-            self.method
+            options.compression.unwrap_or(self.method)
         };
         let header = MemberHeader::new(
             path,
