@@ -51,41 +51,10 @@ pub mod size {
     pub const ZIP64_EXTENSION: usize = 6;
 }
 
-/// Extra-field identifiers and layouts (APPNOTE sections 4.5 and 4.6).
+/// Extra-field layouts (APPNOTE sections 4.5 and 4.6).
+///
+/// Header identifiers are represented by [`crate::ExtraHeaderId`].
 pub mod extra {
-    /// ZIP64 sizes, local offset, and disk number.
-    pub const ZIP64: u16 = 0x0001;
-    /// Authenticity verification information.
-    pub const AV_INFO: u16 = 0x0007;
-    /// Reserved extended language encoding data.
-    pub const EXTENDED_LANGUAGE_ENCODING: u16 = 0x0008;
-    /// PKWARE UNIX metadata.
-    pub const UNIX: u16 = 0x000d;
-    /// Patch descriptor.
-    pub const PATCH_DESCRIPTOR: u16 = 0x000f;
-    /// PKCS#7 certificate store.
-    pub const PKCS7_STORE: u16 = 0x0014;
-    /// X.509 certificate and signature for a file.
-    pub const X509_FILE: u16 = 0x0015;
-    /// X.509 certificate for the central directory.
-    pub const X509_DIRECTORY: u16 = 0x0016;
-    /// Strong encryption header.
-    pub const STRONG_ENCRYPTION: u16 = 0x0017;
-    /// PKCS#7 encryption recipient certificates.
-    pub const ENCRYPTION_RECIPIENTS: u16 = 0x0019;
-    /// Extended timestamps.
-    pub const EXTENDED_TIMESTAMP: u16 = 0x5455;
-    /// Original Info-ZIP UNIX metadata.
-    pub const INFO_ZIP_UNIX: u16 = 0x5855;
-    /// Info-ZIP Unicode comment.
-    pub const UNICODE_COMMENT: u16 = 0x6375;
-    /// Info-ZIP Unicode path.
-    pub const UNICODE_PATH: u16 = 0x7075;
-    /// Info-ZIP UNIX UID/GID metadata (the "new" UNIX field).
-    pub const INFO_ZIP_UNIX_NEW: u16 = 0x7855;
-    /// WinZip AES encryption metadata.
-    pub const AES: u16 = 0x9901;
-
     /// Extra-field header length in bytes (two-byte ID, two-byte size).
     pub const HEADER_SIZE: usize = 4;
     /// PKWARE UNIX timestamp and ownership prefix length in bytes.

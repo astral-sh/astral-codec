@@ -4,7 +4,7 @@
 //! descriptors. Writers can reserve local header space before streaming data.
 
 use crate::{
-    CompressionMethod, Error, add,
+    CompressionMethod, Error, ExtraHeaderId, add,
     constants::{attributes, extra, flags, host, signature, size, version},
     invalid,
     record::parse_name,
@@ -135,7 +135,7 @@ impl CompletedMember<'_> {
 
         bytes.extend_from_slice(self.header.path.as_bytes());
 
-        push16(&mut bytes, extra::ZIP64);
+        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
         push16(&mut bytes, extra::ZIP64_LOCAL_SIZE as u16);
         push64(&mut bytes, self.uncompressed);
         push64(&mut bytes, self.compressed);
@@ -179,7 +179,7 @@ impl CompletedMember<'_> {
 
         bytes.extend_from_slice(self.header.path.as_bytes());
 
-        push16(&mut bytes, extra::ZIP64);
+        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
         push16(&mut bytes, extra::ZIP64_CENTRAL_SIZE as u16);
         push64(&mut bytes, self.uncompressed);
         push64(&mut bytes, self.compressed);

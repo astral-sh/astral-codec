@@ -3,8 +3,8 @@ use std::str;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Error, Limits, add,
-    constants::{extra, signature, size, version},
+    Error, ExtraHeaderId, Limits, add,
+    constants::{signature, size, version},
     extra::Extras,
     invalid,
     record::{RecordReader, array_at},
@@ -448,14 +448,14 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
             length_2,
             length_3,
         ] = *header;
-        match u16::from_le_bytes([identifier_low, identifier_high]) {
-            extra::PATCH_DESCRIPTOR
-            | extra::PKCS7_STORE
-            | extra::X509_FILE
-            | extra::X509_DIRECTORY
-            | extra::STRONG_ENCRYPTION
-            | extra::ENCRYPTION_RECIPIENTS
-            | extra::AES => {
+        match ExtraHeaderId::from(u16::from_le_bytes([identifier_low, identifier_high])) {
+            ExtraHeaderId::PatchDescriptor
+            | ExtraHeaderId::Pkcs7Store
+            | ExtraHeaderId::X509File
+            | ExtraHeaderId::X509Directory
+            | ExtraHeaderId::StrongEncryption
+            | ExtraHeaderId::EncryptionRecipients
+            | ExtraHeaderId::Aes => {
                 return Err(Error::Unsupported {
                     position,
                     feature: "ZIP64 security or patch extension",

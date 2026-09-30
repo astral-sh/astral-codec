@@ -780,8 +780,10 @@ async fn requires_complete_agreement_for_opaque_member_extras() {
         (b"prefix-suffix", b"prefix", false),
     ] {
         let fixture = Fixture {
-            local_extra: field(0xbeef, local),
-            central_extra: field(0xbeef, central),
+            // Distinct unknown IDs must remain separate keys, independent of
+            // their order in each header or their shared low byte.
+            local_extra: [field(0xbeef, local), field(0xcaef, b"other field")].concat(),
+            central_extra: [field(0xcaef, b"other field"), field(0xbeef, central)].concat(),
             ..Fixture::default()
         };
 

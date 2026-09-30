@@ -21,6 +21,7 @@ use std::io;
 
 use thiserror::Error;
 
+pub use extra::ExtraHeaderId;
 pub use host::HostSystem;
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::EntryKind;
