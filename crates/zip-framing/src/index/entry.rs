@@ -86,15 +86,20 @@ struct LocalEntry {
     extras: ResolvedExtras,
 }
 
-/// Metadata declared by a central-directory record.
+/// An indexed ZIP member and its central directory metadata.
 ///
-/// The local header and descriptor are checked only when [`super::Index::entry`]
-/// selects this member. Only a checked [`Entry`] exposes a payload offset and
-/// reconciled UNIX extra-field data.
+/// The member's local records are checked on demand by [`super::Index::entry`]
+/// or [`super::Index::validate_all`]. Successful checks are cached and exposed
+/// through [`Self::resolved`].
 #[derive(Debug)]
 pub struct DirectoryEntry {
+    /// Central directory entry metadata.
     metadata: Metadata,
+    /// Raw extra data for the central directory entry.
     extra: Vec<u8>,
+    /// The end offset for the member's full local file entry state,
+    /// including the local header itself, filename, extras, data,
+    /// and optional data descriptor.
     boundary: u64,
     // TODO(ww): This seems wrong.
     local: Option<LocalEntry>,
