@@ -13,10 +13,17 @@ mod entry;
 
 pub use entry::{DirectoryEntry, Entry, IndexedEntry};
 
-/// A central-directory index with lazily checked local records.
+/// A ZIP member index.
+///
+/// This is constructed from the central directory, with referenced
+/// local file entries being resolved lazily upon access through
+/// [`Self::entry`].
 #[derive(Debug)]
 pub struct Index {
+    /// The indexed members, in central directory order.
     entries: Vec<IndexedEntry>,
+    /// The parse budget. This is debited against when parsing local
+    /// file entries and reconciling local/central metadata.
     budget: Budget,
 }
 
@@ -37,7 +44,7 @@ impl Index {
         limits: Limits,
     ) -> Result<Self, Error> {
         let mut buffered = RecordReader::new(reader, 64 * 1024);
-        let end = find_directory(&mut buffered, limits).await?;
+        let end = CentralDirectory::read(&mut buffered, limits).await?;
         check_limit(end.count, limits.entries as u64, "entry count")?;
         check_limit(end.size, limits.metadata_size, "metadata bytes")?;
         if end.count > end.size / 46 {
@@ -115,19 +122,34 @@ impl Index {
     }
 }
 
+/// Our ZIP parsing budget.
 #[derive(Clone, Copy, Debug)]
 struct Budget {
+    /// The parse's cumulative metadata usage, in bytes.
+    ///
+    /// This is enforced against [`Limits::metadata_size`].
     metadata: u64,
+
+    /// The parse's cumulative uncompressed member sizes,
+    /// as reported through the central directory.
+    ///
+    /// Each individual member's size is enforced against
+    /// [`Limits::member_size`], while the cumulative total
+    /// is enforced against [`Limits::total_size`].
     output: u64,
+
+    /// The budget's enforced limits.
     limits: Limits,
 }
 
 impl Budget {
+    /// Debit from the metadata budget.
     fn metadata(&mut self, length: u64) -> Result<(), Error> {
         self.metadata = add(self.metadata, length)?;
         check_limit(self.metadata, self.limits.metadata_size, "metadata bytes")
     }
 
+    /// Debit from the output size budgets.
     fn output(&mut self, size: u64) -> Result<(), Error> {
         check_limit(size, self.limits.member_size, "decoded member bytes")?;
 
@@ -136,186 +158,197 @@ impl Budget {
     }
 }
 
-struct Directory {
+/// A ZIP archive's central directory's location and extent.
+struct CentralDirectory {
+    /// The absolute offset to the central directory, relative to the
+    /// start of the source.
     offset: u64,
+    /// The overall size of the central directory in bytes.
+    ///
+    /// Note that this does not include the size of the EOCD or any other
+    /// trailing records that may follow the central directory.
     size: u64,
+    /// The total number of central directory entries.
     count: u64,
 }
 
-async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut RecordReader<'_, R>,
-    limits: Limits,
-) -> Result<Directory, Error> {
-    let length = reader.length().await?;
-    check_limit(length, limits.archive_size, "archive bytes")?;
-    if length < 22 {
-        return Err(invalid(0, "missing end of central directory"));
-    }
-
-    // EOCD has a 16-bit comment length. Never scan the payload for signatures.
-    let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
-    let tail_start = length - tail_size as u64;
-    let mut tail = vec![0; tail_size];
-    reader.read_at(tail_start, &mut tail, length).await?;
-
-    let mut candidate = None;
-    for (offset, header) in tail.windows(22).enumerate() {
-        if header.starts_with(&END.to_le_bytes())
-            && let Some(header) = header.first_chunk::<22>()
-            && offset + 22 + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
-                == tail.len()
-            && candidate.replace((offset, header)).is_some()
-        {
-            return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
-        }
-    }
-
-    let (offset, end) =
-        candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
-    let position = tail_start + offset as u64;
-    str::from_utf8(&tail[offset + 22..])
-        .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
-
-    let mut directory = Directory {
-        offset: u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
-        size: u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
-        count: u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
-    };
-
-    let mut boundary = position;
-    let mut locator = [0; 20];
-    let has_locator = if position >= 20 {
-        reader
-            .read_at(position - 20, &mut locator, position)
-            .await?;
-        u32::from_le_bytes(array_at::<0, 4, _>(&locator)) == LOCATOR
-    } else {
-        false
-    };
-
-    if has_locator {
-        if u32::from_le_bytes(array_at::<4, 4, _>(&locator)) != 0
-            || u32::from_le_bytes(array_at::<16, 4, _>(&locator)) != 1
-        {
-            return Err(Error::Unsupported {
-                position: position - 20,
-                feature: "multiple volumes",
-            });
+impl CentralDirectory {
+    /// Reads the central directory's location and extent from the end records.
+    async fn read<R: AsyncRead + AsyncSeek + Unpin>(
+        reader: &mut RecordReader<'_, R>,
+        limits: Limits,
+    ) -> Result<Self, Error> {
+        let length = reader.length().await?;
+        check_limit(length, limits.archive_size, "archive bytes")?;
+        if length < 22 {
+            return Err(invalid(0, "missing end of central directory"));
         }
 
-        boundary = u64::from_le_bytes(array_at::<8, 8, _>(&locator));
-        let mut zip64 = [0; 56];
-        reader.read_at(boundary, &mut zip64, position - 20).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&zip64)) != ZIP64_END {
-            return Err(invalid(boundary, "invalid ZIP64 end signature"));
-        }
+        // EOCD has a 16-bit comment length. Never scan the payload for signatures.
+        let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
+        let tail_start = length - tail_size as u64;
+        let mut tail = vec![0; tail_size];
+        reader.read_at(tail_start, &mut tail, length).await?;
 
-        let size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
-        if size < 44 || add(boundary, add(12, size)?)? != position - 20 {
-            return Err(invalid(boundary, "invalid ZIP64 end length"));
-        }
-        check_limit(size, limits.metadata_size, "ZIP64 end bytes")?;
-
-        if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= 62 {
-            return Err(Error::Unsupported {
-                position: boundary,
-                feature: "ZIP64 version-2 directory",
-            });
-        }
-        if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) != 45 {
-            return Err(invalid(boundary, "invalid ZIP64 extraction version"));
-        }
-
-        if u32::from_le_bytes(array_at::<16, 4, _>(&zip64)) != 0
-            || u32::from_le_bytes(array_at::<20, 4, _>(&zip64)) != 0
-        {
-            return Err(Error::Unsupported {
-                position: boundary,
-                feature: "multiple volumes",
-            });
-        }
-
-        if u64::from_le_bytes(array_at::<24, 8, _>(&zip64))
-            != u64::from_le_bytes(array_at::<32, 8, _>(&zip64))
-        {
-            return Err(invalid(boundary, "ZIP64 entry counts disagree"));
-        }
-
-        directory = Directory {
-            offset: u64::from_le_bytes(array_at::<48, 8, _>(&zip64)),
-            size: u64::from_le_bytes(array_at::<40, 8, _>(&zip64)),
-            count: u64::from_le_bytes(array_at::<32, 8, _>(&zip64)),
-        };
-        for (small, large, sentinel) in [
-            (
-                u64::from(u16::from_le_bytes(array_at::<4, 2, _>(end))),
-                0,
-                u64::from(u16::MAX),
-            ),
-            (
-                u64::from(u16::from_le_bytes(array_at::<6, 2, _>(end))),
-                0,
-                u64::from(u16::MAX),
-            ),
-            (
-                u64::from(u16::from_le_bytes(array_at::<8, 2, _>(end))),
-                directory.count,
-                u64::from(u16::MAX),
-            ),
-            (
-                u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
-                directory.count,
-                u64::from(u16::MAX),
-            ),
-            (
-                u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
-                directory.size,
-                u64::from(u32::MAX),
-            ),
-            (
-                u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
-                directory.offset,
-                u64::from(u32::MAX),
-            ),
-        ] {
-            if small != sentinel && small != large {
-                return Err(invalid(position, "classic and ZIP64 end records disagree"));
+        let mut candidate = None;
+        for (offset, header) in tail.windows(22).enumerate() {
+            if header.starts_with(&END.to_le_bytes())
+                && let Some(header) = header.first_chunk::<22>()
+                && offset + 22 + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+                    == tail.len()
+                && candidate.replace((offset, header)).is_some()
+            {
+                return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
             }
         }
 
-        read_extensible_sector(reader, boundary + 56, position - 20).await?;
-    } else {
-        if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
-            || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
-        {
-            return Err(Error::Unsupported {
-                position,
-                feature: "multiple volumes",
-            });
+        let (offset, end) =
+            candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
+        let position = tail_start + offset as u64;
+        str::from_utf8(&tail[offset + 22..])
+            .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
+
+        let mut directory = Self {
+            offset: u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
+            size: u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
+            count: u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
+        };
+
+        let mut boundary = position;
+        let mut locator = [0; 20];
+        let has_locator = if position >= 20 {
+            reader
+                .read_at(position - 20, &mut locator, position)
+                .await?;
+            u32::from_le_bytes(array_at::<0, 4, _>(&locator)) == LOCATOR
+        } else {
+            false
+        };
+
+        if has_locator {
+            if u32::from_le_bytes(array_at::<4, 4, _>(&locator)) != 0
+                || u32::from_le_bytes(array_at::<16, 4, _>(&locator)) != 1
+            {
+                return Err(Error::Unsupported {
+                    position: position - 20,
+                    feature: "multiple volumes",
+                });
+            }
+
+            boundary = u64::from_le_bytes(array_at::<8, 8, _>(&locator));
+            let mut zip64 = [0; 56];
+            reader.read_at(boundary, &mut zip64, position - 20).await?;
+            if u32::from_le_bytes(array_at::<0, 4, _>(&zip64)) != ZIP64_END {
+                return Err(invalid(boundary, "invalid ZIP64 end signature"));
+            }
+
+            let size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
+            if size < 44 || add(boundary, add(12, size)?)? != position - 20 {
+                return Err(invalid(boundary, "invalid ZIP64 end length"));
+            }
+            check_limit(size, limits.metadata_size, "ZIP64 end bytes")?;
+
+            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= 62 {
+                return Err(Error::Unsupported {
+                    position: boundary,
+                    feature: "ZIP64 version-2 directory",
+                });
+            }
+            if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) != 45 {
+                return Err(invalid(boundary, "invalid ZIP64 extraction version"));
+            }
+
+            if u32::from_le_bytes(array_at::<16, 4, _>(&zip64)) != 0
+                || u32::from_le_bytes(array_at::<20, 4, _>(&zip64)) != 0
+            {
+                return Err(Error::Unsupported {
+                    position: boundary,
+                    feature: "multiple volumes",
+                });
+            }
+
+            if u64::from_le_bytes(array_at::<24, 8, _>(&zip64))
+                != u64::from_le_bytes(array_at::<32, 8, _>(&zip64))
+            {
+                return Err(invalid(boundary, "ZIP64 entry counts disagree"));
+            }
+
+            directory = Self {
+                offset: u64::from_le_bytes(array_at::<48, 8, _>(&zip64)),
+                size: u64::from_le_bytes(array_at::<40, 8, _>(&zip64)),
+                count: u64::from_le_bytes(array_at::<32, 8, _>(&zip64)),
+            };
+            for (small, large, sentinel) in [
+                (
+                    u64::from(u16::from_le_bytes(array_at::<4, 2, _>(end))),
+                    0,
+                    u64::from(u16::MAX),
+                ),
+                (
+                    u64::from(u16::from_le_bytes(array_at::<6, 2, _>(end))),
+                    0,
+                    u64::from(u16::MAX),
+                ),
+                (
+                    u64::from(u16::from_le_bytes(array_at::<8, 2, _>(end))),
+                    directory.count,
+                    u64::from(u16::MAX),
+                ),
+                (
+                    u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
+                    directory.count,
+                    u64::from(u16::MAX),
+                ),
+                (
+                    u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
+                    directory.size,
+                    u64::from(u32::MAX),
+                ),
+                (
+                    u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
+                    directory.offset,
+                    u64::from(u32::MAX),
+                ),
+            ] {
+                if small != sentinel && small != large {
+                    return Err(invalid(position, "classic and ZIP64 end records disagree"));
+                }
+            }
+
+            read_extensible_sector(reader, boundary + 56, position - 20).await?;
+        } else {
+            if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
+                || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
+            {
+                return Err(Error::Unsupported {
+                    position,
+                    feature: "multiple volumes",
+                });
+            }
+
+            if u16::from_le_bytes(array_at::<8, 2, _>(end))
+                != u16::from_le_bytes(array_at::<10, 2, _>(end))
+            {
+                return Err(invalid(position, "entry counts disagree"));
+            }
+
+            if directory.count == u64::from(u16::MAX)
+                || directory.size == u64::from(u32::MAX)
+                || directory.offset == u64::from(u32::MAX)
+            {
+                return Err(invalid(position, "ZIP64 sentinel without locator"));
+            }
         }
 
-        if u16::from_le_bytes(array_at::<8, 2, _>(end))
-            != u16::from_le_bytes(array_at::<10, 2, _>(end))
-        {
-            return Err(invalid(position, "entry counts disagree"));
+        if add(directory.offset, directory.size)? != boundary {
+            return Err(invalid(
+                directory.offset,
+                "central directory boundary mismatch",
+            ));
         }
 
-        if directory.count == u64::from(u16::MAX)
-            || directory.size == u64::from(u32::MAX)
-            || directory.offset == u64::from(u32::MAX)
-        {
-            return Err(invalid(position, "ZIP64 sentinel without locator"));
-        }
+        Ok(directory)
     }
-
-    if add(directory.offset, directory.size)? != boundary {
-        return Err(invalid(
-            directory.offset,
-            "central directory boundary mismatch",
-        ));
-    }
-
-    Ok(directory)
 }
 
 async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
@@ -374,7 +407,7 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
 
 async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut RecordReader<'_, R>,
-    directory: &Directory,
+    directory: &CentralDirectory,
     budget: &mut Budget,
 ) -> Result<Vec<DirectoryEntry>, Error> {
     let end = add(directory.offset, directory.size)?;
