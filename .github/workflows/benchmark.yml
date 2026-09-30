@@ -3,8 +3,28 @@ name: Benchmarks
 on:
   pull_request:
     types: [opened, synchronize, reopened, labeled, unlabeled]
+    paths:
+      - .github/workflows/benchmark.yml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - uv.lock
+      - crates/archive-trait/**
+      - crates/tar-codec/**
+      - crates/tar-framing/**
+      - '!**/*.md'
   push:
     branches: [main]
+    paths:
+      - .github/workflows/benchmark.yml
+      - Cargo.toml
+      - Cargo.lock
+      - pyproject.toml
+      - uv.lock
+      - crates/archive-trait/**
+      - crates/tar-codec/**
+      - crates/tar-framing/**
+      - '!**/*.md'
   workflow_dispatch:
     inputs:
       compare:
