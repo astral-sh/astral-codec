@@ -53,6 +53,11 @@ succeeds; payload offsets and reconciled UNIX extras are available only through
 that checked type. `Index::validate_all` checks all members without decoding
 payloads. Local metadata budgets are charged once per successful resolution.
 
+Parsing constructors own their resource checks. Callers must not need separate
+validation or budget calls to make a returned value usable. Check limits before
+allocating variable-size metadata and commit usage only after successful
+construction.
+
 `zip-codec` resolves entries before projecting them into `archive-trait` members.
 It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
 random access, and cursor poisoning. Advancing past an unfinished member drains

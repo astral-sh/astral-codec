@@ -35,6 +35,22 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         Ok(self.inner.seek(SeekFrom::End(0)).await?)
     }
 
+    /// Checks the requested span before allocating and reading its bytes.
+    pub(crate) async fn read_vec(
+        &mut self,
+        position: u64,
+        length: usize,
+        end: u64,
+    ) -> Result<Vec<u8>, Error> {
+        if add(position, length as u64)? > end {
+            return Err(invalid(position, "record extends beyond its container"));
+        }
+
+        let mut bytes = vec![0; length];
+        self.read_at(position, &mut bytes, end).await?;
+        Ok(bytes)
+    }
+
     // Every read, including read-ahead, is bounded by its containing record span.
     pub(crate) async fn read_at(
         &mut self,
@@ -227,8 +243,28 @@ impl Common {
 
 #[cfg(test)]
 mod tests {
-    use super::{Common, array_at, bytes_at};
+    use std::io::Cursor;
+
+    use super::{Common, RecordReader, array_at, bytes_at};
     use crate::{CompressionMethod, Error};
+
+    #[tokio::test]
+    async fn bounds_owned_reads_before_allocation() -> Result<(), Error> {
+        let mut source = Cursor::new([1, 2, 3, 4]);
+        let mut reader = RecordReader::new(&mut source, 4);
+
+        // An allocation of this size would fail before any I/O could occur.
+        assert!(matches!(
+            reader.read_vec(0, usize::MAX, 4).await,
+            Err(Error::Invalid {
+                position: 0,
+                reason: "record extends beyond its container",
+            })
+        ));
+        assert_eq!(reader.read_vec(1, 2, 4).await?, [2, 3]);
+
+        Ok(())
+    }
 
     #[test]
     fn parses_common_header_fields() -> Result<(), Error> {

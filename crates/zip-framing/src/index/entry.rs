@@ -245,8 +245,13 @@ impl DirectoryEntry {
         let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
-        let mut variable = vec![0; name_length + extra_length + comment_length];
-        reader.read_at(position + 46, &mut variable, end).await?;
+        let variable = reader
+            .read_vec(
+                position + 46,
+                name_length + extra_length + comment_length,
+                end,
+            )
+            .await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
@@ -259,7 +264,6 @@ impl DirectoryEntry {
         let path = extras.name(&variable[..name_length], common.flags, position)?;
         extras.comment(&variable[name_length + extra_length..], position)?;
 
-        budget.output(sizes.uncompressed)?;
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
             return Err(invalid(position, "stored member sizes differ"));
         }
@@ -268,6 +272,7 @@ impl DirectoryEntry {
             return Err(invalid(position, "empty member has nonzero CRC"));
         }
 
+        budget.output(sizes.uncompressed)?;
         let entry = Self {
             metadata: Metadata {
                 path: path.to_owned(),
@@ -305,9 +310,8 @@ impl IndexedEntry {
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         budget.metadata(30 + (name_length + extra_length) as u64)?;
 
-        let mut variable = vec![0; name_length + extra_length];
-        reader
-            .read_at(position + 30, &mut variable, boundary)
+        let variable = reader
+            .read_vec(position + 30, name_length + extra_length, boundary)
             .await?;
 
         let extras = Extras::parse(&variable[name_length..], position)?;

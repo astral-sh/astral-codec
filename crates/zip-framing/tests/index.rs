@@ -254,32 +254,93 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
 #[tokio::test]
 async fn enforces_resource_budgets_before_exposing_members() {
     let bytes = Fixture::default().build().bytes;
-    for limits in [
-        Limits {
-            archive_size: 1,
-            ..Limits::default()
-        },
-        Limits {
-            entries: 0,
-            ..Limits::default()
-        },
-        Limits {
-            metadata_size: 1,
-            ..Limits::default()
-        },
-        Limits {
-            member_size: 6,
-            ..Limits::default()
-        },
-        Limits {
-            total_size: 6,
-            ..Limits::default()
-        },
+    for (limits, expected_resource, expected_limit) in [
+        (
+            Limits {
+                archive_size: 1,
+                ..Limits::default()
+            },
+            "archive bytes",
+            1,
+        ),
+        (
+            Limits {
+                entries: 0,
+                ..Limits::default()
+            },
+            "entry count",
+            0,
+        ),
+        (
+            Limits {
+                metadata_size: 1,
+                ..Limits::default()
+            },
+            "metadata bytes",
+            1,
+        ),
+        (
+            Limits {
+                member_size: 6,
+                ..Limits::default()
+            },
+            "decoded member bytes",
+            6,
+        ),
+        (
+            Limits {
+                total_size: 6,
+                ..Limits::default()
+            },
+            "total decoded bytes",
+            6,
+        ),
     ] {
         assert!(matches!(
             read_validated(&mut Cursor::new(&bytes), limits).await,
-            Err(FrameError::Limit { .. })
+            Err(FrameError::Limit { resource, limit })
+                if resource == expected_resource && limit == expected_limit
         ));
+    }
+}
+
+#[tokio::test]
+async fn rejects_directory_limits_before_reading_entries() {
+    for zip64 in [false, true] {
+        let archive = Fixture {
+            zip64,
+            archive_comment: vec![b'a'; usize::from(u16::MAX)],
+            ..Fixture::default()
+        }
+        .build();
+        let directory_size = (archive.end - archive.central - if zip64 { 76 } else { 0 }) as u64;
+
+        for (limits, expected_resource) in [
+            (
+                Limits {
+                    entries: 0,
+                    ..Limits::default()
+                },
+                "entry count",
+            ),
+            (
+                Limits {
+                    metadata_size: directory_size - 1,
+                    ..Limits::default()
+                },
+                "metadata bytes",
+            ),
+        ] {
+            let mut source = Observed::new(archive.bytes.clone());
+            // Keep the end-record scan separate from the directory body, and
+            // fail if parsing reaches that body before enforcing the limits.
+            source.fail_at = Some(archive.central as u64);
+            assert!(matches!(
+                Index::read(&mut source, limits).await,
+                Err(FrameError::Limit { resource, .. }) if resource == expected_resource
+            ));
+            assert_eq!(source.fail_at, Some(archive.central as u64));
+        }
     }
 }
 
@@ -699,6 +760,56 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 
         assert_eq!(result.is_ok(), valid);
     }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn checks_zip64_end_size_without_charging_metadata() -> TestResult {
+    let mut archive = Fixture {
+        zip64: true,
+        archive_comment: vec![b'a'; usize::from(u16::MAX)],
+        ..Fixture::default()
+    }
+    .build();
+    let extension = [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000);
+    let end_size = 44 + extension.len() as u64;
+    let end_offset = archive.end - 76;
+    archive.bytes[end_offset + 4..end_offset + 12].copy_from_slice(&end_size.to_le_bytes());
+    archive
+        .bytes
+        .splice(archive.end - 20..archive.end - 20, extension);
+
+    // The end record fills its independent limit. Directory and local metadata
+    // must still fit their cumulative budget without being charged for it.
+    read_validated(
+        &mut Cursor::new(&archive.bytes),
+        Limits {
+            metadata_size: end_size,
+            ..Limits::default()
+        },
+    )
+    .await?;
+
+    let mut source = Observed::new(archive.bytes);
+    // The extension exceeds the read-ahead window and requires its own read.
+    // Its size limit must be checked before that read is attempted.
+    source.fail_at = Some(end_offset as u64 + 56);
+    assert!(matches!(
+        read_validated(
+            &mut source,
+            Limits {
+                metadata_size: end_size - 1,
+                ..Limits::default()
+            },
+        )
+        .await,
+        Err(FrameError::Limit {
+            resource: "ZIP64 end bytes",
+            limit,
+        }) if limit == end_size - 1
+    ));
+    assert_eq!(source.fail_at, Some(end_offset as u64 + 56));
 
     Ok(())
 }

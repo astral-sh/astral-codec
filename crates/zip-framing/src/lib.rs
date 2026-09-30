@@ -124,11 +124,3 @@ pub(crate) fn add(left: u64, right: u64) -> Result<u64, Error> {
     left.checked_add(right)
         .ok_or_else(|| invalid(left, "offset or size overflow"))
 }
-
-pub(crate) fn check_limit(value: u64, limit: u64, resource: &'static str) -> Result<(), Error> {
-    if value > limit {
-        return Err(Error::Limit { resource, limit });
-    }
-
-    Ok(())
-}

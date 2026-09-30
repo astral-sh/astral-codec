@@ -3,7 +3,7 @@ use std::str;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Error, Limits, add, check_limit,
+    Error, Limits, add,
     extra::Extras,
     invalid,
     record::{ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, array_at},
@@ -43,23 +43,10 @@ impl Index {
         reader: &mut R,
         limits: Limits,
     ) -> Result<Self, Error> {
+        let mut budget = Budget::new(limits);
         let mut buffered = RecordReader::new(reader, 64 * 1024);
-        let end = CentralDirectory::read(&mut buffered, limits).await?;
-        check_limit(end.count, limits.entries as u64, "entry count")?;
-        check_limit(end.size, limits.metadata_size, "metadata bytes")?;
-        if end.count > end.size / 46 {
-            return Err(invalid(
-                end.offset,
-                "entry count exceeds directory capacity",
-            ));
-        }
-
-        let mut budget = Budget {
-            metadata: end.size,
-            output: 0,
-            limits,
-        };
-        let entries = read_central(&mut buffered, &end, &mut budget).await?;
+        let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
+        let entries = end.read_entries(&mut buffered, &mut budget).await?;
 
         // Preserve directory order while assigning boundaries in physical order.
         // Only local reads can establish exact coverage inside these spans.
@@ -143,18 +130,83 @@ struct Budget {
 }
 
 impl Budget {
+    fn new(limits: Limits) -> Self {
+        Self {
+            metadata: 0,
+            output: 0,
+            limits,
+        }
+    }
+
+    /// Check the archive's size against its limit.
+    fn check_archive_size(&self, size: u64) -> Result<(), Error> {
+        if size > self.limits.archive_size {
+            return Err(Error::Limit {
+                resource: "archive bytes",
+                limit: self.limits.archive_size,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check the central directory's entry count against its limit.
+    fn check_entry_count(&self, count: u64) -> Result<(), Error> {
+        if count > self.limits.entries as u64 {
+            return Err(Error::Limit {
+                resource: "entry count",
+                limit: self.limits.entries as u64,
+            });
+        }
+
+        Ok(())
+    }
+
+    /// Check the ZIP64 end record's declared size without debiting metadata.
+    fn check_zip64_end_size(&self, size: u64) -> Result<(), Error> {
+        if size > self.limits.metadata_size {
+            return Err(Error::Limit {
+                resource: "ZIP64 end bytes",
+                limit: self.limits.metadata_size,
+            });
+        }
+
+        Ok(())
+    }
+
     /// Debit from the metadata budget.
     fn metadata(&mut self, length: u64) -> Result<(), Error> {
-        self.metadata = add(self.metadata, length)?;
-        check_limit(self.metadata, self.limits.metadata_size, "metadata bytes")
+        let metadata = add(self.metadata, length)?;
+        if metadata > self.limits.metadata_size {
+            return Err(Error::Limit {
+                resource: "metadata bytes",
+                limit: self.limits.metadata_size,
+            });
+        }
+
+        self.metadata = metadata;
+        Ok(())
     }
 
     /// Debit from the output size budgets.
     fn output(&mut self, size: u64) -> Result<(), Error> {
-        check_limit(size, self.limits.member_size, "decoded member bytes")?;
+        if size > self.limits.member_size {
+            return Err(Error::Limit {
+                resource: "decoded member bytes",
+                limit: self.limits.member_size,
+            });
+        }
 
-        self.output = add(self.output, size)?;
-        check_limit(self.output, self.limits.total_size, "total decoded bytes")
+        let output = add(self.output, size)?;
+        if output > self.limits.total_size {
+            return Err(Error::Limit {
+                resource: "total decoded bytes",
+                limit: self.limits.total_size,
+            });
+        }
+
+        self.output = output;
+        Ok(())
     }
 }
 
@@ -174,12 +226,15 @@ struct CentralDirectory {
 
 impl CentralDirectory {
     /// Reads the central directory's location and extent from the end records.
+    ///
+    /// Validates its bounds and entry count, and charges its metadata size
+    /// before returning. Failed or cancelled reads leave the budget unchanged.
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
-        limits: Limits,
+        budget: &mut Budget,
     ) -> Result<Self, Error> {
         let length = reader.length().await?;
-        check_limit(length, limits.archive_size, "archive bytes")?;
+        budget.check_archive_size(length)?;
         if length < 22 {
             return Err(invalid(0, "missing end of central directory"));
         }
@@ -187,8 +242,7 @@ impl CentralDirectory {
         // EOCD has a 16-bit comment length. Never scan the payload for signatures.
         let tail_size = length.min(22 + u64::from(u16::MAX)) as usize;
         let tail_start = length - tail_size as u64;
-        let mut tail = vec![0; tail_size];
-        reader.read_at(tail_start, &mut tail, length).await?;
+        let tail = reader.read_vec(tail_start, tail_size, length).await?;
 
         let mut candidate = None;
         for (offset, header) in tail.windows(22).enumerate() {
@@ -208,11 +262,9 @@ impl CentralDirectory {
         str::from_utf8(&tail[offset + 22..])
             .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
 
-        let mut directory = Self {
-            offset: u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
-            size: u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
-            count: u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
-        };
+        let mut offset = u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end)));
+        let mut size = u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end)));
+        let mut count = u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end)));
 
         let mut boundary = position;
         let mut locator = [0; 20];
@@ -242,11 +294,10 @@ impl CentralDirectory {
                 return Err(invalid(boundary, "invalid ZIP64 end signature"));
             }
 
-            let size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
-            if size < 44 || add(boundary, add(12, size)?)? != position - 20 {
+            let end_size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
+            if end_size < 44 || add(boundary, add(12, end_size)?)? != position - 20 {
                 return Err(invalid(boundary, "invalid ZIP64 end length"));
             }
-            check_limit(size, limits.metadata_size, "ZIP64 end bytes")?;
 
             if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= 62 {
                 return Err(Error::Unsupported {
@@ -273,11 +324,9 @@ impl CentralDirectory {
                 return Err(invalid(boundary, "ZIP64 entry counts disagree"));
             }
 
-            directory = Self {
-                offset: u64::from_le_bytes(array_at::<48, 8, _>(&zip64)),
-                size: u64::from_le_bytes(array_at::<40, 8, _>(&zip64)),
-                count: u64::from_le_bytes(array_at::<32, 8, _>(&zip64)),
-            };
+            offset = u64::from_le_bytes(array_at::<48, 8, _>(&zip64));
+            size = u64::from_le_bytes(array_at::<40, 8, _>(&zip64));
+            count = u64::from_le_bytes(array_at::<32, 8, _>(&zip64));
             for (small, large, sentinel) in [
                 (
                     u64::from(u16::from_le_bytes(array_at::<4, 2, _>(end))),
@@ -291,22 +340,22 @@ impl CentralDirectory {
                 ),
                 (
                     u64::from(u16::from_le_bytes(array_at::<8, 2, _>(end))),
-                    directory.count,
+                    count,
                     u64::from(u16::MAX),
                 ),
                 (
                     u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
-                    directory.count,
+                    count,
                     u64::from(u16::MAX),
                 ),
                 (
                     u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
-                    directory.size,
+                    size,
                     u64::from(u32::MAX),
                 ),
                 (
                     u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
-                    directory.offset,
+                    offset,
                     u64::from(u32::MAX),
                 ),
             ] {
@@ -315,7 +364,7 @@ impl CentralDirectory {
                 }
             }
 
-            read_extensible_sector(reader, boundary + 56, position - 20).await?;
+            read_extensible_sector(reader, boundary + 56, position - 20, budget).await?;
         } else {
             if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
                 || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
@@ -332,22 +381,31 @@ impl CentralDirectory {
                 return Err(invalid(position, "entry counts disagree"));
             }
 
-            if directory.count == u64::from(u16::MAX)
-                || directory.size == u64::from(u32::MAX)
-                || directory.offset == u64::from(u32::MAX)
+            if count == u64::from(u16::MAX)
+                || size == u64::from(u32::MAX)
+                || offset == u64::from(u32::MAX)
             {
                 return Err(invalid(position, "ZIP64 sentinel without locator"));
             }
         }
 
-        if add(directory.offset, directory.size)? != boundary {
-            return Err(invalid(
-                directory.offset,
-                "central directory boundary mismatch",
-            ));
+        if add(offset, size)? != boundary {
+            return Err(invalid(offset, "central directory boundary mismatch"));
         }
 
-        Ok(directory)
+        let mut pending_budget = *budget;
+        pending_budget.check_entry_count(count)?;
+        pending_budget.metadata(size)?;
+        if count > size / 46 {
+            return Err(invalid(offset, "entry count exceeds directory capacity"));
+        }
+
+        *budget = pending_budget;
+        Ok(Self {
+            offset,
+            size,
+            count,
+        })
     }
 }
 
@@ -355,13 +413,18 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut RecordReader<'_, R>,
     mut position: u64,
     end: u64,
+    budget: &Budget,
 ) -> Result<(), Error> {
-    // The enclosing end record has already passed the metadata budget. Buffer
-    // its extensions once so tiny fields cannot force millions of seeks.
-    let length = usize::try_from(end - position)
+    let length = end
+        .checked_sub(position)
+        .ok_or_else(|| invalid(position, "invalid ZIP64 extension bounds"))?;
+    // The declared ZIP64 end size includes 44 fixed bytes before the extensions.
+    // This is an independent cap, not a charge to cumulative metadata usage.
+    budget.check_zip64_end_size(add(44, length)?)?;
+    let length = usize::try_from(length)
         .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
-    let mut buffer = vec![0; length];
-    reader.read_at(position, &mut buffer, end).await?;
+    // Buffer extensions once so tiny fields cannot force millions of seeks.
+    let buffer = reader.read_vec(position, length, end).await?;
 
     let mut bytes = buffer.as_slice();
     let mut records = 0usize;
@@ -405,46 +468,53 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     Ok(())
 }
 
-async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut RecordReader<'_, R>,
-    directory: &CentralDirectory,
-    budget: &mut Budget,
-) -> Result<Vec<DirectoryEntry>, Error> {
-    let end = add(directory.offset, directory.size)?;
-    let mut position = directory.offset;
-    let mut entries = Vec::new();
+impl CentralDirectory {
+    /// Reads the entries from this checked directory and charges their output sizes.
+    ///
+    /// Failed or cancelled reads leave the budget unchanged.
+    async fn read_entries<R: AsyncRead + AsyncSeek + Unpin>(
+        &self,
+        reader: &mut RecordReader<'_, R>,
+        budget: &mut Budget,
+    ) -> Result<Vec<DirectoryEntry>, Error> {
+        let mut pending_budget = *budget;
+        let end = add(self.offset, self.size)?;
+        let mut position = self.offset;
+        let mut entries = Vec::new();
 
-    // The archive extra record is part of the directory's declared size.
-    if directory.size >= 8 {
-        let mut header = [0; 8];
-        reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == ARCHIVE_EXTRA {
-            let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
-            if add(position, 8 + length as u64)? > end {
-                return Err(invalid(position, "truncated archive extra record"));
+        // The archive extra record is part of the directory's declared size.
+        if self.size >= 8 {
+            let mut header = [0; 8];
+            reader.read_at(position, &mut header, end).await?;
+            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == ARCHIVE_EXTRA {
+                let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
+                if add(position, 8 + length as u64)? > end {
+                    return Err(invalid(position, "truncated archive extra record"));
+                }
+
+                let bytes = reader.read_vec(position + 8, length, end).await?;
+                Extras::parse(&bytes, position)?;
+                position += 8 + length as u64;
             }
-
-            let mut bytes = vec![0; length];
-            reader.read_at(position + 8, &mut bytes, end).await?;
-            Extras::parse(&bytes, position)?;
-            position += 8 + length as u64;
         }
+
+        for _ in 0..self.count {
+            let (entry, next) =
+                DirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
+            entries.push(entry);
+            position = next;
+
+            tokio::task::yield_now().await;
+        }
+
+        if position != end {
+            return Err(invalid(
+                position,
+                "unaccounted directory bytes or digital signature",
+            ));
+        }
+
+        *budget = pending_budget;
+        Ok(entries)
     }
-
-    for _ in 0..directory.count {
-        let (entry, next) = DirectoryEntry::read(reader, position, end, budget).await?;
-        entries.push(entry);
-        position = next;
-
-        tokio::task::yield_now().await;
-    }
-
-    if position != end {
-        return Err(invalid(
-            position,
-            "unaccounted directory bytes or digital signature",
-        ));
-    }
-
-    Ok(entries)
 }
