@@ -73,6 +73,14 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     }
 }
 
+/// Extracts a field from a fixed-size array, checking its bounds at compile time.
+pub(crate) fn array_at<const OFFSET: usize, const WIDTH: usize, const LEN: usize>(
+    bytes: &[u8; LEN],
+) -> [u8; WIDTH] {
+    const { assert!(OFFSET <= LEN && WIDTH <= LEN - OFFSET) };
+    std::array::from_fn(|index| bytes[OFFSET + index])
+}
+
 /// Extracts a fixed-size field after checking its offset and length.
 pub(crate) fn bytes_at<const N: usize>(
     bytes: &[u8],
@@ -144,35 +152,7 @@ pub(crate) struct Common {
 impl Common {
     /// Parse a local file or central directory [`Common`] from the given bytes.
     pub(crate) fn parse(bytes: &[u8; 22], position: u64) -> Result<Self, Error> {
-        // NOTE(ww): Rust doesn't allow us to nest slice patterns when destructuring (yet),
-        // so we need to splat out every single byte. This is still nicer than fallible
-        // indexing/splicing.
-        let [
-            version_low,
-            version_high,
-            flags_low,
-            flags_high,
-            method_low,
-            method_high,
-            time_low,
-            time_high,
-            date_low,
-            date_high,
-            crc_0,
-            crc_1,
-            crc_2,
-            crc_3,
-            compressed_0,
-            compressed_1,
-            compressed_2,
-            compressed_3,
-            uncompressed_0,
-            uncompressed_1,
-            uncompressed_2,
-            uncompressed_3,
-        ] = *bytes;
-
-        let flags = u16::from_le_bytes([flags_low, flags_high]);
+        let flags = u16::from_le_bytes(array_at::<2, 2, _>(bytes));
         if flags & 0x2041 != 0 {
             return Err(Error::Unsupported {
                 position,
@@ -188,7 +168,7 @@ impl Common {
         }
 
         let method =
-            CompressionMethod::parse(u16::from_le_bytes([method_low, method_high]), position)?;
+            CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
         let allowed = 0x0808
             | if method == CompressionMethod::Deflate {
                 6
@@ -202,7 +182,7 @@ impl Common {
             ));
         }
 
-        let version = u16::from_le_bytes([version_low, version_high]);
+        let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
         if version > 45 {
             return Err(Error::Unsupported {
                 position,
@@ -224,21 +204,11 @@ impl Common {
             version,
             flags,
             method,
-            time: u16::from_le_bytes([time_low, time_high]),
-            date: u16::from_le_bytes([date_low, date_high]),
-            crc: u32::from_le_bytes([crc_0, crc_1, crc_2, crc_3]),
-            compressed: u32::from_le_bytes([
-                compressed_0,
-                compressed_1,
-                compressed_2,
-                compressed_3,
-            ]),
-            uncompressed: u32::from_le_bytes([
-                uncompressed_0,
-                uncompressed_1,
-                uncompressed_2,
-                uncompressed_3,
-            ]),
+            time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
+            date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
+            crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
+            compressed: u32::from_le_bytes(array_at::<14, 4, _>(bytes)),
+            uncompressed: u32::from_le_bytes(array_at::<18, 4, _>(bytes)),
         })
     }
 
@@ -257,7 +227,7 @@ impl Common {
 
 #[cfg(test)]
 mod tests {
-    use super::{Common, bytes_at};
+    use super::{Common, array_at, bytes_at};
     use crate::{CompressionMethod, Error};
 
     #[test]
@@ -281,6 +251,16 @@ mod tests {
         );
 
         Ok(())
+    }
+
+    #[test]
+    fn extracts_fields_from_fixed_arrays() {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        assert_eq!(array_at::<0, 8, _>(&bytes), bytes);
+        assert_eq!(array_at::<1, 2, _>(&bytes), [2, 3]);
+        assert_eq!(array_at::<4, 4, _>(&bytes), [5, 6, 7, 8]);
+        assert_eq!(array_at::<8, 0, _>(&bytes), []);
     }
 
     #[test]

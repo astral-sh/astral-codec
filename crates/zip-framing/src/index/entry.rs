@@ -6,7 +6,7 @@ use crate::{
     CompressionMethod, Error, add,
     extra::{Extras, ResolvedExtras},
     invalid,
-    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, bytes_at},
+    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, array_at, bytes_at},
 };
 
 use super::Budget;
@@ -185,56 +185,22 @@ impl DirectoryEntry {
     ) -> Result<(Self, u64), Error> {
         let mut header = [0; 46];
         reader.read_at(position, &mut header, end).await?;
-        let [
-            signature_0,
-            signature_1,
-            signature_2,
-            signature_3,
-            made_by_low,
-            made_by_high,
-            rest @ ..,
-        ] = header;
-        let [
-            common @ ..,
-            name_length_low,
-            name_length_high,
-            extra_length_low,
-            extra_length_high,
-            comment_length_low,
-            comment_length_high,
-            disk_low,
-            disk_high,
-            // Internal file attributes are not used.
-            _,
-            _,
-            attributes_0,
-            attributes_1,
-            attributes_2,
-            attributes_3,
-            offset_0,
-            offset_1,
-            offset_2,
-            offset_3,
-        ] = rest;
-        if u32::from_le_bytes([signature_0, signature_1, signature_2, signature_3]) != CENTRAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(&common, position)?;
-        let name_length = usize::from(u16::from_le_bytes([name_length_low, name_length_high]));
-        let extra_length = usize::from(u16::from_le_bytes([extra_length_low, extra_length_high]));
-        let comment_length = usize::from(u16::from_le_bytes([
-            comment_length_low,
-            comment_length_high,
-        ]));
+        let common = Common::parse(&array_at::<6, 22, _>(&header), position)?;
+        let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
+        let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
+        let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
         let mut variable = vec![0; name_length + extra_length + comment_length];
         reader.read_at(position + 46, &mut variable, end).await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
             common,
-            Some(u32::from_le_bytes([offset_0, offset_1, offset_2, offset_3])),
-            Some(u16::from_le_bytes([disk_low, disk_high])),
+            Some(u32::from_le_bytes(array_at::<42, 4, _>(&header))),
+            Some(u16::from_le_bytes(array_at::<34, 2, _>(&header))),
             position,
         )?;
 
@@ -257,13 +223,8 @@ impl DirectoryEntry {
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
                 local_offset: sizes.offset,
-                made_by: u16::from_le_bytes([made_by_low, made_by_high]),
-                attributes: u32::from_le_bytes([
-                    attributes_0,
-                    attributes_1,
-                    attributes_2,
-                    attributes_3,
-                ]),
+                made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
+                attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
             extra: variable[name_length..name_length + extra_length].to_vec(),
             boundary: end,
@@ -283,24 +244,13 @@ impl DirectoryEntry {
         let position = metadata.local_offset;
         let mut header = [0; 30];
         reader.read_at(position, &mut header, boundary).await?;
-        let [
-            signature_0,
-            signature_1,
-            signature_2,
-            signature_3,
-            common @ ..,
-            name_length_low,
-            name_length_high,
-            extra_length_low,
-            extra_length_high,
-        ] = header;
-        if u32::from_le_bytes([signature_0, signature_1, signature_2, signature_3]) != LOCAL {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&common, position)?;
-        let name_length = usize::from(u16::from_le_bytes([name_length_low, name_length_high]));
-        let extra_length = usize::from(u16::from_le_bytes([extra_length_low, extra_length_high]));
+        let common = Common::parse(&array_at::<4, 22, _>(&header), position)?;
+        let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
+        let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         budget.metadata(30 + (name_length + extra_length) as u64)?;
 
         let mut variable = vec![0; name_length + extra_length];
@@ -383,7 +333,7 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
     let offset = if length == unsigned_length + 4 {
-        if u32::from_le_bytes(bytes_at(&bytes, 0, position)?) != DESCRIPTOR {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != DESCRIPTOR {
             return Err(invalid(position, "invalid data descriptor signature"));
         }
 

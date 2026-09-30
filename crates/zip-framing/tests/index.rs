@@ -79,6 +79,39 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
 }
 
 #[tokio::test]
+async fn reads_and_bounds_archive_extra_record() -> TestResult {
+    let mut archive = Fixture::default().build();
+    let extra = field(0xcafe, &[0x51; 257]);
+    let mut record = 0x0806_4b50u32.to_le_bytes().to_vec();
+    record.extend_from_slice(&(extra.len() as u32).to_le_bytes());
+    record.extend_from_slice(&extra);
+    let record_length = record.len();
+
+    archive
+        .bytes
+        .splice(archive.central..archive.central, record);
+    set32(
+        &mut archive.bytes,
+        archive.end + record_length + 12,
+        (archive.end - archive.central + record_length) as u32,
+    );
+
+    let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+    assert_eq!(index.entries()[0].path(), "file");
+
+    set32(&mut archive.bytes, archive.central + 4, u32::MAX);
+    assert!(matches!(
+        Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "truncated archive extra record"
+        }) if position == archive.central as u64
+    ));
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
     for (label, offset, value) in [
         ("version", 4, 10),

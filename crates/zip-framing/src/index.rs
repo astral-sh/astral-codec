@@ -6,7 +6,7 @@ use crate::{
     Error, Limits, add, check_limit,
     extra::Extras,
     invalid,
-    record::{ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, bytes_at},
+    record::{ARCHIVE_EXTRA, END, LOCATOR, RecordReader, ZIP64_END, array_at},
 };
 
 mod entry;
@@ -156,25 +156,25 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
     let mut candidate = None;
     for (offset, header) in tail.windows(22).enumerate() {
         if header.starts_with(&END.to_le_bytes())
-            && let Some(comment_length) = header.last_chunk::<2>()
-            && offset + 22 + usize::from(u16::from_le_bytes(*comment_length)) == tail.len()
-            && candidate.replace(offset).is_some()
+            && let Some(header) = header.first_chunk::<22>()
+            && offset + 22 + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+                == tail.len()
+            && candidate.replace((offset, header)).is_some()
         {
             return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
         }
     }
 
-    let offset =
+    let (offset, end) =
         candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
     let position = tail_start + offset as u64;
     str::from_utf8(&tail[offset + 22..])
         .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
 
-    let end = &tail[offset..offset + 22];
     let mut directory = Directory {
-        offset: u64::from(u32::from_le_bytes(bytes_at(end, 16, position)?)),
-        size: u64::from(u32::from_le_bytes(bytes_at(end, 12, position)?)),
-        count: u64::from(u16::from_le_bytes(bytes_at(end, 10, position)?)),
+        offset: u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
+        size: u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
+        count: u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
     };
 
     let mut boundary = position;
@@ -183,14 +183,14 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
         reader
             .read_at(position - 20, &mut locator, position)
             .await?;
-        u32::from_le_bytes(bytes_at(&locator, 0, position - 20)?) == LOCATOR
+        u32::from_le_bytes(array_at::<0, 4, _>(&locator)) == LOCATOR
     } else {
         false
     };
 
     if has_locator {
-        if u32::from_le_bytes(bytes_at(&locator, 4, position - 20)?) != 0
-            || u32::from_le_bytes(bytes_at(&locator, 16, position - 20)?) != 1
+        if u32::from_le_bytes(array_at::<4, 4, _>(&locator)) != 0
+            || u32::from_le_bytes(array_at::<16, 4, _>(&locator)) != 1
         {
             return Err(Error::Unsupported {
                 position: position - 20,
@@ -198,31 +198,31 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
             });
         }
 
-        boundary = u64::from_le_bytes(bytes_at(&locator, 8, position - 20)?);
+        boundary = u64::from_le_bytes(array_at::<8, 8, _>(&locator));
         let mut zip64 = [0; 56];
         reader.read_at(boundary, &mut zip64, position - 20).await?;
-        if u32::from_le_bytes(bytes_at(&zip64, 0, boundary)?) != ZIP64_END {
+        if u32::from_le_bytes(array_at::<0, 4, _>(&zip64)) != ZIP64_END {
             return Err(invalid(boundary, "invalid ZIP64 end signature"));
         }
 
-        let size = u64::from_le_bytes(bytes_at(&zip64, 4, boundary)?);
+        let size = u64::from_le_bytes(array_at::<4, 8, _>(&zip64));
         if size < 44 || add(boundary, add(12, size)?)? != position - 20 {
             return Err(invalid(boundary, "invalid ZIP64 end length"));
         }
         check_limit(size, limits.metadata_size, "ZIP64 end bytes")?;
 
-        if u16::from_le_bytes(bytes_at(&zip64, 14, boundary)?) >= 62 {
+        if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) >= 62 {
             return Err(Error::Unsupported {
                 position: boundary,
                 feature: "ZIP64 version-2 directory",
             });
         }
-        if u16::from_le_bytes(bytes_at(&zip64, 14, boundary)?) != 45 {
+        if u16::from_le_bytes(array_at::<14, 2, _>(&zip64)) != 45 {
             return Err(invalid(boundary, "invalid ZIP64 extraction version"));
         }
 
-        if u32::from_le_bytes(bytes_at(&zip64, 16, boundary)?) != 0
-            || u32::from_le_bytes(bytes_at(&zip64, 20, boundary)?) != 0
+        if u32::from_le_bytes(array_at::<16, 4, _>(&zip64)) != 0
+            || u32::from_le_bytes(array_at::<20, 4, _>(&zip64)) != 0
         {
             return Err(Error::Unsupported {
                 position: boundary,
@@ -230,45 +230,45 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
             });
         }
 
-        if u64::from_le_bytes(bytes_at(&zip64, 24, boundary)?)
-            != u64::from_le_bytes(bytes_at(&zip64, 32, boundary)?)
+        if u64::from_le_bytes(array_at::<24, 8, _>(&zip64))
+            != u64::from_le_bytes(array_at::<32, 8, _>(&zip64))
         {
             return Err(invalid(boundary, "ZIP64 entry counts disagree"));
         }
 
         directory = Directory {
-            offset: u64::from_le_bytes(bytes_at(&zip64, 48, boundary)?),
-            size: u64::from_le_bytes(bytes_at(&zip64, 40, boundary)?),
-            count: u64::from_le_bytes(bytes_at(&zip64, 32, boundary)?),
+            offset: u64::from_le_bytes(array_at::<48, 8, _>(&zip64)),
+            size: u64::from_le_bytes(array_at::<40, 8, _>(&zip64)),
+            count: u64::from_le_bytes(array_at::<32, 8, _>(&zip64)),
         };
         for (small, large, sentinel) in [
             (
-                u64::from(u16::from_le_bytes(bytes_at(end, 4, position)?)),
+                u64::from(u16::from_le_bytes(array_at::<4, 2, _>(end))),
                 0,
                 u64::from(u16::MAX),
             ),
             (
-                u64::from(u16::from_le_bytes(bytes_at(end, 6, position)?)),
+                u64::from(u16::from_le_bytes(array_at::<6, 2, _>(end))),
                 0,
                 u64::from(u16::MAX),
             ),
             (
-                u64::from(u16::from_le_bytes(bytes_at(end, 8, position)?)),
+                u64::from(u16::from_le_bytes(array_at::<8, 2, _>(end))),
                 directory.count,
                 u64::from(u16::MAX),
             ),
             (
-                u64::from(u16::from_le_bytes(bytes_at(end, 10, position)?)),
+                u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
                 directory.count,
                 u64::from(u16::MAX),
             ),
             (
-                u64::from(u32::from_le_bytes(bytes_at(end, 12, position)?)),
+                u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
                 directory.size,
                 u64::from(u32::MAX),
             ),
             (
-                u64::from(u32::from_le_bytes(bytes_at(end, 16, position)?)),
+                u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
                 directory.offset,
                 u64::from(u32::MAX),
             ),
@@ -280,8 +280,8 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
 
         read_extensible_sector(reader, boundary + 56, position - 20).await?;
     } else {
-        if u16::from_le_bytes(bytes_at(end, 4, position)?) != 0
-            || u16::from_le_bytes(bytes_at(end, 6, position)?) != 0
+        if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
+            || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
         {
             return Err(Error::Unsupported {
                 position,
@@ -289,8 +289,8 @@ async fn find_directory<R: AsyncRead + AsyncSeek + Unpin>(
             });
         }
 
-        if u16::from_le_bytes(bytes_at(end, 8, position)?)
-            != u16::from_le_bytes(bytes_at(end, 10, position)?)
+        if u16::from_le_bytes(array_at::<8, 2, _>(end))
+            != u16::from_le_bytes(array_at::<10, 2, _>(end))
         {
             return Err(invalid(position, "entry counts disagree"));
         }
@@ -380,8 +380,8 @@ async fn read_central<R: AsyncRead + AsyncSeek + Unpin>(
     if directory.size >= 8 {
         let mut header = [0; 8];
         reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(bytes_at(&header, 0, position)?) == ARCHIVE_EXTRA {
-            let length = u32::from_le_bytes(bytes_at(&header, 4, position)?) as usize;
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == ARCHIVE_EXTRA {
+            let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
             if add(position, 8 + length as u64)? > end {
                 return Err(invalid(position, "truncated archive extra record"));
             }
