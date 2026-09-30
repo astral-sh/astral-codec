@@ -185,27 +185,56 @@ impl DirectoryEntry {
     ) -> Result<(Self, u64), Error> {
         let mut header = [0; 46];
         reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(bytes_at(&header, 0, position)?) != CENTRAL {
+        let [
+            signature_0,
+            signature_1,
+            signature_2,
+            signature_3,
+            made_by_low,
+            made_by_high,
+            rest @ ..,
+        ] = header;
+        let [
+            common @ ..,
+            name_length_low,
+            name_length_high,
+            extra_length_low,
+            extra_length_high,
+            comment_length_low,
+            comment_length_high,
+            disk_low,
+            disk_high,
+            // Internal file attributes are not used.
+            _,
+            _,
+            attributes_0,
+            attributes_1,
+            attributes_2,
+            attributes_3,
+            offset_0,
+            offset_1,
+            offset_2,
+            offset_3,
+        ] = rest;
+        if u32::from_le_bytes([signature_0, signature_1, signature_2, signature_3]) != CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(
-            header[6..]
-                .first_chunk()
-                .ok_or_else(|| invalid(position, "truncated common header"))?,
-            position,
-        )?;
-        let name_length = usize::from(u16::from_le_bytes(bytes_at(&header, 28, position)?));
-        let extra_length = usize::from(u16::from_le_bytes(bytes_at(&header, 30, position)?));
-        let comment_length = usize::from(u16::from_le_bytes(bytes_at(&header, 32, position)?));
+        let common = Common::parse(&common, position)?;
+        let name_length = usize::from(u16::from_le_bytes([name_length_low, name_length_high]));
+        let extra_length = usize::from(u16::from_le_bytes([extra_length_low, extra_length_high]));
+        let comment_length = usize::from(u16::from_le_bytes([
+            comment_length_low,
+            comment_length_high,
+        ]));
         let mut variable = vec![0; name_length + extra_length + comment_length];
         reader.read_at(position + 46, &mut variable, end).await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
             common,
-            Some(u32::from_le_bytes(bytes_at(&header, 42, position)?)),
-            Some(u16::from_le_bytes(bytes_at(&header, 34, position)?)),
+            Some(u32::from_le_bytes([offset_0, offset_1, offset_2, offset_3])),
+            Some(u16::from_le_bytes([disk_low, disk_high])),
             position,
         )?;
 
@@ -228,8 +257,13 @@ impl DirectoryEntry {
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
                 local_offset: sizes.offset,
-                made_by: u16::from_le_bytes(bytes_at(&header, 4, position)?),
-                attributes: u32::from_le_bytes(bytes_at(&header, 38, position)?),
+                made_by: u16::from_le_bytes([made_by_low, made_by_high]),
+                attributes: u32::from_le_bytes([
+                    attributes_0,
+                    attributes_1,
+                    attributes_2,
+                    attributes_3,
+                ]),
             },
             extra: variable[name_length..name_length + extra_length].to_vec(),
             boundary: end,
@@ -249,18 +283,24 @@ impl DirectoryEntry {
         let position = metadata.local_offset;
         let mut header = [0; 30];
         reader.read_at(position, &mut header, boundary).await?;
-        if u32::from_le_bytes(bytes_at(&header, 0, position)?) != LOCAL {
+        let [
+            signature_0,
+            signature_1,
+            signature_2,
+            signature_3,
+            common @ ..,
+            name_length_low,
+            name_length_high,
+            extra_length_low,
+            extra_length_high,
+        ] = header;
+        if u32::from_le_bytes([signature_0, signature_1, signature_2, signature_3]) != LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(
-            header[4..]
-                .first_chunk()
-                .ok_or_else(|| invalid(position, "truncated common header"))?,
-            position,
-        )?;
-        let name_length = usize::from(u16::from_le_bytes(bytes_at(&header, 26, position)?));
-        let extra_length = usize::from(u16::from_le_bytes(bytes_at(&header, 28, position)?));
+        let common = Common::parse(&common, position)?;
+        let name_length = usize::from(u16::from_le_bytes([name_length_low, name_length_high]));
+        let extra_length = usize::from(u16::from_le_bytes([extra_length_low, extra_length_high]));
         budget.metadata(30 + (name_length + extra_length) as u64)?;
 
         let mut variable = vec![0; name_length + extra_length];

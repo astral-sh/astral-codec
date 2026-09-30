@@ -144,7 +144,35 @@ pub(crate) struct Common {
 impl Common {
     /// Parse a local file or central directory [`Common`] from the given bytes.
     pub(crate) fn parse(bytes: &[u8; 22], position: u64) -> Result<Self, Error> {
-        let flags = u16::from_le_bytes(bytes_at(bytes, 2, position)?);
+        // NOTE(ww): Rust doesn't allow us to nest slice patterns when destructuring (yet),
+        // so we need to splat out every single byte. This is still nicer than fallible
+        // indexing/splicing.
+        let [
+            version_low,
+            version_high,
+            flags_low,
+            flags_high,
+            method_low,
+            method_high,
+            time_low,
+            time_high,
+            date_low,
+            date_high,
+            crc_0,
+            crc_1,
+            crc_2,
+            crc_3,
+            compressed_0,
+            compressed_1,
+            compressed_2,
+            compressed_3,
+            uncompressed_0,
+            uncompressed_1,
+            uncompressed_2,
+            uncompressed_3,
+        ] = *bytes;
+
+        let flags = u16::from_le_bytes([flags_low, flags_high]);
         if flags & 0x2041 != 0 {
             return Err(Error::Unsupported {
                 position,
@@ -160,7 +188,7 @@ impl Common {
         }
 
         let method =
-            CompressionMethod::parse(u16::from_le_bytes(bytes_at(bytes, 4, position)?), position)?;
+            CompressionMethod::parse(u16::from_le_bytes([method_low, method_high]), position)?;
         let allowed = 0x0808
             | if method == CompressionMethod::Deflate {
                 6
@@ -174,7 +202,7 @@ impl Common {
             ));
         }
 
-        let version = u16::from_le_bytes(bytes_at(bytes, 0, position)?);
+        let version = u16::from_le_bytes([version_low, version_high]);
         if version > 45 {
             return Err(Error::Unsupported {
                 position,
@@ -196,11 +224,21 @@ impl Common {
             version,
             flags,
             method,
-            time: u16::from_le_bytes(bytes_at(bytes, 6, position)?),
-            date: u16::from_le_bytes(bytes_at(bytes, 8, position)?),
-            crc: u32::from_le_bytes(bytes_at(bytes, 10, position)?),
-            compressed: u32::from_le_bytes(bytes_at(bytes, 14, position)?),
-            uncompressed: u32::from_le_bytes(bytes_at(bytes, 18, position)?),
+            time: u16::from_le_bytes([time_low, time_high]),
+            date: u16::from_le_bytes([date_low, date_high]),
+            crc: u32::from_le_bytes([crc_0, crc_1, crc_2, crc_3]),
+            compressed: u32::from_le_bytes([
+                compressed_0,
+                compressed_1,
+                compressed_2,
+                compressed_3,
+            ]),
+            uncompressed: u32::from_le_bytes([
+                uncompressed_0,
+                uncompressed_1,
+                uncompressed_2,
+                uncompressed_3,
+            ]),
         })
     }
 
@@ -219,8 +257,31 @@ impl Common {
 
 #[cfg(test)]
 mod tests {
-    use super::bytes_at;
-    use crate::Error;
+    use super::{Common, bytes_at};
+    use crate::{CompressionMethod, Error};
+
+    #[test]
+    fn parses_common_header_fields() -> Result<(), Error> {
+        let bytes = [
+            20, 0, 0x0a, 0x08, 8, 0, 0x34, 0x12, 0x78, 0x56, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
+            0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
+        ];
+        assert_eq!(
+            Common::parse(&bytes, 42)?,
+            Common {
+                version: 20,
+                flags: 0x080a,
+                method: CompressionMethod::Deflate,
+                time: 0x1234,
+                date: 0x5678,
+                crc: 0x4433_2211,
+                compressed: 0x8877_6655,
+                uncompressed: 0xccbb_aa99,
+            }
+        );
+
+        Ok(())
+    }
 
     #[test]
     fn reads_fixed_width_fields_and_rejects_out_of_bounds_offsets() -> Result<(), Error> {

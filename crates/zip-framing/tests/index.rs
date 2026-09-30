@@ -53,6 +53,32 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 }
 
 #[tokio::test]
+async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
+    let extra = field(0xcafe, &[0x51; 257]);
+    let mut archive = Fixture {
+        name: vec![b'n'; 258],
+        local_extra: extra.clone(),
+        central_extra: extra,
+        member_comment: vec![b'c'; 259],
+        ..Fixture::default()
+    }
+    .build();
+    set16(&mut archive.bytes, archive.central + 4, 0x1234);
+    set32(&mut archive.bytes, archive.central + 38, 0x1234_5678);
+
+    let mut reader = Cursor::new(archive.bytes);
+    let index = read_validated(&mut reader, Limits::default()).await?;
+    let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+    assert_eq!(entry.path(), "n".repeat(258));
+    assert_eq!(entry.host_system(), 0x12);
+    assert_eq!(entry.external_attributes(), 0x1234_5678);
+    assert_eq!(entry.data_offset(), 30 + 258 + 261);
+    assert_eq!(entry.size(), 7);
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
     for (label, offset, value) in [
         ("version", 4, 10),
