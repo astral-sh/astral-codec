@@ -8,7 +8,7 @@ use std::{
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, Index, IndexedEntry, Limits};
+use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -140,7 +140,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             return Ok(None);
         };
 
-        let kind = kind(&entry)?;
+        let kind = Kind::try_from(&entry)?;
         let directory = entry.directory();
         let metadata = MemberMetadata {
             path: directory.path().to_owned(),
@@ -221,7 +221,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             .iter()
             .filter_map(IndexedEntry::resolved)
         {
-            kind(&entry)?;
+            Kind::try_from(&entry)?;
         }
 
         Ok(())
@@ -333,107 +333,61 @@ enum Kind {
     Special(SpecialKind),
 }
 
-fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
-    let directory = entry.directory();
-    let attributes = directory.external_attributes();
-    let unix = matches!(directory.host_system(), 3 | 19);
-    let mode = if unix { attributes >> 16 } else { 0 };
+impl TryFrom<&Entry<'_>> for Kind {
+    type Error = DecodeError;
 
-    let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
-    let link = if let Some(data) = extra
-        && matches!(mode & 0o170000, 0 | 0o100000 | 0o120000)
-    {
-        let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
-            position: directory.position(),
-            reason: "non-UTF-8 UNIX link target",
-        })?;
-        if target.contains('\0') {
-            return Err(DecodeError::Integrity {
+    fn try_from(entry: &Entry<'_>) -> Result<Self, Self::Error> {
+        let directory = entry.directory();
+        let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
+            && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
+        {
+            let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
                 position: directory.position(),
-                reason: "NUL in UNIX link target",
-            });
-        }
+                reason: "non-UTF-8 UNIX link target",
+            })?;
+            if target.contains('\0') {
+                return Err(DecodeError::Integrity {
+                    position: directory.position(),
+                    reason: "NUL in UNIX link target",
+                });
+            }
 
-        Some(target.to_owned())
-    } else {
-        None
-    };
+            Some(target.to_owned())
+        } else {
+            None
+        };
 
-    let dos = matches!(directory.host_system(), 0 | 3 | 6 | 10 | 14 | 19);
-    let is_directory = directory.path().ends_with('/') || (dos && attributes & 0x10 != 0);
-    if dos && attributes & 8 != 0 {
-        return Err(DecodeError::Unsupported {
-            position: directory.position(),
-            feature: "volume label",
-        });
-    }
-
-    let kind = match mode & 0o170000 {
-        0 if is_directory => Kind::Directory,
-        0 | 0o100000 if !is_directory => match link {
-            Some(target) => Kind::HardLink(target),
-            None => Kind::File(mode & 0o111 != 0),
-        },
-        0o040000 => Kind::Directory,
-        0o120000 if !is_directory => Kind::SymbolicLink(link),
-        0o020000 if !is_directory => Kind::Special(SpecialKind::CharacterDevice),
-        0o060000 if !is_directory => Kind::Special(SpecialKind::BlockDevice),
-        0o010000 if !is_directory => Kind::Special(SpecialKind::Fifo),
-        _ => {
-            return Err(DecodeError::Unsupported {
+        match entry.kind() {
+            EntryKind::File => Ok(Self::File(
+                entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
+            )),
+            EntryKind::Directory => Ok(Self::Directory),
+            EntryKind::HardLink => Ok(Self::HardLink(link.ok_or(DecodeError::Integrity {
                 position: directory.position(),
-                feature: "inconsistent or unsupported file attributes",
-            });
+                reason: "missing UNIX hard-link target",
+            })?)),
+            EntryKind::SymbolicLink => {
+                if directory.size() > u64::from(u16::MAX) {
+                    return Err(DecodeError::Integrity {
+                        position: directory.position(),
+                        reason: "oversized symbolic-link target",
+                    });
+                }
+                Ok(Self::SymbolicLink(link))
+            }
+            EntryKind::CharacterDevice => Ok(Self::Special(SpecialKind::CharacterDevice)),
+            EntryKind::BlockDevice => Ok(Self::Special(SpecialKind::BlockDevice)),
+            EntryKind::Fifo => Ok(Self::Special(SpecialKind::Fifo)),
+            EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "volume label",
+            }),
+            _ => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "unsupported file attributes",
+            }),
         }
-    };
-
-    if matches!(kind, Kind::Directory | Kind::Special(_))
-        && (directory.size() != 0 || directory.crc32() != 0)
-    {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "non-file member has payload data",
-        });
     }
-
-    if matches!(kind, Kind::Directory) && directory.version_needed() < 20 {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "directory requires extraction version 2.0",
-        });
-    }
-
-    if matches!(kind, Kind::SymbolicLink(_))
-        && ((directory.size() == 0 && matches!(kind, Kind::SymbolicLink(None)))
-            || directory.size() > u64::from(u16::MAX))
-    {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "empty or oversized symbolic-link target",
-        });
-    }
-
-    if extra.is_some() && matches!(kind, Kind::Directory | Kind::Special(SpecialKind::Fifo)) {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "unexpected UNIX file-type data",
-        });
-    }
-
-    if let Some(data) = extra
-        && matches!(
-            kind,
-            Kind::Special(SpecialKind::CharacterDevice | SpecialKind::BlockDevice)
-        )
-        && data.len() != 8
-    {
-        return Err(DecodeError::Integrity {
-            position: directory.position(),
-            reason: "invalid UNIX device numbers",
-        });
-    }
-
-    Ok(kind)
 }
 
 /// A ZIP framing, payload, or member-projection failure.

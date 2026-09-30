@@ -2,15 +2,11 @@ use std::{io::SeekFrom, str};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
-use crate::{CompressionMethod, Error, add, invalid};
-
-pub(crate) const LOCAL: u32 = 0x0403_4b50;
-pub(crate) const CENTRAL: u32 = 0x0201_4b50;
-pub(crate) const DESCRIPTOR: u32 = 0x0807_4b50;
-pub(crate) const END: u32 = 0x0605_4b50;
-pub(crate) const ZIP64_END: u32 = 0x0606_4b50;
-pub(crate) const LOCATOR: u32 = 0x0706_4b50;
-pub(crate) const ARCHIVE_EXTRA: u32 = 0x0806_4b50;
+use crate::{
+    CompressionMethod, Error, add,
+    constants::{flags, size, version},
+    invalid,
+};
 
 /// A bounded read-ahead window that survives absolute seeks within the window.
 /// Ordinary buffered readers discard their buffer on those seeks.
@@ -112,7 +108,7 @@ pub(crate) fn bytes_at<const N: usize>(
 
 pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str, Error> {
     let name = str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 filename"))?;
-    if flags & 0x0800 == 0 && !name.is_ascii() {
+    if flags & flags::UTF8 == 0 && !name.is_ascii() {
         return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
     }
 
@@ -167,16 +163,16 @@ pub(crate) struct Common {
 
 impl Common {
     /// Parse a local file or central directory [`Common`] from the given bytes.
-    pub(crate) fn parse(bytes: &[u8; 22], position: u64) -> Result<Self, Error> {
+    pub(crate) fn parse(bytes: &[u8; size::COMMON], position: u64) -> Result<Self, Error> {
         let flags = u16::from_le_bytes(array_at::<2, 2, _>(bytes));
-        if flags & 0x2041 != 0 {
+        if flags & (flags::ENCRYPTED | flags::STRONG_ENCRYPTION | flags::MASKED_HEADER) != 0 {
             return Err(Error::Unsupported {
                 position,
                 feature: "encryption",
             });
         }
 
-        if flags & 0x20 != 0 {
+        if flags & flags::PATCHED_DATA != 0 {
             return Err(Error::Unsupported {
                 position,
                 feature: "patched data",
@@ -185,9 +181,10 @@ impl Common {
 
         let method =
             CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
-        let allowed = 0x0808
+        let allowed = flags::UTF8
+            | flags::DATA_DESCRIPTOR
             | if method == CompressionMethod::Deflate {
-                6
+                flags::DEFLATE_OPTIONS
             } else {
                 0
             };
@@ -199,7 +196,7 @@ impl Common {
         }
 
         let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
-        if version > 45 {
+        if version > version::ZIP64 {
             return Err(Error::Unsupported {
                 position,
                 feature: "extraction version",
@@ -208,9 +205,9 @@ impl Common {
 
         if version
             < if method == CompressionMethod::Deflate {
-                20
+                version::V2_0
             } else {
-                10
+                version::BASE
             }
         {
             return Err(invalid(position, "extraction version is too low"));
@@ -229,11 +226,11 @@ impl Common {
     }
 
     pub(crate) fn descriptor(self) -> bool {
-        self.flags & 8 != 0
+        self.flags & flags::DATA_DESCRIPTOR != 0
     }
 
     pub(crate) fn check_zip64(self, zip64: bool, position: u64) -> Result<(), Error> {
-        if zip64 && self.version < 45 {
+        if zip64 && self.version < version::ZIP64 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
 

@@ -2,14 +2,22 @@ use std::{
     cell::Cell,
     error::Error,
     future::{Future, poll_fn},
-    io::{self, Cursor, SeekFrom},
+    io::{self, Cursor, SeekFrom, Write},
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
 };
 
+use flate2::{Compression, Crc, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
-use zip_codec::{Archive, DecodeError, Member, MemberPayload, ZipArchive, extract::ExtractPolicy};
+use zip_codec::{
+    Archive, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, Member, MemberPayload,
+    ZipArchive, extract::ExtractPolicy,
+};
+use zip_framing::{
+    Error as FrameError,
+    write::{EntryKind, MemberHeader, end_records},
+};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -46,6 +54,124 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
     }
 
     Ok(output)
+}
+
+fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Box<dyn Error>> {
+    let mut crc = Crc::new();
+    crc.update(payload);
+    let member = MemberHeader::new(
+        "member",
+        CompressionMethod::Stored,
+        EntryKind::File { executable: false },
+    )?
+    .finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
+    let mut bytes = member.local_header();
+    bytes.extend_from_slice(payload);
+    let offset = bytes.len() as u64;
+    let mut central = member.central_header();
+    central[38..42].copy_from_slice(&attributes.to_le_bytes());
+    let size = central.len() as u64;
+    bytes.extend(central);
+    bytes.extend(end_records(1, offset, size)?);
+
+    Ok(bytes)
+}
+
+#[tokio::test]
+async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
+    for (attributes, expected_kind, expected_error) in [
+        (0x08, Some(DecodedEntryKind::VolumeLabel), "volume label"),
+        (
+            0o140600 << 16,
+            Some(DecodedEntryKind::Socket),
+            "unsupported file attributes",
+        ),
+        (
+            0o030600 << 16,
+            Some(DecodedEntryKind::Unknown(0o030000)),
+            "unsupported file attributes",
+        ),
+        (
+            (0o100644 << 16) | 0x10,
+            None,
+            "inconsistent file attributes",
+        ),
+    ] {
+        let bytes = member_with_attributes(&[], attributes)?;
+        for full_validation in [false, true] {
+            let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+            let result = if full_validation {
+                archive.validate_all().await
+            } else {
+                archive.member(0).await.map(|_| ())
+            };
+
+            if let Some(expected_kind) = expected_kind {
+                assert!(
+                    matches!(result, Err(DecodeError::Unsupported { position: 0, feature }) if feature == expected_error)
+                );
+                assert_eq!(
+                    archive.entries()[0]
+                        .resolved()
+                        .ok_or("unresolved entry")?
+                        .kind(),
+                    expected_kind
+                );
+            } else {
+                assert!(
+                    matches!(result, Err(DecodeError::Framing(FrameError::Invalid { position: 0, reason })) if reason == expected_error)
+                );
+                assert!(archive.entries()[0].resolved().is_none());
+            }
+
+            assert!(matches!(
+                archive.member(0).await,
+                Err(DecodeError::Poisoned)
+            ));
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
+    for length in [usize::from(u16::MAX), usize::from(u16::MAX) + 1] {
+        let bytes = member_with_attributes(&vec![b'x'; length], 0o120777 << 16)?;
+        for full_validation in [false, true] {
+            let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+            let result = if full_validation {
+                archive.validate_all().await
+            } else {
+                archive.member(0).await.map(|_| ())
+            };
+            assert_eq!(
+                archive.entries()[0]
+                    .resolved()
+                    .ok_or("unresolved entry")?
+                    .kind(),
+                DecodedEntryKind::SymbolicLink
+            );
+
+            if length == usize::from(u16::MAX) {
+                result?;
+            } else {
+                assert!(matches!(
+                    result,
+                    Err(DecodeError::Integrity {
+                        position: 0,
+                        reason: "oversized symbolic-link target",
+                    })
+                ));
+                assert!(matches!(
+                    archive.member(0).await,
+                    Err(DecodeError::Poisoned)
+                ));
+            }
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -243,57 +369,35 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
     Ok(())
 }
 
-fn replace_payload(original: &[u8], start: usize, payload: &[u8], size: u32) -> Vec<u8> {
-    // Keep a single entry and regenerate its directory/end offsets, so each
-    // fixture reaches payload validation with mutually consistent headers.
-    let central = original
-        .windows(4)
-        .rposition(|bytes| bytes == b"PK\x01\x02")
-        .expect("central header");
-    let end = original.len() - 22;
-
-    let mut bytes = original[..start].to_vec();
-    bytes.extend_from_slice(payload);
-
-    let new_central = bytes.len();
-    bytes.extend_from_slice(&original[central..end]);
-
-    let central_size = bytes.len() - new_central;
-    bytes.extend_from_slice(&original[end..]);
-
-    for offset in [18, new_central + 20] {
-        bytes[offset..offset + 4].copy_from_slice(&(payload.len() as u32).to_le_bytes());
-    }
-    for offset in [22, new_central + 24] {
-        bytes[offset..offset + 4].copy_from_slice(&size.to_le_bytes());
-    }
-
-    let end = bytes.len() - 22;
-    bytes[end + 12..end + 16].copy_from_slice(&(central_size as u32).to_le_bytes());
-    bytes[end + 16..end + 20].copy_from_slice(&(new_central as u32).to_le_bytes());
-
-    bytes
-}
-
 #[tokio::test]
 async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResult {
-    let bytes = include_bytes!("fixtures/single-deflate.zip");
-    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-    archive.validate_all().await?;
-    let entry = archive.entries()[0].resolved().ok_or("unresolved entry")?;
-    let start = entry.data_offset() as usize;
-    let length = entry.directory().compressed_size() as usize;
-    let encoded = &bytes[start..start + length];
+    let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
+    encoder.write_all(b"payload")?;
+    let encoded = encoder.finish()?;
+    let mut crc = Crc::new();
+    crc.update(b"payload");
 
     for (label, payload, size) in [
-        ("short size", encoded.to_vec(), 1),
-        ("long size", encoded.to_vec(), 1000),
+        ("short size", encoded.clone(), 1),
+        ("long size", encoded.clone(), 1000),
         ("truncated", encoded[..encoded.len() - 1].to_vec(), 7),
-        ("trailing byte", [encoded, &[0]].concat(), 7),
+        ("trailing byte", [encoded.as_slice(), &[0]].concat(), 7),
         ("concatenated stream", encoded.repeat(2), 7),
         ("invalid stream", vec![0xff; 5], 7),
     ] {
-        let bytes = replace_payload(bytes, start, &payload, size);
+        let member = MemberHeader::new(
+            "file",
+            CompressionMethod::Deflate,
+            EntryKind::File { executable: false },
+        )?
+        .finish(crc.sum(), payload.len() as u64, size, 0)?;
+        let mut bytes = member.local_header();
+        bytes.extend(payload);
+        let central_offset = bytes.len() as u64;
+        let central = member.central_header();
+        let central_size = central.len() as u64;
+        bytes.extend(central);
+        bytes.extend(end_records(1, central_offset, central_size)?);
         let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
         let Some(Member::File { payload, .. }) = archive.member(0).await? else {
             return Err(io::Error::other("expected file").into());

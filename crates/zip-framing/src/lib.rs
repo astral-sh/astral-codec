@@ -1,15 +1,19 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
 //! [`Index::read`] indexes the directory; [`Index::entry`] checks local records
-//! on access. [`Index::validate_all`] checks all members without decoding payloads.
+//! and kind-specific metadata on access. [`Entry::kind`] returns the cached
+//! classification. [`Index::validate_all`] checks all members without decoding payloads.
 //! Filenames and archive/member comments must be UTF-8.
 //! It does not read file contents: consumers must verify decoded sizes and CRCs.
 //! The source must remain unchanged while the index and its payloads are used.
 
 #![forbid(unsafe_code)]
 
+pub mod constants;
 mod extra;
+mod host;
 mod index;
+mod kind;
 mod record;
 pub mod write;
 
@@ -17,34 +21,31 @@ use std::io;
 
 use thiserror::Error;
 
+pub use extra::ExtraHeaderId;
+pub use host::HostSystem;
 pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
+pub use kind::EntryKind;
 
 /// A supported ZIP compression method.
 ///
+/// Cast to [`u16`] to obtain the APPNOTE method number.
 /// New methods can be added without changing the record or archive APIs.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
+#[repr(u16)]
 pub enum CompressionMethod {
     /// Uncompressed bytes (method 0).
     #[default]
-    Stored,
+    Stored = 0,
     /// Raw DEFLATE (method 8).
-    Deflate,
+    Deflate = 8,
 }
 
 impl CompressionMethod {
-    /// Returns the APPNOTE method number.
-    pub fn number(self) -> u16 {
-        match self {
-            Self::Stored => 0,
-            Self::Deflate => 8,
-        }
-    }
-
     pub(crate) fn parse(value: u16, position: u64) -> Result<Self, Error> {
         match value {
-            0 => Ok(Self::Stored),
-            8 => Ok(Self::Deflate),
+            value if value == Self::Stored as u16 => Ok(Self::Stored),
+            value if value == Self::Deflate as u16 => Ok(Self::Deflate),
             _ => Err(Error::Unsupported {
                 position,
                 feature: "compression method",

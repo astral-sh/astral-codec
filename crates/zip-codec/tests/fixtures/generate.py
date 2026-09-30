@@ -39,16 +39,15 @@ for method, label in [(zipfile.ZIP_STORED, "stored"), (zipfile.ZIP_DEFLATED, "de
         suffix = "-zip64" if zip64 else "-descriptor" if streaming else ""
         (root / f"{label}{suffix}.zip").write_bytes(output.getvalue())
 
-for filename, name in [("single-deflate.zip", "file"), ("extract.zip", "nested/file")]:
-    output = io.BytesIO()
-    with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
-        entry = zipfile.ZipInfo(name, (1980, 1, 1, 0, 0, 0))
-        entry.compress_type = zipfile.ZIP_DEFLATED
-        entry.external_attr = 0o100644 << 16
+output = io.BytesIO()
+with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+    entry = zipfile.ZipInfo("nested/file", (1980, 1, 1, 0, 0, 0))
+    entry.compress_type = zipfile.ZIP_DEFLATED
+    entry.external_attr = 0o100644 << 16
 
-        archive.writestr(entry, b"payload")
+    archive.writestr(entry, b"payload")
 
-    (root / filename).write_bytes(output.getvalue())
+(root / "extract.zip").write_bytes(output.getvalue())
 
 output = io.BytesIO()
 with zipfile.ZipFile(output, "w") as archive:
