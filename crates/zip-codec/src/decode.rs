@@ -336,15 +336,41 @@ enum Kind {
     Special(SpecialKind),
 }
 
+struct ExternalAttributes {
+    unix_mode: u32,
+    dos_directory: bool,
+    dos_volume_label: bool,
+}
+
+impl ExternalAttributes {
+    fn new(host_system: u8, raw: u32) -> Self {
+        let has_dos_attributes = matches!(
+            host_system,
+            host::MS_DOS
+                | host::UNIX
+                | host::OS2_HPFS
+                | host::WINDOWS_NTFS
+                | host::VFAT
+                | host::OS_X
+        );
+
+        Self {
+            unix_mode: if matches!(host_system, host::UNIX | host::OS_X) {
+                raw >> attributes::UNIX_MODE_SHIFT
+            } else {
+                0
+            },
+            dos_directory: has_dos_attributes && raw & attributes::DOS_DIRECTORY != 0,
+            dos_volume_label: has_dos_attributes && raw & attributes::DOS_VOLUME_LABEL != 0,
+        }
+    }
+}
+
 fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
     let directory = entry.directory();
-    let attributes = directory.external_attributes();
-    let unix = matches!(directory.host_system(), host::UNIX | host::OS_X);
-    let mode = if unix {
-        attributes >> attributes::UNIX_MODE_SHIFT
-    } else {
-        0
-    };
+    let attributes =
+        ExternalAttributes::new(directory.host_system(), directory.external_attributes());
+    let mode = attributes.unix_mode;
 
     let extra = entry.unix_extra_data().filter(|data| !data.is_empty());
     let link = if let Some(data) = extra
@@ -368,13 +394,8 @@ fn kind(entry: &Entry<'_>) -> Result<Kind, DecodeError> {
         None
     };
 
-    let dos = matches!(
-        directory.host_system(),
-        host::MS_DOS | host::UNIX | host::OS2_HPFS | host::WINDOWS_NTFS | host::VFAT | host::OS_X
-    );
-    let is_directory =
-        directory.path().ends_with('/') || (dos && attributes & attributes::DOS_DIRECTORY != 0);
-    if dos && attributes & attributes::DOS_VOLUME_LABEL != 0 {
+    let is_directory = directory.path().ends_with('/') || attributes.dos_directory;
+    if attributes.dos_volume_label {
         return Err(DecodeError::Unsupported {
             position: directory.position(),
             feature: "volume label",
@@ -479,4 +500,36 @@ pub enum DecodeError {
     /// A prior error or interrupted operation invalidated the cursor.
     #[error("ZIP reader is poisoned after an error or cancelled operation")]
     Poisoned,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ExternalAttributes;
+
+    #[test]
+    fn interprets_external_attributes_according_to_the_host() {
+        for (host, unix_mode, has_dos_attributes) in [
+            (0, 0, true),
+            (3, 0o100755, true),
+            (6, 0, true),
+            (10, 0, true),
+            (14, 0, true),
+            (19, 0o100755, true),
+            (1, 0, false),
+            (255, 0, false),
+        ] {
+            let attributes = ExternalAttributes::new(host, (0o100755 << 16) | 0x10);
+            assert_eq!(attributes.unix_mode, unix_mode, "host {host}");
+            assert_eq!(attributes.dos_directory, has_dos_attributes, "host {host}");
+            assert!(!attributes.dos_volume_label, "host {host}");
+
+            let attributes = ExternalAttributes::new(host, 0x08);
+            assert_eq!(attributes.unix_mode, 0, "host {host}");
+            assert!(!attributes.dos_directory, "host {host}");
+            assert_eq!(
+                attributes.dos_volume_label, has_dos_attributes,
+                "host {host}"
+            );
+        }
+    }
 }

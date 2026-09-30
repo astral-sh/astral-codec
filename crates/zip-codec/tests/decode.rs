@@ -474,52 +474,6 @@ async fn projects_appnote_unix_links_and_compares_redundant_targets() -> TestRes
 }
 
 #[tokio::test]
-async fn interprets_external_attributes_according_to_the_host() -> TestResult {
-    let original = include_bytes!("fixtures/empty-deflate.zip");
-    let central = original
-        .windows(4)
-        .position(|bytes| bytes == b"PK\x01\x02")
-        .ok_or("missing central header")?;
-
-    for (host, dos, unix) in [
-        (0, true, false),
-        (3, true, true),
-        (6, true, false),
-        (10, true, false),
-        (14, true, false),
-        (19, true, true),
-        (1, false, false),
-    ] {
-        for (attributes, directory, executable) in [
-            (0x10u32, dos, false),
-            (0o040755 << 16, unix, false),
-            (0o100111 << 16, false, unix),
-        ] {
-            let mut bytes = original.to_vec();
-            bytes[central + 5] = host;
-            bytes[central + 38..central + 42].copy_from_slice(&attributes.to_le_bytes());
-            let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-
-            match archive.next_member().await? {
-                Some(Member::Directory { .. }) => assert!(directory, "host {host}"),
-                Some(Member::File {
-                    executable: actual,
-                    payload,
-                    ..
-                }) => {
-                    assert!(!directory, "host {host}");
-                    assert_eq!(actual, executable, "host {host}");
-                    payload.skip().await?;
-                }
-                _ => return Err(io::Error::other("expected file or directory").into()),
-            }
-        }
-    }
-
-    Ok(())
-}
-
-#[tokio::test]
 async fn validates_empty_deflate_streams_in_directories() -> TestResult {
     let bytes = include_bytes!("fixtures/empty-deflate.zip");
     let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
