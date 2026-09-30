@@ -34,43 +34,43 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     pub(crate) async fn length(&mut self) -> Result<u64, Error> {
         Ok(self.inner.seek(SeekFrom::End(0)).await?)
     }
-}
 
-// Every read, including read-ahead, is bounded by its containing record span.
-pub(crate) async fn read_at<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut RecordReader<'_, R>,
-    position: u64,
-    bytes: &mut [u8],
-    end: u64,
-) -> Result<(), Error> {
-    let requested_end = add(position, bytes.len() as u64)?;
-    if requested_end > end {
-        return Err(invalid(position, "record extends beyond its container"));
+    // Every read, including read-ahead, is bounded by its containing record span.
+    pub(crate) async fn read_at(
+        &mut self,
+        position: u64,
+        bytes: &mut [u8],
+        end: u64,
+    ) -> Result<(), Error> {
+        let requested_end = add(position, bytes.len() as u64)?;
+        if requested_end > end {
+            return Err(invalid(position, "record extends beyond its container"));
+        }
+
+        if bytes.is_empty() {
+            return Ok(());
+        }
+
+        if position >= self.start && requested_end <= self.start + self.buffer.len() as u64 {
+            let offset = (position - self.start) as usize;
+            bytes.copy_from_slice(&self.buffer[offset..offset + bytes.len()]);
+            return Ok(());
+        }
+
+        self.inner.seek(SeekFrom::Start(position)).await?;
+        if bytes.len() >= self.capacity {
+            self.inner.read_exact(bytes).await?;
+            return Ok(());
+        }
+
+        let length = (end - position).min(self.capacity as u64) as usize;
+        self.buffer.resize(length, 0);
+        self.inner.read_exact(&mut self.buffer).await?;
+        self.start = position;
+        bytes.copy_from_slice(&self.buffer[..bytes.len()]);
+
+        Ok(())
     }
-
-    if bytes.is_empty() {
-        return Ok(());
-    }
-
-    if position >= reader.start && requested_end <= reader.start + reader.buffer.len() as u64 {
-        let offset = (position - reader.start) as usize;
-        bytes.copy_from_slice(&reader.buffer[offset..offset + bytes.len()]);
-        return Ok(());
-    }
-
-    reader.inner.seek(SeekFrom::Start(position)).await?;
-    if bytes.len() >= reader.capacity {
-        reader.inner.read_exact(bytes).await?;
-        return Ok(());
-    }
-
-    let length = (end - position).min(reader.capacity as u64) as usize;
-    reader.buffer.resize(length, 0);
-    reader.inner.read_exact(&mut reader.buffer).await?;
-    reader.start = position;
-    bytes.copy_from_slice(&reader.buffer[..bytes.len()]);
-
-    Ok(())
 }
 
 pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> u16 {
