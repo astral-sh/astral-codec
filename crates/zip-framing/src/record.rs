@@ -73,16 +73,17 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     }
 }
 
-pub(crate) fn u16_at(bytes: &[u8], offset: usize) -> u16 {
-    u16::from_le_bytes([bytes[offset], bytes[offset + 1]])
-}
-
-pub(crate) fn u32_at(bytes: &[u8], offset: usize) -> u32 {
-    u32::from(u16_at(bytes, offset)) | (u32::from(u16_at(bytes, offset + 2)) << 16)
-}
-
-pub(crate) fn u64_at(bytes: &[u8], offset: usize) -> u64 {
-    u64::from(u32_at(bytes, offset)) | (u64::from(u32_at(bytes, offset + 4)) << 32)
+/// Extracts a fixed-size field after checking its offset and length.
+pub(crate) fn bytes_at<const N: usize>(
+    bytes: &[u8],
+    offset: usize,
+    position: u64,
+) -> Result<[u8; N], Error> {
+    bytes
+        .get(offset..)
+        .and_then(<[u8]>::first_chunk)
+        .copied()
+        .ok_or_else(|| invalid(position, "truncated integer field"))
 }
 
 pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str, Error> {
@@ -102,22 +103,48 @@ pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str
     Ok(name)
 }
 
+/// Common fixed-length components of both local file and central directory entries.
+///
+/// TODO(ww): Do more type-state modeling here, e.g. [`Common::compressed`] should probably
+/// be an enum with `{ Size(size), SeeZip64, SeeDescriptor }` and [`Common::flags`] should probably be
+/// some kind of bitflags enum.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Common {
+    /// The minimum ZIP specification version needed to extract this member.
     pub(crate) version: u16,
+    /// The member's general-purpose bit flags.
     pub(crate) flags: u16,
+    /// The member's compression method.
     pub(crate) method: CompressionMethod,
+    /// The member's last-modified time, in MS-DOS format.
+    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
     pub(crate) time: u16,
+    /// The member's last-modified date, in MS-DOS format.
+    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
     pub(crate) date: u16,
+    /// The CRC-32 of the member's uncompressed data.
+    ///
+    /// This will be `0` for a local file entry whose [`Common::flags`] indicate that a data descriptor
+    /// conveys the CRC-32 instead.
     pub(crate) crc: u32,
+    /// The member's size in the ZIP modulo any headers and (optional) data descriptor.
+    ///
+    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
+    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
+    /// [`Common::flags`] indicates that a data descriptor conveys the compressed size instead.
     pub(crate) compressed: u32,
+    /// The member's true (i.e. uncompressed) size.
+    ///
+    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
+    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
+    /// [`Common::flags`] indicates that a data descriptor conveys the uncompressed size instead.
     pub(crate) uncompressed: u32,
 }
 
 impl Common {
-    // Call only on the fixed, length-checked header starting at version-needed.
-    pub(crate) fn parse(bytes: &[u8], position: u64) -> Result<Self, Error> {
-        let flags = u16_at(bytes, 2);
+    /// Parse a local file or central directory [`Common`] from the given bytes.
+    pub(crate) fn parse(bytes: &[u8; 22], position: u64) -> Result<Self, Error> {
+        let flags = u16::from_le_bytes(bytes_at(bytes, 2, position)?);
         if flags & 0x2041 != 0 {
             return Err(Error::Unsupported {
                 position,
@@ -132,7 +159,8 @@ impl Common {
             });
         }
 
-        let method = CompressionMethod::parse(u16_at(bytes, 4), position)?;
+        let method =
+            CompressionMethod::parse(u16::from_le_bytes(bytes_at(bytes, 4, position)?), position)?;
         let allowed = 0x0808
             | if method == CompressionMethod::Deflate {
                 6
@@ -146,7 +174,7 @@ impl Common {
             ));
         }
 
-        let version = u16_at(bytes, 0);
+        let version = u16::from_le_bytes(bytes_at(bytes, 0, position)?);
         if version > 45 {
             return Err(Error::Unsupported {
                 position,
@@ -168,11 +196,11 @@ impl Common {
             version,
             flags,
             method,
-            time: u16_at(bytes, 6),
-            date: u16_at(bytes, 8),
-            crc: u32_at(bytes, 10),
-            compressed: u32_at(bytes, 14),
-            uncompressed: u32_at(bytes, 18),
+            time: u16::from_le_bytes(bytes_at(bytes, 6, position)?),
+            date: u16::from_le_bytes(bytes_at(bytes, 8, position)?),
+            crc: u32::from_le_bytes(bytes_at(bytes, 10, position)?),
+            compressed: u32::from_le_bytes(bytes_at(bytes, 14, position)?),
+            uncompressed: u32::from_le_bytes(bytes_at(bytes, 18, position)?),
         })
     }
 
@@ -184,6 +212,37 @@ impl Common {
         if zip64 && self.version < 45 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
+
+        Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::bytes_at;
+    use crate::Error;
+
+    #[test]
+    fn reads_fixed_width_fields_and_rejects_out_of_bounds_offsets() -> Result<(), Error> {
+        let bytes = [1, 2, 3, 4, 5, 6, 7, 8];
+
+        assert_eq!(u16::from_le_bytes(bytes_at(&bytes, 1, 42)?), 0x0302);
+        assert_eq!(u32::from_le_bytes(bytes_at(&bytes, 2, 42)?), 0x0605_0403);
+        assert_eq!(
+            u64::from_le_bytes(bytes_at(&bytes, 0, 42)?),
+            0x0807_0605_0403_0201
+        );
+
+        for offset in [7, 8, usize::MAX] {
+            assert!(matches!(
+                bytes_at::<2>(&bytes, offset, 42),
+                Err(Error::Invalid {
+                    position: 42,
+                    reason: "truncated integer field"
+                })
+            ));
+        }
+        assert!(bytes_at::<8>(&bytes, 1, 42).is_err());
 
         Ok(())
     }

@@ -551,21 +551,28 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
 async fn rejects_malformed_extras_and_zip64_version_two() {
     for extra in [
         vec![0],
+        vec![0, 0],
+        vec![0, 0, 0],
         vec![1, 0, 8, 0],
+        vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         [field(0xbeef, &[]), field(0xbeef, &[])].concat(),
     ] {
-        let archive = Fixture {
-            central_extra: extra,
-            ..Fixture::default()
-        }
-        .build();
+        for local in [false, true] {
+            let mut fixture = Fixture::default();
+            if local {
+                fixture.local_extra.clone_from(&extra);
+            } else {
+                fixture.central_extra.clone_from(&extra);
+            }
 
-        assert!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
-                .await
-                .is_err()
-        );
+            assert!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                    .await
+                    .is_err(),
+                "extra {extra:?}, local={local}"
+            );
+        }
     }
 
     let mut archive = Fixture {

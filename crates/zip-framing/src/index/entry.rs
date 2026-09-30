@@ -6,13 +6,15 @@ use crate::{
     CompressionMethod, Error, add,
     extra::{Extras, ResolvedExtras},
     invalid,
-    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, u16_at, u32_at, u64_at},
+    record::{CENTRAL, Common, DESCRIPTOR, LOCAL, RecordReader, bytes_at},
 };
 
 use super::Budget;
 
+/// Central directory metadata for a ZIP member.
 #[derive(Clone, Debug)]
 struct Metadata {
+    /// The member's path.
     path: String,
     common: Common,
     compressed_size: u64,
@@ -183,22 +185,27 @@ impl DirectoryEntry {
     ) -> Result<(Self, u64), Error> {
         let mut header = [0; 46];
         reader.read_at(position, &mut header, end).await?;
-        if u32_at(&header, 0) != CENTRAL {
+        if u32::from_le_bytes(bytes_at(&header, 0, position)?) != CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(&header[6..], position)?;
-        let name_length = usize::from(u16_at(&header, 28));
-        let extra_length = usize::from(u16_at(&header, 30));
-        let comment_length = usize::from(u16_at(&header, 32));
+        let common = Common::parse(
+            header[6..]
+                .first_chunk()
+                .ok_or_else(|| invalid(position, "truncated common header"))?,
+            position,
+        )?;
+        let name_length = usize::from(u16::from_le_bytes(bytes_at(&header, 28, position)?));
+        let extra_length = usize::from(u16::from_le_bytes(bytes_at(&header, 30, position)?));
+        let comment_length = usize::from(u16::from_le_bytes(bytes_at(&header, 32, position)?));
         let mut variable = vec![0; name_length + extra_length + comment_length];
         reader.read_at(position + 46, &mut variable, end).await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
         let sizes = extras.zip64(
             common,
-            Some(u32_at(&header, 42)),
-            Some(u16_at(&header, 34)),
+            Some(u32::from_le_bytes(bytes_at(&header, 42, position)?)),
+            Some(u16::from_le_bytes(bytes_at(&header, 34, position)?)),
             position,
         )?;
 
@@ -221,8 +228,8 @@ impl DirectoryEntry {
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
                 local_offset: sizes.offset,
-                made_by: u16_at(&header, 4),
-                attributes: u32_at(&header, 38),
+                made_by: u16::from_le_bytes(bytes_at(&header, 4, position)?),
+                attributes: u32::from_le_bytes(bytes_at(&header, 38, position)?),
             },
             extra: variable[name_length..name_length + extra_length].to_vec(),
             boundary: end,
@@ -242,13 +249,18 @@ impl DirectoryEntry {
         let position = metadata.local_offset;
         let mut header = [0; 30];
         reader.read_at(position, &mut header, boundary).await?;
-        if u32_at(&header, 0) != LOCAL {
+        if u32::from_le_bytes(bytes_at(&header, 0, position)?) != LOCAL {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&header[4..], position)?;
-        let name_length = usize::from(u16_at(&header, 26));
-        let extra_length = usize::from(u16_at(&header, 28));
+        let common = Common::parse(
+            header[4..]
+                .first_chunk()
+                .ok_or_else(|| invalid(position, "truncated common header"))?,
+            position,
+        )?;
+        let name_length = usize::from(u16::from_le_bytes(bytes_at(&header, 26, position)?));
+        let extra_length = usize::from(u16::from_le_bytes(bytes_at(&header, 28, position)?));
         budget.metadata(30 + (name_length + extra_length) as u64)?;
 
         let mut variable = vec![0; name_length + extra_length];
@@ -331,7 +343,7 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
     // Length disambiguates a signature-less descriptor whose CRC is itself
     // 0x08074b50. Never search for a descriptor inside compressed data.
     let offset = if length == unsigned_length + 4 {
-        if u32_at(&bytes, 0) != DESCRIPTOR {
+        if u32::from_le_bytes(bytes_at(&bytes, 0, position)?) != DESCRIPTOR {
             return Err(invalid(position, "invalid data descriptor signature"));
         }
 
@@ -340,16 +352,16 @@ async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
         0
     };
 
-    let crc = u32_at(&bytes, offset);
+    let crc = u32::from_le_bytes(bytes_at(&bytes, offset, position)?);
     let compressed = if zip64 {
-        u64_at(&bytes, offset + 4)
+        u64::from_le_bytes(bytes_at(&bytes, offset + 4, position)?)
     } else {
-        u64::from(u32_at(&bytes, offset + 4))
+        u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 4, position)?))
     };
     let uncompressed = if zip64 {
-        u64_at(&bytes, offset + 12)
+        u64::from_le_bytes(bytes_at(&bytes, offset + 12, position)?)
     } else {
-        u64::from(u32_at(&bytes, offset + 8))
+        u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?))
     };
 
     if crc != metadata.common.crc
