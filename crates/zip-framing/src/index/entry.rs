@@ -16,18 +16,44 @@ use super::Budget;
 struct Metadata {
     /// The member's path.
     path: String,
+    /// Common (fixed size) metadata in a central directory entry.
     common: Common,
+    /// The effective compressed size declared by the central directory.
+    ///
+    /// If [`Common::compressed`] is `u32::MAX`, this comes from the ZIP64
+    /// extra field; otherwise it is [`Common::compressed`] widened to `u64`.
     compressed_size: u64,
+    /// The effective uncompressed size declared by the central directory.
+    ///
+    /// If [`Common::uncompressed`] is `u32::MAX`, this comes from the ZIP64
+    /// extra field; otherwise it is [`Common::uncompressed`] widened to `u64`.
     size: u64,
+    /// An absolute offset to the central directory entry's corresponding
+    /// local file entry.
+    ///
+    /// If the central directory's 32-bit offset is `u32::MAX`, this comes
+    /// from the ZIP64 extra field; otherwise it is that offset widened to `u64`.
+    ///
+    /// Note that our parser is conservative and rejects ZIPs with arbitrary
+    /// prefixed content, so this is always the offset from the start of the
+    /// source.
     local_offset: u64,
+    /// The "version made by" field in the central directory entry.
     made_by: u16,
+    /// The central directory entry's raw external file attributes.
+    ///
+    /// The semantics of this field depend on the system identifier
+    /// within [`Metadata::made_by`].
     attributes: u32,
 }
 
-/// A member whose local records have been reconciled with the directory.
+/// A member whose local file entry, extras, and optional data descriptor
+/// have been reconciled with the directory.
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a> {
+    /// The member's central directory entry.
     directory: &'a DirectoryEntry,
+    /// The member's local file entry.
     local: &'a LocalEntry,
 }
 
@@ -70,6 +96,7 @@ pub struct DirectoryEntry {
     metadata: Metadata,
     extra: Vec<u8>,
     boundary: u64,
+    // TODO(ww): This seems wrong.
     local: Option<LocalEntry>,
 }
 
