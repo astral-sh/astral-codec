@@ -58,7 +58,7 @@ jobs:
   benchmark-comparison-build:
     name: Build comparison benchmarks
     # Match the macro runner's architecture and Ubuntu version.
-    runs-on: depot-ubuntu-22.04-arm-4
+    runs-on: ubuntu-22.04-arm
     timeout-minutes: 20
     permissions:
       contents: read

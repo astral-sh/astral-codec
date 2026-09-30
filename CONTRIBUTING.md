@@ -92,9 +92,7 @@ and pushes to `main`, and supports manual runs:
 
 - `framing`: CPU simulation on a GitHub-hosted Linux runner.
 - `comparison`: walltime on a CodSpeed Graviton macro runner, including time
-  spent in filesystem operations and other system calls. A separate Depot job
-  builds the benchmarks on ARM64 Ubuntu 22.04 and uploads them for the macro
-  runner to execute.
+  spent in filesystem operations and other system calls.
 
 Uploads use OIDC; no token secret is needed. Enable the repository in CodSpeed
 and allow public repositories in the organization's default runner group for
