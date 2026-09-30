@@ -56,8 +56,8 @@ Test ownership after cleanup:
 
 ## Stack
 
-- Development base `ww/zip-codec` is at `8e93c75`: #122, #130, #123, and #127 merged.
-- `ww/zip-cleanup` targets that base for this audit, before further feature merges.
+- Development base `ww/zip-codec` is at `c6eafe4`: #122, #130, #123, #127, and
+  cleanup #132 merged.
 - Pending feature stack #131: #124 (`ww/zip-encode`) then #125 (`ww/zip-docs`).
 
 ## Verification
@@ -69,3 +69,8 @@ Test ownership after cleanup:
   cancellation, interoperability, and extraction.
 - Workspace clippy, formatting, and ZIP documentation checks pass with warnings
   denied. The cleanup adds no dependencies, unsafe code, or public API changes.
+- After rebasing #124/#125 onto the cleanup, their source/documentation diffs
+  match the prior versions exactly, excluding this transcript. Conflicts were
+  confined to obsolete progress notes; the merged audit is preserved.
+- All 5 encoder tests pass against the merged cleanup. The 29 merged-layer
+  tests and their implementation are unchanged by the rebase.
