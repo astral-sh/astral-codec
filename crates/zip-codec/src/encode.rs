@@ -229,6 +229,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type Error = EncodeError;
+    type FileOptions = ();
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         if self.finished {
@@ -267,6 +268,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         path: &str,
         payload: &mut FilePayload<'_>,
         metadata: EntryMetadata,
+        _options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         let method = if payload.size() == 0 {
             CompressionMethod::Stored
