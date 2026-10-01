@@ -4,16 +4,17 @@
 //! descriptors. Writers can reserve local header space before streaming data.
 
 use crate::{
-    CompressionMethod, Error, ExtraHeaderId, add,
-    constants::{attributes, extra, host, signature, size, version},
+    CompressionMethod, Error, ExtraHeaderId, HostSystem, add,
+    constants::{extra, signature, size, version},
     invalid,
+    kind::{ExternalAttributes, UnixFileType},
     record::{Common, GeneralPurposeFlags, SizeField, validate_name},
 };
 
 // APPNOTE 4.4.2: the high byte identifies the host system for external
 // attributes; the low byte is the ZIP specification version (45 = 4.5).
 // We always emit UNIX mode bits, regardless of the platform running the encoder.
-const VERSION_MADE_BY: u16 = ((host::UNIX as u16) << 8) | version::ZIP64;
+const VERSION_MADE_BY: u16 = ((HostSystem::Unix.to_byte() as u16) << 8) | version::ZIP64;
 
 // 00:00:00, 1980-01-01 in the DOS date/time format.
 const DEFAULT_TIME: u16 = 0;
@@ -151,20 +152,21 @@ impl CompletedMember<'_> {
         push16(&mut bytes, 0); // Starting disk.
         push16(&mut bytes, 0); // Internal attributes.
 
-        let mode = match self.header.kind {
-            EntryKind::File { executable: true } => attributes::UNIX_REGULAR | 0o755,
-            EntryKind::File { executable: false } => attributes::UNIX_REGULAR | 0o644,
-            EntryKind::Directory => attributes::UNIX_DIRECTORY | 0o755,
-            EntryKind::SymbolicLink => attributes::UNIX_SYMLINK | 0o777,
+        let (file_type, permissions) = match self.header.kind {
+            EntryKind::File { executable: true } => (UnixFileType::Regular, 0o755),
+            EntryKind::File { executable: false } => (UnixFileType::Regular, 0o644),
+            EntryKind::Directory => (UnixFileType::Directory, 0o755),
+            EntryKind::SymbolicLink => (UnixFileType::SymbolicLink, 0o777),
         };
         let dos = if matches!(self.header.kind, EntryKind::Directory) {
-            attributes::DOS_DIRECTORY
+            ExternalAttributes::DOS_DIRECTORY
         } else {
             0
         };
         push32(
             &mut bytes,
-            (u32::from(mode) << attributes::UNIX_MODE_SHIFT) | dos,
+            (u32::from(u16::from(file_type) | permissions) << ExternalAttributes::UNIX_MODE_SHIFT)
+                | dos,
         );
         push32(&mut bytes, u32::MAX);
 

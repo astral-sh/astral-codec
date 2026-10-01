@@ -25,8 +25,6 @@ pub mod signature {
 pub mod size {
     /// Record signature.
     pub const SIGNATURE: usize = 4;
-    /// Fields shared by local and central headers, starting at the extraction version.
-    pub const COMMON: usize = 22;
     /// Local file header, including its signature.
     pub const LOCAL: usize = 30;
     /// Central directory file header, including its signature.
@@ -63,8 +61,6 @@ pub mod extra {
     pub const ZIP64_LOCAL_SIZE: usize = 16;
     /// ZIP64 central extra data length in bytes when both sizes and the offset are present.
     pub const ZIP64_CENTRAL_SIZE: usize = 24;
-    /// Version of the Info-ZIP Unicode path and comment fields.
-    pub const UNICODE_VERSION: u8 = 1;
 }
 
 /// Extraction versions, encoded as major version times ten plus minor version.
@@ -79,48 +75,8 @@ pub mod version {
     pub const ZIP64_V2: u16 = 62;
 }
 
-/// Host-system identifiers in the high byte of "version made by" (APPNOTE section 4.4.2).
-///
-/// See [`crate::HostSystem`] for their typed interpretation.
-pub mod host {
-    /// MS-DOS and OS/2 FAT filesystems.
-    pub const MS_DOS: u8 = 0;
-    /// UNIX.
-    pub const UNIX: u8 = 3;
-    /// OS/2 HPFS.
-    pub const OS2_HPFS: u8 = 6;
-    /// Windows NTFS.
-    pub const WINDOWS_NTFS: u8 = 10;
-    /// VFAT.
-    pub const VFAT: u8 = 14;
-    /// OS X (Darwin).
-    pub const OS_X: u8 = 19;
-}
-
-/// DOS attributes and UNIX mode bits carried in external file attributes.
+/// UNIX permission bits carried in external file attributes.
 pub mod attributes {
-    /// DOS volume label.
-    pub const DOS_VOLUME_LABEL: u32 = 0x08;
-    /// DOS directory.
-    pub const DOS_DIRECTORY: u32 = 0x10;
-    /// Bit offset of the UNIX mode in external file attributes.
-    pub const UNIX_MODE_SHIFT: u32 = 16;
-    /// UNIX file-type mask, applied after shifting out the DOS attributes.
-    pub const UNIX_TYPE_MASK: u16 = 0o170000;
-    /// UNIX regular file.
-    pub const UNIX_REGULAR: u16 = 0o100000;
-    /// UNIX directory.
-    pub const UNIX_DIRECTORY: u16 = 0o040000;
-    /// UNIX symbolic link.
-    pub const UNIX_SYMLINK: u16 = 0o120000;
-    /// UNIX character device.
-    pub const UNIX_CHARACTER_DEVICE: u16 = 0o020000;
-    /// UNIX block device.
-    pub const UNIX_BLOCK_DEVICE: u16 = 0o060000;
-    /// UNIX named pipe.
-    pub const UNIX_FIFO: u16 = 0o010000;
-    /// UNIX socket.
-    pub const UNIX_SOCKET: u16 = 0o140000;
     /// Any UNIX execute permission.
     pub const UNIX_EXECUTABLE: u16 = 0o111;
 }

@@ -1,8 +1,4 @@
-use crate::{
-    DirectoryEntry, Error, HostSystem,
-    constants::{attributes, version},
-    invalid,
-};
+use crate::{DirectoryEntry, Error, HostSystem, constants::version, invalid};
 
 /// A ZIP member's kind, determined from its reconciled metadata.
 ///
@@ -46,22 +42,22 @@ impl EntryKind {
             return Ok(Self::VolumeLabel);
         }
 
-        let kind = match attributes.unix_mode & attributes::UNIX_TYPE_MASK {
-            0 if is_directory => Self::Directory,
-            0 | attributes::UNIX_REGULAR if !is_directory => {
+        let kind = match UnixFileType::from(attributes.unix_mode) {
+            UnixFileType::Unspecified if is_directory => Self::Directory,
+            UnixFileType::Unspecified | UnixFileType::Regular if !is_directory => {
                 if extra.is_some() {
                     Self::HardLink
                 } else {
                     Self::File
                 }
             }
-            attributes::UNIX_DIRECTORY => Self::Directory,
-            attributes::UNIX_SYMLINK if !is_directory => Self::SymbolicLink,
-            attributes::UNIX_CHARACTER_DEVICE if !is_directory => Self::CharacterDevice,
-            attributes::UNIX_BLOCK_DEVICE if !is_directory => Self::BlockDevice,
-            attributes::UNIX_FIFO if !is_directory => Self::Fifo,
-            attributes::UNIX_SOCKET if !is_directory => Self::Socket,
-            mode if !is_directory => Self::Unknown(mode),
+            UnixFileType::Directory => Self::Directory,
+            UnixFileType::SymbolicLink if !is_directory => Self::SymbolicLink,
+            UnixFileType::CharacterDevice if !is_directory => Self::CharacterDevice,
+            UnixFileType::BlockDevice if !is_directory => Self::BlockDevice,
+            UnixFileType::Fifo if !is_directory => Self::Fifo,
+            UnixFileType::Socket if !is_directory => Self::Socket,
+            UnixFileType::Unknown(mode) if !is_directory => Self::Unknown(mode),
             _ => {
                 return Err(invalid(
                     directory.position(),
@@ -110,6 +106,56 @@ impl EntryKind {
     }
 }
 
+/// The file-type bits of a UNIX mode, excluding permissions.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum UnixFileType {
+    Unspecified,
+    Regular,
+    Directory,
+    SymbolicLink,
+    CharacterDevice,
+    BlockDevice,
+    Fifo,
+    Socket,
+    Unknown(u16),
+}
+
+impl UnixFileType {
+    const TYPE_MASK: u16 = 0o170000;
+}
+
+impl From<u16> for UnixFileType {
+    fn from(mode: u16) -> Self {
+        match mode & Self::TYPE_MASK {
+            0 => Self::Unspecified,
+            0o100000 => Self::Regular,
+            0o040000 => Self::Directory,
+            0o120000 => Self::SymbolicLink,
+            0o020000 => Self::CharacterDevice,
+            0o060000 => Self::BlockDevice,
+            0o010000 => Self::Fifo,
+            0o140000 => Self::Socket,
+            mode => Self::Unknown(mode),
+        }
+    }
+}
+
+impl From<UnixFileType> for u16 {
+    fn from(file_type: UnixFileType) -> Self {
+        match file_type {
+            UnixFileType::Unspecified => 0,
+            UnixFileType::Regular => 0o100000,
+            UnixFileType::Directory => 0o040000,
+            UnixFileType::SymbolicLink => 0o120000,
+            UnixFileType::CharacterDevice => 0o020000,
+            UnixFileType::BlockDevice => 0o060000,
+            UnixFileType::Fifo => 0o010000,
+            UnixFileType::Socket => 0o140000,
+            UnixFileType::Unknown(mode) => mode,
+        }
+    }
+}
+
 /// An extracted form of a central directory entry's "external attributes" field.
 ///
 /// See [`DirectoryEntry::external_attributes`].
@@ -136,6 +182,10 @@ pub(crate) struct ExternalAttributes {
 }
 
 impl ExternalAttributes {
+    const DOS_VOLUME_LABEL: u32 = 0x08;
+    pub(crate) const DOS_DIRECTORY: u32 = 0x10;
+    pub(crate) const UNIX_MODE_SHIFT: u32 = 16;
+
     pub(crate) fn new(host_system: HostSystem, raw: u32) -> Self {
         let has_dos_attributes = matches!(
             host_system,
@@ -149,12 +199,12 @@ impl ExternalAttributes {
 
         Self {
             unix_mode: if matches!(host_system, HostSystem::Unix | HostSystem::Darwin) {
-                (raw >> attributes::UNIX_MODE_SHIFT) as u16
+                (raw >> Self::UNIX_MODE_SHIFT) as u16
             } else {
                 0
             },
-            dos_directory: has_dos_attributes && raw & attributes::DOS_DIRECTORY != 0,
-            dos_volume_label: has_dos_attributes && raw & attributes::DOS_VOLUME_LABEL != 0,
+            dos_directory: has_dos_attributes && raw & Self::DOS_DIRECTORY != 0,
+            dos_volume_label: has_dos_attributes && raw & Self::DOS_VOLUME_LABEL != 0,
         }
     }
 }

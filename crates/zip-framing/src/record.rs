@@ -2,11 +2,7 @@ use std::{io::SeekFrom, str};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
-use crate::{
-    CompressionMethod, Error, add,
-    constants::{size, version},
-    invalid,
-};
+use crate::{CompressionMethod, Error, add, constants::version, invalid};
 
 /// A bounded read-ahead window that survives absolute seeks within the window.
 /// Ordinary buffered readers discard their buffer on those seeks.
@@ -299,8 +295,11 @@ pub(crate) struct Common {
 }
 
 impl Common {
+    /// Size of the serialized common fields in bytes.
+    pub(crate) const SIZE: usize = 22;
+
     /// Parse a local file or central directory [`Common`] from the given bytes.
-    pub(crate) fn parse(bytes: &[u8; size::COMMON], position: u64) -> Result<Self, Error> {
+    pub(crate) fn parse(bytes: &[u8; Self::SIZE], position: u64) -> Result<Self, Error> {
         let method =
             CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
         let flags = GeneralPurposeFlags::parse(
@@ -340,8 +339,8 @@ impl Common {
     }
 
     /// Serializes the common header fields in little-endian order.
-    pub(crate) fn to_bytes(self) -> [u8; size::COMMON] {
-        let mut bytes = [0; size::COMMON];
+    pub(crate) fn to_bytes(self) -> [u8; Self::SIZE] {
+        let mut bytes = [0; Self::SIZE];
         bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
         bytes[2..4].copy_from_slice(&self.flags.bits().to_le_bytes());
         bytes[4..6].copy_from_slice(&(self.method as u16).to_le_bytes());

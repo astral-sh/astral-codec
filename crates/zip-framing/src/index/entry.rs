@@ -266,7 +266,7 @@ impl DirectoryEntry {
             return Err(invalid(position, "invalid central header signature"));
         }
 
-        let common = Common::parse(&array_at::<6, { size::COMMON }, _>(&header), position)?;
+        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
@@ -333,7 +333,7 @@ impl IndexedEntry {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&array_at::<4, { size::COMMON }, _>(&header), position)?;
+        let common = Common::parse(&array_at::<4, { Common::SIZE }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         budget.metadata((size::LOCAL + name_length + extra_length) as u64)?;

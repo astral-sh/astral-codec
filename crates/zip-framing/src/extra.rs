@@ -9,6 +9,9 @@ use crate::{
     record::{Common, GeneralPurposeFlags, SizeField, bytes_at, parse_name},
 };
 
+/// Version of the Info-ZIP Unicode path and comment fields.
+const UNICODE_VERSION: u8 = 1;
+
 /// An extra-field header identifier (APPNOTE sections 4.5 and 4.6).
 ///
 /// Named variants identify headers recognized by this crate, including features
@@ -308,7 +311,7 @@ impl<'a> Extras<'a> {
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {
-    let Some((&extra::UNICODE_VERSION, field)) = field.split_first() else {
+    let Some((&UNICODE_VERSION, field)) = field.split_first() else {
         return Err(invalid(position, "invalid Unicode extra field"));
     };
     let Some((expected_crc, value)) = field.split_first_chunk::<4>() else {
