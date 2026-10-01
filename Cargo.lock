@@ -1397,6 +1397,7 @@ name = "zip-codec"
 version = "0.0.14"
 dependencies = [
  "archive-trait",
+ "codspeed-divan-compat",
  "flate2",
  "tempfile",
  "thiserror",
@@ -1408,6 +1409,7 @@ dependencies = [
 name = "zip-framing"
 version = "0.0.14"
 dependencies = [
+ "codspeed-divan-compat",
  "flate2",
  "thiserror",
  "tokio",

@@ -113,30 +113,53 @@ Run local wall-clock benchmarks with:
 ```shell
 cargo bench -p tar-codec --bench comparison --locked
 cargo bench -p tar-framing --bench framing --locked
+cargo bench -p zip-framing --bench framing --locked
+cargo bench -p zip-codec --bench codec --locked
 ```
 
 The `comparison` target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
 recursive directory encoding and USTAR extraction.
+
+The ZIP benchmarks use in-memory ZIP64 archives. `zip-framing` measures header
+serialization, directory indexing, and uncached local-record validation with
+single-entry, many-entry, and long Unicode path fixtures. `zip-codec` measures
+encoding and payload decoding with stored and DEFLATE compression, using large
+compressible files, large incompressible files, and many small files. Decoding
+includes local-record validation, member projection, and integrity checks;
+directory indexing is excluded. Encoding includes builder bookkeeping and output
+allocation. Fixture generation and correctness checks run outside measurements.
+
+Smoke-test the ZIP benchmarks in the test profile with:
+
+```shell
+cargo test -p zip-framing --bench framing --locked -- --test
+cargo test -p zip-codec --bench codec --locked -- --test
+```
 
 ### CodSpeed
 
 [The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
 and pushes to `main`, and supports manual runs:
 
-- `framing`: CPU simulation on a GitHub-hosted Linux runner.
+- `tar-framing`, `zip-framing`, and `zip-codec`: CPU simulation on GitHub-hosted
+  Linux runners.
 - `comparison`: walltime on a CodSpeed Graviton macro runner, including time
   spent in filesystem operations and other system calls.
 
-By default, the workflow runs all framing cases and the four `tar-codec` cases
-in `comparison`. Add the `benchmarks:compare` PR label or enable
+By default, the workflow runs all framing and ZIP codec cases and the four
+`tar-codec` cases in `comparison`. Add the `benchmarks:compare` PR label or enable
 **Compare implementations** in a manual run to include the other implementations.
 
 Build and check all instrumented benchmarks locally with:
 
 ```shell
 uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p zip-framing --bench framing --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
+uv run --only-dev --locked cargo codspeed run -p zip-framing --bench framing -m simulation
+uv run --only-dev --locked cargo codspeed run -p zip-codec --bench codec -m simulation
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
 ```
 

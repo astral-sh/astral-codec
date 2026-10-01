@@ -17,8 +17,13 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt"] }
 
 [dev-dependencies]
+divan = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "time"] }
+
+[[bench]]
+name = "codec"
+harness = false
 
 [lints]
 workspace = true
