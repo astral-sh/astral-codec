@@ -12,6 +12,8 @@ on:
       - crates/archive-trait/**
       - crates/tar-codec/**
       - crates/tar-framing/**
+      - crates/zip-codec/**
+      - crates/zip-framing/**
       - '!**/*.md'
   push:
     branches: [main]
@@ -24,6 +26,8 @@ on:
       - crates/archive-trait/**
       - crates/tar-codec/**
       - crates/tar-framing/**
+      - crates/zip-codec/**
+      - crates/zip-framing/**
       - '!**/*.md'
   workflow_dispatch:
     inputs:
@@ -46,10 +50,19 @@ concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
 
 jobs:
-  benchmark-framing:
-    name: CodSpeed (framing, simulation)
+  benchmark-simulation:
+    name: CodSpeed (${{ matrix.package }}, simulation)
     runs-on: ubuntu-latest
     timeout-minutes: 20
+    strategy:
+      matrix:
+        include:
+          - package: tar-framing
+            target: framing
+          - package: zip-framing
+            target: framing
+          - package: zip-codec
+            target: codec
     permissions:
       contents: read
       id-token: write # Authenticate uploads to CodSpeed with OIDC.
@@ -67,13 +80,13 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Build benchmarks
-        run: uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
+        run: uv run --only-dev --locked cargo codspeed build -p ${{ matrix.package }} --bench ${{ matrix.target }} --locked -m simulation
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
           mode: simulation
-          run: uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
+          run: uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation
 
   benchmark-comparison-build:
     name: Build comparison benchmarks
