@@ -1147,6 +1147,56 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
 }
 
 #[tokio::test]
+async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
+    let names = ["first".to_owned(), "é".repeat(30_000), "last".to_owned()];
+    let extra = field(0xbeef, &vec![0xa5; 6000]);
+    let mut bytes = Vec::new();
+    let mut directory = Vec::new();
+    for name in &names {
+        let fixture = Fixture {
+            name: name.as_bytes().to_vec(),
+            local_extra: extra.clone(),
+            central_extra: extra.clone(),
+            member_comment: vec![b'c'; 6000],
+            local_offset: bytes.len() as u32,
+            ..Fixture::default()
+        }
+        .build();
+        bytes.extend_from_slice(&fixture.bytes[..fixture.central]);
+        directory.extend_from_slice(&fixture.bytes[fixture.central..fixture.end]);
+    }
+    let central = bytes.len();
+    bytes.extend_from_slice(&directory);
+    bytes.extend(end_record(
+        names.len() as u16,
+        central as u32,
+        directory.len() as u32,
+        &[],
+    ));
+
+    let mut source = Observed::new(bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+    assert_eq!(index.entries().len(), names.len());
+    for (entry, name) in index.entries().iter().zip(&names) {
+        assert_eq!(entry.directory().path(), name);
+    }
+
+    // Resolve in reverse order after the directory window has been replaced.
+    // The middle member exceeds both local and directory read-ahead windows.
+    for ordinal in (0..names.len()).rev() {
+        let entry = index
+            .entry(&mut source, ordinal)
+            .await?
+            .ok_or("missing member")?;
+        assert_eq!(entry.directory().path(), names[ordinal]);
+        assert_eq!(entry.directory().size(), 7);
+    }
+    index.validate_all(&mut source).await?;
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn charges_local_metadata_once_after_successful_resolution() -> TestResult {
     let extra = field(0xbeef, &vec![0; 5000]);
     let archive = Fixture {
