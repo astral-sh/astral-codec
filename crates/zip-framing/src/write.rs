@@ -7,10 +7,14 @@ use crate::{
     CompressionMethod, Error, ExtraHeaderId, add,
     constants::{attributes, extra, flags, host, signature, size, version},
     invalid,
-    record::validate_name,
+    record::{Common, validate_name},
 };
 
+// APPNOTE 4.4.2: the high byte identifies the host system for external
+// attributes; the low byte is the ZIP specification version (45 = 4.5).
+// We always emit UNIX mode bits, regardless of the platform running the encoder.
 const VERSION_MADE_BY: u16 = ((host::UNIX as u16) << 8) | version::ZIP64;
+
 // 00:00:00, 1980-01-01 in the DOS date/time format.
 const DEFAULT_TIME: u16 = 0;
 const DEFAULT_DATE: u16 = 0x0021;
@@ -99,17 +103,6 @@ impl<'a> PendingMember<'a> {
             offset,
         })
     }
-
-    fn common(&self, bytes: &mut Vec<u8>, crc: u32) {
-        push16(bytes, version::ZIP64);
-        push16(bytes, flags::UTF8);
-        push16(bytes, self.method as u16);
-        push16(bytes, DEFAULT_TIME);
-        push16(bytes, DEFAULT_DATE);
-        push32(bytes, crc);
-        push32(bytes, u32::MAX);
-        push32(bytes, u32::MAX);
-    }
 }
 
 /// Final member metadata with a consistent method, CRC, and size tuple.
@@ -126,7 +119,7 @@ impl CompletedMember<'_> {
     pub fn local_header(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.header.local_header_size());
         push32(&mut bytes, signature::LOCAL);
-        self.header.common(&mut bytes, self.crc);
+        bytes.extend_from_slice(&self.common().to_bytes());
         push16(&mut bytes, self.header.path.len() as u16);
         push16(
             &mut bytes,
@@ -148,7 +141,7 @@ impl CompletedMember<'_> {
         let mut bytes = Vec::with_capacity(self.header.central_header_size());
         push32(&mut bytes, signature::CENTRAL);
         push16(&mut bytes, VERSION_MADE_BY);
-        self.header.common(&mut bytes, self.crc);
+        bytes.extend_from_slice(&self.common().to_bytes());
         push16(&mut bytes, self.header.path.len() as u16);
         push16(
             &mut bytes,
@@ -185,28 +178,54 @@ impl CompletedMember<'_> {
 
         bytes
     }
+
+    /// Returns a [`Common`] for this completed member's common metadata.
+    fn common(&self) -> Common {
+        Common {
+            version: version::ZIP64,
+            flags: flags::UTF8,
+            method: self.header.method,
+            time: DEFAULT_TIME,
+            date: DEFAULT_DATE,
+            crc: self.crc,
+            compressed: u32::MAX,
+            uncompressed: u32::MAX,
+        }
+    }
 }
 
 /// Serializes the ZIP64 end record, locator, and classic end record.
+///
+/// See [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+/// sections 4.3.14 through 4.3.16 for the record layouts.
 pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
     let position = add(offset, size)?;
     let mut bytes = Vec::with_capacity(size::ZIP64_END + size::ZIP64_LOCATOR + size::END);
+
+    // ZIP64 end of central directory record (APPNOTE 4.3.14): stores the
+    // entry count and central directory size and offset as 64-bit values.
     push32(&mut bytes, signature::ZIP64_END);
+    // The size excludes the 12-byte signature/size prefix (APPNOTE 4.3.14.1).
     push64(&mut bytes, size::ZIP64_END_BODY as u64);
     push16(&mut bytes, VERSION_MADE_BY);
     push16(&mut bytes, version::ZIP64);
-    push32(&mut bytes, 0);
-    push32(&mut bytes, 0);
-    push64(&mut bytes, count);
-    push64(&mut bytes, count);
+    push32(&mut bytes, 0); // This disk.
+    push32(&mut bytes, 0); // Disk containing the central directory.
+    push64(&mut bytes, count); // Entries on this disk.
+    push64(&mut bytes, count); // Total entries.
     push64(&mut bytes, size);
     push64(&mut bytes, offset);
 
+    // ZIP64 end of central directory locator (APPNOTE 4.3.15): points to
+    // the ZIP64 end record above. This single-volume archive uses disk 0.
     push32(&mut bytes, signature::ZIP64_LOCATOR);
     push32(&mut bytes, 0);
     push64(&mut bytes, position);
-    push32(&mut bytes, 1);
+    push32(&mut bytes, 1); // Total disks.
 
+    // End of central directory record (APPNOTE 4.3.16): the required archive
+    // terminator. The maximum count, size, and offset values select the ZIP64
+    // fields above (APPNOTE 4.4.21 through 4.4.24).
     push32(&mut bytes, signature::END);
     push16(&mut bytes, 0);
     push16(&mut bytes, 0);
@@ -214,7 +233,7 @@ pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error>
     push16(&mut bytes, u16::MAX);
     push32(&mut bytes, u32::MAX);
     push32(&mut bytes, u32::MAX);
-    push16(&mut bytes, 0);
+    push16(&mut bytes, 0); // No archive comment.
 
     Ok(bytes)
 }

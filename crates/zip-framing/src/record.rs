@@ -260,6 +260,20 @@ impl Common {
         })
     }
 
+    /// Serializes the common header fields in little-endian order.
+    pub(crate) fn to_bytes(self) -> [u8; size::COMMON] {
+        let mut bytes = [0; size::COMMON];
+        bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
+        bytes[2..4].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[4..6].copy_from_slice(&(self.method as u16).to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.time.to_le_bytes());
+        bytes[8..10].copy_from_slice(&self.date.to_le_bytes());
+        bytes[10..14].copy_from_slice(&self.crc.to_le_bytes());
+        bytes[14..18].copy_from_slice(&self.compressed.to_le_bytes());
+        bytes[18..22].copy_from_slice(&self.uncompressed.to_le_bytes());
+        bytes
+    }
+
     pub(crate) fn descriptor(self) -> bool {
         self.flags & flags::DATA_DESCRIPTOR != 0
     }
@@ -308,24 +322,23 @@ mod tests {
     }
 
     #[test]
-    fn parses_common_header_fields() -> Result<(), Error> {
+    fn parses_and_serializes_common_header_fields() -> Result<(), Error> {
         let bytes = [
             20, 0, 0x0a, 0x08, 8, 0, 0x34, 0x12, 0x78, 0x56, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
             0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
         ];
-        assert_eq!(
-            Common::parse(&bytes, 42)?,
-            Common {
-                version: 20,
-                flags: 0x080a,
-                method: CompressionMethod::Deflate,
-                time: 0x1234,
-                date: 0x5678,
-                crc: 0x4433_2211,
-                compressed: 0x8877_6655,
-                uncompressed: 0xccbb_aa99,
-            }
-        );
+        let common = Common {
+            version: 20,
+            flags: 0x080a,
+            method: CompressionMethod::Deflate,
+            time: 0x1234,
+            date: 0x5678,
+            crc: 0x4433_2211,
+            compressed: 0x8877_6655,
+            uncompressed: 0xccbb_aa99,
+        };
+        assert_eq!(Common::parse(&bytes, 42)?, common);
+        assert_eq!(common.to_bytes(), bytes);
 
         Ok(())
     }
