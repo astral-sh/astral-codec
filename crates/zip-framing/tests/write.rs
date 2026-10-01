@@ -3,7 +3,7 @@ use std::{error::Error, io::Cursor};
 use flate2::Crc;
 use zip_framing::{
     CompressionMethod, Error as FrameError, HostSystem, Index, Limits,
-    write::{EntryKind, MemberHeader, end_records},
+    write::{EntryKind, PendingMember, end_records},
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -31,7 +31,7 @@ fn rejects_invalid_member_headers() {
         ),
     ] {
         assert!(matches!(
-            MemberHeader::new(path, method, kind),
+            PendingMember::new(path, method, kind),
             Err(FrameError::Invalid { position: 0, .. })
         ));
     }
@@ -80,7 +80,7 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
         } else {
             "file"
         };
-        let header = MemberHeader::new(path, method, kind)?;
+        let header = PendingMember::new(path, method, kind)?;
 
         assert!(matches!(
             header.finish(crc, compressed, size, 47),
@@ -97,12 +97,12 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     let mut crc = Crc::new();
     crc.update(payload);
 
-    let header = MemberHeader::new(
+    let header = PendingMember::new(
         "café",
         CompressionMethod::Stored,
         EntryKind::File { executable: false },
     )?;
-    let metadata_size = header.metadata_size();
+    let central_header_size = header.central_header_size();
     let data_offset = header.local_header_size();
     let member = header.finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
     let mut bytes = member.local_header();
@@ -119,7 +119,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     let directory_offset = bytes.len() as u64;
     let central = member.central_header();
     let directory_size = central.len() as u64;
-    assert_eq!(metadata_size, data_offset as u64 + directory_size);
+    assert_eq!(central_header_size, central.len());
     assert_eq!(
         &central[..12],
         b"PK\x01\x02\x2d\x03\x2d\x00\x00\x08\x00\x00"

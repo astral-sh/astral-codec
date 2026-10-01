@@ -10,7 +10,7 @@ use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
     CompressionMethod, Limits,
-    write::{EntryKind, MemberHeader, end_records},
+    write::{EntryKind, PendingMember, end_records},
 };
 
 use crate::payload::CHUNK_SIZE;
@@ -90,7 +90,7 @@ impl<W> ZipEncoder<W> {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
-    fn preflight(&self, header: &MemberHeader<'_>, size: u64) -> Result<(), EncodeError> {
+    fn preflight(&self, metadata_size: u64, size: u64) -> Result<(), EncodeError> {
         if self.finished {
             return Err(EncodeError::Finished);
         }
@@ -102,7 +102,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         )?;
 
         limit(
-            checked_add(self.metadata, header.metadata_size())?,
+            checked_add(self.metadata, metadata_size)?,
             self.limits.metadata_size,
             "metadata bytes",
         )?;
@@ -168,11 +168,12 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
 
     async fn write_member(
         &mut self,
-        header: MemberHeader<'_>,
+        header: PendingMember<'_>,
         payload: &mut FilePayload<'_>,
     ) -> Result<(), BuildFailure<EncodeError>> {
         let size = payload.size();
-        self.preflight(&header, size).map_err(recoverable)?;
+        let metadata_size = header.local_header_size() as u64 + header.central_header_size() as u64;
+        self.preflight(metadata_size, size).map_err(recoverable)?;
 
         let offset = self.position;
         self.write_bytes(&vec![0; header.local_header_size()])
@@ -223,7 +224,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
                 .map_err(poisoned)?;
         }
 
-        let metadata_size = header.metadata_size();
         let member = header
             .finish(crc.sum(), self.position - start, size, offset)
             .map_err(poisoned)?;
@@ -299,7 +299,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         } else {
             options.compression.unwrap_or(self.method)
         };
-        let header = MemberHeader::new(
+        let header = PendingMember::new(
             path,
             method,
             EntryKind::File {
@@ -320,7 +320,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         } else {
             format!("{path}/")
         };
-        let header = MemberHeader::new(&path, CompressionMethod::Stored, EntryKind::Directory)
+        let header = PendingMember::new(&path, CompressionMethod::Stored, EntryKind::Directory)
             .map_err(recoverable)?;
 
         self.write_member(header, &mut FilePayload::from(&b""[..]))
@@ -336,7 +336,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
             return Err(recoverable(EncodeError::InvalidLink));
         }
 
-        let header = MemberHeader::new(path, CompressionMethod::Stored, EntryKind::SymbolicLink)
+        let header = PendingMember::new(path, CompressionMethod::Stored, EntryKind::SymbolicLink)
             .map_err(recoverable)?;
 
         self.write_member(header, &mut FilePayload::from(target.as_bytes()))

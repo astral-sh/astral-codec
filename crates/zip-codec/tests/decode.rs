@@ -16,7 +16,7 @@ use zip_codec::{
 };
 use zip_framing::{
     Error as FrameError,
-    write::{EntryKind, MemberHeader, end_records},
+    write::{EntryKind, PendingMember, end_records},
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -59,7 +59,7 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
 fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut crc = Crc::new();
     crc.update(payload);
-    let member = MemberHeader::new(
+    let member = PendingMember::new(
         "member",
         CompressionMethod::Stored,
         EntryKind::File { executable: false },
@@ -385,7 +385,7 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
         ("concatenated stream", encoded.repeat(2), 7),
         ("invalid stream", vec![0xff; 5], 7),
     ] {
-        let member = MemberHeader::new(
+        let member = PendingMember::new(
             "file",
             CompressionMethod::Deflate,
             EntryKind::File { executable: false },

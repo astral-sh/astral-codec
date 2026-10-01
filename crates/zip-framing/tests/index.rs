@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, HostSystem, Index,
     IndexedEntry, Limits,
-    write::{EntryKind as WriteEntryKind, MemberHeader, end_records},
+    write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
 use support::{Fixture, Observed, Sparse, end_record, field, set16, set32};
@@ -907,7 +907,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 #[tokio::test]
 async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
     let size = u64::from(u32::MAX) + 1;
-    let member = MemberHeader::new(
+    let member = PendingMember::new(
         "file",
         CompressionMethod::Stored,
         WriteEntryKind::File { executable: false },

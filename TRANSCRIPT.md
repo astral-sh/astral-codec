@@ -35,7 +35,7 @@ Compared ownership boundaries with tar-codec and archive-trait contracts.
   extras and cached local metadata are published only after successful checks.
 - The codec owns member projection, decompression, CRC/decoded-size checks,
   lending, draining, and poisoning. Extraction policy stays in `archive-trait`.
-- Serialization uses validated `MemberHeader` and `CompletedMember` states to
+- Serialization uses validated `PendingMember` and `CompletedMember` states to
   emit consistent local/central records. Streaming and I/O belong to the encoder.
 - Cleanup: move buffered reads onto `RecordReader`; return borrowed validated
   filenames and allocate only the directory's retained name. Public APIs and

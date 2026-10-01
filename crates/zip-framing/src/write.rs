@@ -26,14 +26,17 @@ pub enum EntryKind {
     SymbolicLink,
 }
 
-/// Validated metadata for one streaming ZIP64 member.
-pub struct MemberHeader<'a> {
+/// Validated metadata for a ZIP64 member awaiting its final CRC and sizes.
+///
+/// Once the payload's CRC and sizes are known, [`Self::finish`] produces a
+/// [`CompletedMember`] that can serialize the local and central headers.
+pub struct PendingMember<'a> {
     path: &'a str,
     method: CompressionMethod,
     kind: EntryKind,
 }
 
-impl<'a> MemberHeader<'a> {
+impl<'a> PendingMember<'a> {
     /// Checks the path and method before any output is written.
     pub fn new(path: &'a str, method: CompressionMethod, kind: EntryKind) -> Result<Self, Error> {
         if path.is_empty() || path.len() > usize::from(u16::MAX) {
@@ -52,15 +55,6 @@ impl<'a> MemberHeader<'a> {
         Ok(Self { path, method, kind })
     }
 
-    /// Returns total local and central metadata bytes.
-    pub fn metadata_size(&self) -> u64 {
-        (self.local_header_size()
-            + size::CENTRAL
-            + extra::HEADER_SIZE
-            + extra::ZIP64_CENTRAL_SIZE
-            + self.path.len()) as u64
-    }
-
     /// Returns the payload compression method.
     pub fn method(&self) -> CompressionMethod {
         self.method
@@ -69,6 +63,12 @@ impl<'a> MemberHeader<'a> {
     /// Returns the space to reserve for the completed local header.
     pub fn local_header_size(&self) -> usize {
         size::LOCAL + extra::HEADER_SIZE + extra::ZIP64_LOCAL_SIZE + self.path.len()
+    }
+
+    /// Returns the central header size in bytes, including the filename and
+    /// ZIP64 extra field.
+    pub fn central_header_size(&self) -> usize {
+        size::CENTRAL + extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE + self.path.len()
     }
 
     /// Completes metadata after the payload's CRC and sizes are known.
@@ -114,7 +114,7 @@ impl<'a> MemberHeader<'a> {
 
 /// Final member metadata with a consistent method, CRC, and size tuple.
 pub struct CompletedMember<'a> {
-    header: MemberHeader<'a>,
+    header: PendingMember<'a>,
     crc: u32,
     compressed: u64,
     uncompressed: u64,
@@ -145,9 +145,7 @@ impl CompletedMember<'_> {
 
     /// Serializes the matching central-directory header.
     pub fn central_header(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(
-            size::CENTRAL + extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE + self.header.path.len(),
-        );
+        let mut bytes = Vec::with_capacity(self.header.central_header_size());
         push32(&mut bytes, signature::CENTRAL);
         push16(&mut bytes, VERSION_MADE_BY);
         self.header.common(&mut bytes, self.crc);
