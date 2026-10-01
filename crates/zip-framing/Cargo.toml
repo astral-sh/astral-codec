@@ -15,7 +15,12 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt"] }
 
 [dev-dependencies]
+divan = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[bench]]
+name = "framing"
+harness = false
 
 [lints]
 workspace = true
