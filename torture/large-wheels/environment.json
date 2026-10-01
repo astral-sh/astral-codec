@@ -1,0 +1,15 @@
+{
+  "binary_sha256": "37be3ea6c5b174c26820f37547ce50b88bd4bbad3a0b835d6bd7477aaead8b55",
+  "commit": "874cb09cb17e07ee71d1328d18c715b16ebf9822",
+  "max_download_bytes": 1073741824,
+  "platform": "macOS-26.7-arm64-arm-64bit-Mach-O",
+  "python": "3.14.6",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "crates/zip-codec/examples/torture.rs": "d09f3ba5b97285b933a631d01eb6be538718f82c4974355443035f339c075e64",
+    "scripts/torture_wheels.py": "ce984121d14f7251efa7d501418d14ef10c21e6193c532bfa17f5d95de8c300a"
+  },
+  "started_at": "2026-10-01T19:13:17.656724+00:00",
+  "timeout_seconds": 600,
+  "workers": 2
+}

@@ -1,0 +1,17 @@
+{
+  "binary_sha256": "4eaf04e1ea85449ffe0651129096691790ed9c60e8d3111a1f8fec7a749b1f24",
+  "commit": "874cb09cb17e07ee71d1328d18c715b16ebf9822",
+  "manifest_sha256": "4e07cea9fcd8148261868dc2f1d7ca685e94ea91149de1725ce70018830742dd",
+  "max_download_bytes": 1073741824,
+  "platform": "macOS-26.7-arm64-arm-64bit-Mach-O",
+  "python": "3.14.6",
+  "rustc": "rustc 1.98.1 (48a229cea 2026-09-01)",
+  "source_sha256": {
+    "/Users/ww/oss/astral-sh/astral-codec/scripts/torture_policy.py": "7d1c0183dfe750f51350cc377ea07c499afbb2a1a5c5576dd62d8fcd86f4bd48",
+    "crates/zip-codec/examples/torture_policy.rs": "dd6d0e4d1e0a86eef1c2cdd064d2b2be3f2b458559fb019fee45e9455566c060",
+    "scripts/torture_wheels.py": "ce984121d14f7251efa7d501418d14ef10c21e6193c532bfa17f5d95de8c300a"
+  },
+  "started_at": "2026-10-01T19:36:16.958789+00:00",
+  "timeout_seconds": 600,
+  "workers": 4
+}

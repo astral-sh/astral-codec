@@ -1,0 +1,52 @@
+{
+  "audited_at": "2026-10-01T19:56:24.148396+00:00",
+  "candidate_findings": 0,
+  "categories": {
+    "absolute_path": 0,
+    "ambiguous_symlink_target": 0,
+    "backslash_separator": 0,
+    "default_name_rejected": 0,
+    "directory_suffix_on_non_directory": 0,
+    "duplicate_destination": 0,
+    "empty_link_target": 0,
+    "escaping_link_target": 0,
+    "file_directory_conflict": 0,
+    "hardlink": 0,
+    "non_directory_ancestor": 0,
+    "noncanonical_path": 0,
+    "parent_component": 0,
+    "portable_path_collision": 0,
+    "privileged_mode_bits": 0,
+    "root_destination_on_non_directory": 0,
+    "special_member": 0,
+    "symlink": 0,
+    "windows_drive_prefix": 0,
+    "windows_reserved_character": 0,
+    "windows_reserved_name": 0,
+    "windows_trailing_dot_or_space": 0
+  },
+  "checks": {
+    "all_members_inspected": true,
+    "codec_extraction_policy_and_lockfile_unchanged": true,
+    "counts_and_payload_sizes_match_baseline_and_independent_zip_metadata": true,
+    "manifest_binary_and_audit_source_hashes_match": true,
+    "no_extraction_api_invoked": true,
+    "same_962_pinned_wheels_as_baseline": true
+  },
+  "current_policy_findings": 0,
+  "decoded_payload_bytes": 11606083115,
+  "downloaded_bytes": 4726616015,
+  "findings": 0,
+  "kinds": {
+    "directory": 2333,
+    "file": 266704
+  },
+  "members": 269037,
+  "outcomes": {
+    "pass": 962
+  },
+  "sampled_projects": 1000,
+  "scope": "Member metadata and lexical/cross-platform path audit; no filesystem or full symlink graph simulation.",
+  "wheels": 962,
+  "wheels_with_findings": 0
+}

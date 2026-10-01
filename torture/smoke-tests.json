@@ -1,0 +1,22 @@
+[
+  {
+    "case": "stored",
+    "returncode": 0,
+    "stdout": "{\"stage\":\"open\",\"entries\":1,\"declared_bytes\":19000}\n{\"stage\":\"metadata\"}\n{\"stage\":\"complete\",\"members\":1,\"payload_bytes\":19000}\n"
+  },
+  {
+    "case": "deflate",
+    "returncode": 0,
+    "stdout": "{\"stage\":\"open\",\"entries\":1,\"declared_bytes\":19000}\n{\"stage\":\"metadata\"}\n{\"stage\":\"complete\",\"members\":1,\"payload_bytes\":19000}\n"
+  },
+  {
+    "case": "corrupt payload",
+    "returncode": 1,
+    "stderr": "payload 0 \"payload.txt\": at byte 0: invalid ZIP payload: payload CRC mismatch (Integrity { position: 0, reason: \"payload CRC mismatch\" })\n"
+  },
+  {
+    "case": "local name mismatch",
+    "returncode": 1,
+    "stderr": "metadata: at byte 0: invalid ZIP: local and central filenames disagree (Framing(Invalid { position: 0, reason: \"local and central filenames disagree\" }))\n"
+  }
+]
