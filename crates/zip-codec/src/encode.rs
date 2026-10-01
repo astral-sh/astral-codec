@@ -186,7 +186,11 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             CompressionMethod::Deflate => Some(Compress::new(Compression::default(), false)),
             _ => return Err(poisoned(EncodeError::Compression)),
         };
-        let mut output = vec![0; CHUNK_SIZE];
+        let mut output = if compressor.is_some() {
+            vec![0; CHUNK_SIZE]
+        } else {
+            Vec::new()
+        };
         let mut consumed = 0;
 
         while let Some(chunk) = payload.next_chunk().await.map_err(BuildFailure::poisoned)? {

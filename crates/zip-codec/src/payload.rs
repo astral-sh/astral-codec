@@ -42,8 +42,12 @@ impl Payload {
             crc: Crc::new(),
             encoded_remaining: directory.compressed_size(),
             decoded_remaining: directory.size(),
+            input: if decoder.is_some() {
+                vec![0; directory.compressed_size().min(CHUNK_SIZE as u64) as usize]
+            } else {
+                Vec::new()
+            },
             decoder,
-            input: vec![0; CHUNK_SIZE],
             output: Vec::new(),
             consumed: 0,
             available: 0,

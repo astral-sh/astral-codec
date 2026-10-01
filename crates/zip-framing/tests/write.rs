@@ -17,6 +17,11 @@ fn rejects_invalid_member_headers() {
         ("", CompressionMethod::Stored, file),
         (oversized.as_str(), CompressionMethod::Stored, file),
         ("back\\slash", CompressionMethod::Stored, file),
+        ("café\0file", CompressionMethod::Stored, file),
+        ("café\\file", CompressionMethod::Stored, file),
+        ("\u{feff}file", CompressionMethod::Stored, file),
+        ("/file", CompressionMethod::Stored, file),
+        ("C:file", CompressionMethod::Stored, file),
         ("file/", CompressionMethod::Stored, file),
         ("directory", CompressionMethod::Stored, EntryKind::Directory),
         (
