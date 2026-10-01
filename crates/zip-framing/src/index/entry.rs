@@ -8,7 +8,7 @@ use crate::{
     extra::{Extras, ResolvedExtras},
     invalid,
     kind::ExternalAttributes,
-    record::{Common, RecordReader, array_at, bytes_at},
+    record::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at},
 };
 
 use super::Budget;
@@ -22,13 +22,13 @@ struct Metadata {
     common: Common,
     /// The effective compressed size declared by the central directory.
     ///
-    /// If [`Common::compressed`] is `u32::MAX`, this comes from the ZIP64
-    /// extra field; otherwise it is [`Common::compressed`] widened to `u64`.
+    /// If [`Common::compressed`] is [`SizeField::Zip64`], this comes from the
+    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
     compressed_size: u64,
     /// The effective uncompressed size declared by the central directory.
     ///
-    /// If [`Common::uncompressed`] is `u32::MAX`, this comes from the ZIP64
-    /// extra field; otherwise it is [`Common::uncompressed`] widened to `u64`.
+    /// If [`Common::uncompressed`] is [`SizeField::Zip64`], this comes from the
+    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
     size: u64,
     /// An absolute offset to the central directory entry's corresponding
     /// local file entry.
@@ -208,7 +208,12 @@ impl IndexedEntry {
         )?;
         let minimum = add(
             minimum,
-            if directory.metadata.common.descriptor() {
+            if directory
+                .metadata
+                .common
+                .flags
+                .contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
+            {
                 size::DESCRIPTOR as u64
             } else {
                 0
@@ -359,7 +364,7 @@ impl IndexedEntry {
             return Err(invalid(position, "local and central headers disagree"));
         }
 
-        if common.descriptor() {
+        if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
             if common.crc != 0 || sizes.compressed != 0 || sizes.uncompressed != 0 {
                 return Err(invalid(
                     position,
@@ -379,10 +384,10 @@ impl IndexedEntry {
             return Err(invalid(position, "payload overlaps the next record"));
         }
 
-        if common.descriptor() {
+        if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
             let zip64 = sizes.zip64
-                || metadata.common.compressed == u32::MAX
-                || metadata.common.uncompressed == u32::MAX;
+                || metadata.common.compressed == SizeField::Zip64
+                || metadata.common.uncompressed == SizeField::Zip64;
             read_descriptor(reader, metadata, data_end, boundary, zip64).await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));

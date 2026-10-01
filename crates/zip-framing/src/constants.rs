@@ -67,24 +67,6 @@ pub mod extra {
     pub const UNICODE_VERSION: u8 = 1;
 }
 
-/// General-purpose header flag masks (APPNOTE section 4.4.4).
-pub mod flags {
-    /// Member encryption.
-    pub const ENCRYPTED: u16 = 0x0001;
-    /// Compression-level bits for DEFLATE members.
-    pub const DEFLATE_OPTIONS: u16 = 0x0006;
-    /// CRC and sizes follow the payload in a data descriptor.
-    pub const DATA_DESCRIPTOR: u16 = 0x0008;
-    /// Compressed patched data.
-    pub const PATCHED_DATA: u16 = 0x0020;
-    /// Strong encryption.
-    pub const STRONG_ENCRYPTION: u16 = 0x0040;
-    /// UTF-8 filename and comment encoding.
-    pub const UTF8: u16 = 0x0800;
-    /// Local header values are masked for central directory encryption.
-    pub const MASKED_HEADER: u16 = 0x2000;
-}
-
 /// Extraction versions, encoded as major version times ten plus minor version.
 pub mod version {
     /// ZIP 1.0, the baseline extraction version.

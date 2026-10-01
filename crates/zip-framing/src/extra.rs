@@ -6,7 +6,7 @@ use crate::{
     Error,
     constants::extra,
     invalid,
-    record::{Common, bytes_at, parse_name},
+    record::{Common, GeneralPurposeFlags, SizeField, bytes_at, parse_name},
 };
 
 /// An extra-field header identifier (APPNOTE sections 4.5 and 4.6).
@@ -180,8 +180,8 @@ impl<'a> Extras<'a> {
     ) -> Result<Sizes, Error> {
         let local = offset.is_none();
         let mut expected = 0;
-        let uncompressed = common.uncompressed == u32::MAX;
-        let compressed = common.compressed == u32::MAX;
+        let uncompressed = common.uncompressed == SizeField::Zip64;
+        let compressed = common.compressed == SizeField::Zip64;
         if local && uncompressed != compressed {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
@@ -198,21 +198,26 @@ impl<'a> Extras<'a> {
         common.check_zip64(field.is_some(), position)?;
 
         let mut bytes = field.unwrap_or_default();
-        let mut take_size = |small: u32| -> Result<u64, Error> {
-            if small == u32::MAX {
-                let (value, remaining) = bytes
-                    .split_first_chunk::<8>()
-                    .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
-                bytes = remaining;
-                Ok(u64::from_le_bytes(*value))
-            } else {
-                Ok(u64::from(small))
+        let mut take_size = |size: SizeField| -> Result<u64, Error> {
+            match size {
+                SizeField::Value(size) => Ok(u64::from(size)),
+                SizeField::Zip64 => {
+                    let (value, remaining) = bytes
+                        .split_first_chunk::<8>()
+                        .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
+                    bytes = remaining;
+                    Ok(u64::from_le_bytes(*value))
+                }
             }
         };
 
         let uncompressed = take_size(common.uncompressed)?;
         let compressed = take_size(common.compressed)?;
-        let offset = offset.map(&mut take_size).transpose()?.unwrap_or_default();
+        let offset = match offset {
+            Some(u32::MAX) => take_size(SizeField::Zip64)?,
+            Some(offset) => u64::from(offset),
+            None => 0,
+        };
 
         let disk = match disk {
             Some(u16::MAX) => u32::from_le_bytes(bytes_at(bytes, 0, position)?),
@@ -237,7 +242,7 @@ impl<'a> Extras<'a> {
     pub(crate) fn name<'name>(
         &self,
         bytes: &'name [u8],
-        flags: u16,
+        flags: GeneralPurposeFlags,
         position: u64,
     ) -> Result<&'name str, Error> {
         let name = parse_name(bytes, flags, position)?;

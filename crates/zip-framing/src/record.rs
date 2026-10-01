@@ -4,7 +4,7 @@ use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::{
     CompressionMethod, Error, add,
-    constants::{flags, size, version},
+    constants::{size, version},
     invalid,
 };
 
@@ -134,9 +134,13 @@ pub(crate) fn bytes_at<const N: usize>(
         .ok_or_else(|| invalid(position, "truncated integer field"))
 }
 
-pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str, Error> {
+pub(crate) fn parse_name(
+    bytes: &[u8],
+    flags: GeneralPurposeFlags,
+    position: u64,
+) -> Result<&str, Error> {
     let name = str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 filename"))?;
-    if flags & flags::UTF8 == 0 && !name.is_ascii() {
+    if !flags.contains(GeneralPurposeFlags::UTF8) && !name.is_ascii() {
         return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
     }
 
@@ -158,17 +162,117 @@ pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
     Ok(())
 }
 
-/// Common fixed-length components of both local file and central directory entries.
+/// General-purpose header flags (APPNOTE 4.4.4).
 ///
-/// TODO(ww): Do more type-state modeling here, e.g. [`Common::compressed`] should probably
-/// be an enum with `{ Size(size), SeeZip64, SeeDescriptor }` and [`Common::flags`] should probably be
-/// some kind of bitflags enum.
+/// [`Self::parse`] rejects unsupported flags and flags inapplicable to the
+/// compression method.
+/// DEFLATE option bits are preserved for local/central comparison and serialization.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct GeneralPurposeFlags(u16);
+
+impl GeneralPurposeFlags {
+    /// Member encryption (bit 0).
+    const ENCRYPTED: Self = Self(0x0001);
+    /// Compression-level bits for DEFLATE members (bits 1 and 2).
+    const DEFLATE_OPTIONS: Self = Self(0x0006);
+    /// A descriptor follows the payload; local CRC and sizes are placeholders (bit 3).
+    pub(crate) const DATA_DESCRIPTOR: Self = Self(0x0008);
+    /// Compressed patched data (bit 5).
+    const PATCHED_DATA: Self = Self(0x0020);
+    /// Strong encryption (bit 6).
+    const STRONG_ENCRYPTION: Self = Self(0x0040);
+    /// Names and comments are UTF-8 encoded (bit 11).
+    pub(crate) const UTF8: Self = Self(0x0800);
+    /// Local header values are masked for central directory encryption (bit 13).
+    const MASKED_HEADER: Self = Self(0x2000);
+
+    /// Validates the flag bits for the member's compression method.
+    pub(crate) fn parse(
+        bits: u16,
+        method: CompressionMethod,
+        position: u64,
+    ) -> Result<Self, Error> {
+        let flags = Self(bits);
+        if flags.contains(Self::ENCRYPTED)
+            || flags.contains(Self::STRONG_ENCRYPTION)
+            || flags.contains(Self::MASKED_HEADER)
+        {
+            return Err(Error::Unsupported {
+                position,
+                feature: "encryption",
+            });
+        }
+
+        if flags.contains(Self::PATCHED_DATA) {
+            return Err(Error::Unsupported {
+                position,
+                feature: "patched data",
+            });
+        }
+
+        let allowed = Self::UTF8.0
+            | Self::DATA_DESCRIPTOR.0
+            | if method == CompressionMethod::Deflate {
+                Self::DEFLATE_OPTIONS.0
+            } else {
+                0
+            };
+        if bits & !allowed != 0 {
+            return Err(invalid(
+                position,
+                "reserved or inapplicable general-purpose flags",
+            ));
+        }
+
+        Ok(flags)
+    }
+
+    fn bits(self) -> u16 {
+        self.0
+    }
+
+    pub(crate) fn contains(self, flags: Self) -> bool {
+        self.0 & flags.0 == flags.0
+    }
+}
+
+/// A 32-bit payload-size field (APPNOTE 4.4.8, 4.4.9, and 4.5.3).
+///
+/// With a data descriptor, zero sizes in a local header or its ZIP64 extra
+/// field are placeholders. That interpretation belongs to local resolution.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum SizeField {
+    /// A value smaller than `u32::MAX` stored directly in the header.
+    Value(u32),
+    /// The `0xFFFFFFFF` sentinel referring to the ZIP64 extra field.
+    Zip64,
+}
+
+impl From<u32> for SizeField {
+    fn from(value: u32) -> Self {
+        match value {
+            u32::MAX => Self::Zip64,
+            _ => Self::Value(value),
+        }
+    }
+}
+
+impl From<SizeField> for u32 {
+    fn from(value: SizeField) -> Self {
+        match value {
+            SizeField::Value(value) => value,
+            SizeField::Zip64 => u32::MAX,
+        }
+    }
+}
+
+/// Common fixed-length components of both local file and central directory entries.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Common {
     /// The minimum ZIP specification version needed to extract this member.
     pub(crate) version: u16,
     /// The member's general-purpose bit flags.
-    pub(crate) flags: u16,
+    pub(crate) flags: GeneralPurposeFlags,
     /// The member's compression method.
     pub(crate) method: CompressionMethod,
     /// The member's last-modified time, in MS-DOS format.
@@ -184,51 +288,26 @@ pub(crate) struct Common {
     pub(crate) crc: u32,
     /// The member's size in the ZIP modulo any headers and (optional) data descriptor.
     ///
-    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
-    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
-    /// [`Common::flags`] indicates that a data descriptor conveys the compressed size instead.
-    pub(crate) compressed: u32,
+    /// [`SizeField::Zip64`] refers to the corresponding ZIP64 extra field.
+    /// A local descriptor placeholder is resolved when checking the local record.
+    pub(crate) compressed: SizeField,
     /// The member's true (i.e. uncompressed) size.
     ///
-    /// `0xFFFFFFFF` indicates that the corresponding ZIP64 extra field should be consulted instead.
-    /// Note that this field or its ZIP64 equivalent can be `0` in the local file entry if
-    /// [`Common::flags`] indicates that a data descriptor conveys the uncompressed size instead.
-    pub(crate) uncompressed: u32,
+    /// [`SizeField::Zip64`] refers to the corresponding ZIP64 extra field.
+    /// A local descriptor placeholder is resolved when checking the local record.
+    pub(crate) uncompressed: SizeField,
 }
 
 impl Common {
     /// Parse a local file or central directory [`Common`] from the given bytes.
     pub(crate) fn parse(bytes: &[u8; size::COMMON], position: u64) -> Result<Self, Error> {
-        let flags = u16::from_le_bytes(array_at::<2, 2, _>(bytes));
-        if flags & (flags::ENCRYPTED | flags::STRONG_ENCRYPTION | flags::MASKED_HEADER) != 0 {
-            return Err(Error::Unsupported {
-                position,
-                feature: "encryption",
-            });
-        }
-
-        if flags & flags::PATCHED_DATA != 0 {
-            return Err(Error::Unsupported {
-                position,
-                feature: "patched data",
-            });
-        }
-
         let method =
             CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
-        let allowed = flags::UTF8
-            | flags::DATA_DESCRIPTOR
-            | if method == CompressionMethod::Deflate {
-                flags::DEFLATE_OPTIONS
-            } else {
-                0
-            };
-        if flags & !allowed != 0 {
-            return Err(invalid(
-                position,
-                "reserved or inapplicable general-purpose flags",
-            ));
-        }
+        let flags = GeneralPurposeFlags::parse(
+            u16::from_le_bytes(array_at::<2, 2, _>(bytes)),
+            method,
+            position,
+        )?;
 
         let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
         if version > version::ZIP64 {
@@ -255,8 +334,8 @@ impl Common {
             time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
             date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
             crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
-            compressed: u32::from_le_bytes(array_at::<14, 4, _>(bytes)),
-            uncompressed: u32::from_le_bytes(array_at::<18, 4, _>(bytes)),
+            compressed: SizeField::from(u32::from_le_bytes(array_at::<14, 4, _>(bytes))),
+            uncompressed: SizeField::from(u32::from_le_bytes(array_at::<18, 4, _>(bytes))),
         })
     }
 
@@ -264,18 +343,14 @@ impl Common {
     pub(crate) fn to_bytes(self) -> [u8; size::COMMON] {
         let mut bytes = [0; size::COMMON];
         bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
-        bytes[2..4].copy_from_slice(&self.flags.to_le_bytes());
+        bytes[2..4].copy_from_slice(&self.flags.bits().to_le_bytes());
         bytes[4..6].copy_from_slice(&(self.method as u16).to_le_bytes());
         bytes[6..8].copy_from_slice(&self.time.to_le_bytes());
         bytes[8..10].copy_from_slice(&self.date.to_le_bytes());
         bytes[10..14].copy_from_slice(&self.crc.to_le_bytes());
-        bytes[14..18].copy_from_slice(&self.compressed.to_le_bytes());
-        bytes[18..22].copy_from_slice(&self.uncompressed.to_le_bytes());
+        bytes[14..18].copy_from_slice(&u32::from(self.compressed).to_le_bytes());
+        bytes[18..22].copy_from_slice(&u32::from(self.uncompressed).to_le_bytes());
         bytes
-    }
-
-    pub(crate) fn descriptor(self) -> bool {
-        self.flags & flags::DATA_DESCRIPTOR != 0
     }
 
     pub(crate) fn check_zip64(self, zip64: bool, position: u64) -> Result<(), Error> {
@@ -291,7 +366,7 @@ impl Common {
 mod tests {
     use std::io::Cursor;
 
-    use super::{Common, RecordReader, array_at, bytes_at};
+    use super::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at};
     use crate::{CompressionMethod, Error};
 
     #[tokio::test]
@@ -329,13 +404,13 @@ mod tests {
         ];
         let common = Common {
             version: 20,
-            flags: 0x080a,
+            flags: GeneralPurposeFlags::parse(0x080a, CompressionMethod::Deflate, 42)?,
             method: CompressionMethod::Deflate,
             time: 0x1234,
             date: 0x5678,
             crc: 0x4433_2211,
-            compressed: 0x8877_6655,
-            uncompressed: 0xccbb_aa99,
+            compressed: SizeField::Value(0x8877_6655),
+            uncompressed: SizeField::Value(0xccbb_aa99),
         };
         assert_eq!(Common::parse(&bytes, 42)?, common);
         assert_eq!(common.to_bytes(), bytes);

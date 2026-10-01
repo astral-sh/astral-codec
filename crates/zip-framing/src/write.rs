@@ -5,9 +5,9 @@
 
 use crate::{
     CompressionMethod, Error, ExtraHeaderId, add,
-    constants::{attributes, extra, flags, host, signature, size, version},
+    constants::{attributes, extra, host, signature, size, version},
     invalid,
-    record::{Common, validate_name},
+    record::{Common, GeneralPurposeFlags, SizeField, validate_name},
 };
 
 // APPNOTE 4.4.2: the high byte identifies the host system for external
@@ -183,13 +183,13 @@ impl CompletedMember<'_> {
     fn common(&self) -> Common {
         Common {
             version: version::ZIP64,
-            flags: flags::UTF8,
+            flags: GeneralPurposeFlags::UTF8,
             method: self.header.method,
             time: DEFAULT_TIME,
             date: DEFAULT_DATE,
             crc: self.crc,
-            compressed: u32::MAX,
-            uncompressed: u32::MAX,
+            compressed: SizeField::Zip64,
+            uncompressed: SizeField::Zip64,
         }
     }
 }
