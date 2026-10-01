@@ -7,7 +7,7 @@ use crate::{
     CompressionMethod, Error, ExtraHeaderId, add,
     constants::{attributes, extra, flags, host, signature, size, version},
     invalid,
-    record::parse_name,
+    record::validate_name,
 };
 
 const VERSION_MADE_BY: u16 = ((host::UNIX as u16) << 8) | version::ZIP64;
@@ -40,7 +40,7 @@ impl<'a> MemberHeader<'a> {
             return Err(invalid(0, "empty or oversized filename"));
         }
 
-        parse_name(path.as_bytes(), flags::UTF8, 0)?;
+        validate_name(path, 0)?;
         if path.ends_with('/') != matches!(kind, EntryKind::Directory) {
             return Err(invalid(0, "filename suffix disagrees with member kind"));
         }

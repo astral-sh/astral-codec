@@ -47,6 +47,34 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         Ok(bytes)
     }
 
+    /// Borrows a checked span, filling the read-ahead window when necessary.
+    pub(crate) async fn read_slice(
+        &mut self,
+        position: u64,
+        length: usize,
+        end: u64,
+    ) -> Result<&[u8], Error> {
+        let requested_end = add(position, length as u64)?;
+        if requested_end > end {
+            return Err(invalid(position, "record extends beyond its container"));
+        }
+
+        if length == 0 {
+            return Ok(&[]);
+        }
+
+        if position < self.start || requested_end > self.start + self.buffer.len() as u64 {
+            self.inner.seek(SeekFrom::Start(position)).await?;
+            let read_length = (end - position).min(self.capacity.max(length) as u64) as usize;
+            self.buffer.resize(read_length, 0);
+            self.inner.read_exact(&mut self.buffer).await?;
+            self.start = position;
+        }
+
+        let offset = (position - self.start) as usize;
+        Ok(&self.buffer[offset..offset + length])
+    }
+
     // Every read, including read-ahead, is bounded by its containing record span.
     pub(crate) async fn read_at(
         &mut self,
@@ -112,15 +140,22 @@ pub(crate) fn parse_name(bytes: &[u8], flags: u16, position: u64) -> Result<&str
         return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
     }
 
+    validate_name(name, position)?;
+    Ok(name)
+}
+
+pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
+    let bytes = name.as_bytes();
     if name.starts_with('\u{feff}')
-        || name.contains(['\0', '\\'])
+        || bytes.contains(&0)
+        || bytes.contains(&b'\\')
         || name.starts_with('/')
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
     {
         return Err(invalid(position, "invalid ZIP filename"));
     }
 
-    Ok(name)
+    Ok(())
 }
 
 /// Common fixed-length components of both local file and central directory entries.
@@ -246,7 +281,7 @@ mod tests {
     use crate::{CompressionMethod, Error};
 
     #[tokio::test]
-    async fn bounds_owned_reads_before_allocation() -> Result<(), Error> {
+    async fn bounds_reads_before_allocation() -> Result<(), Error> {
         let mut source = Cursor::new([1, 2, 3, 4]);
         let mut reader = RecordReader::new(&mut source, 4);
 
@@ -259,6 +294,15 @@ mod tests {
             })
         ));
         assert_eq!(reader.read_vec(1, 2, 4).await?, [2, 3]);
+
+        assert!(matches!(
+            reader.read_slice(0, usize::MAX, 4).await,
+            Err(Error::Invalid {
+                position: 0,
+                reason: "record extends beyond its container",
+            })
+        ));
+        assert_eq!(reader.read_slice(1, 2, 4).await?, [2, 3]);
 
         Ok(())
     }

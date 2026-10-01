@@ -266,7 +266,7 @@ impl DirectoryEntry {
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
         let variable = reader
-            .read_vec(
+            .read_slice(
                 position + size::CENTRAL as u64,
                 name_length + extra_length + comment_length,
                 end,
@@ -334,7 +334,7 @@ impl IndexedEntry {
         budget.metadata((size::LOCAL + name_length + extra_length) as u64)?;
 
         let variable = reader
-            .read_vec(
+            .read_slice(
                 position + size::LOCAL as u64,
                 name_length + extra_length,
                 boundary,
