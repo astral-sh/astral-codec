@@ -16,7 +16,7 @@ use zip_codec::{
 };
 use zip_framing::{
     Error as FrameError,
-    write::{EntryKind, MemberHeader, end_records},
+    write::{EntryKind, PendingMember, end_records},
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -59,7 +59,7 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
 fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Box<dyn Error>> {
     let mut crc = Crc::new();
     crc.update(payload);
-    let member = MemberHeader::new(
+    let member = PendingMember::new(
         "member",
         CompressionMethod::Stored,
         EntryKind::File { executable: false },
@@ -111,17 +111,14 @@ async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
                     matches!(result, Err(DecodeError::Unsupported { position: 0, feature }) if feature == expected_error)
                 );
                 assert_eq!(
-                    archive.entries()[0]
-                        .resolved()
-                        .ok_or("unresolved entry")?
-                        .kind(),
+                    archive.resolved(0).ok_or("unresolved entry")?.kind(),
                     expected_kind
                 );
             } else {
                 assert!(
                     matches!(result, Err(DecodeError::Framing(FrameError::Invalid { position: 0, reason })) if reason == expected_error)
                 );
-                assert!(archive.entries()[0].resolved().is_none());
+                assert!(archive.resolved(0).is_none());
             }
 
             assert!(matches!(
@@ -146,10 +143,7 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
                 archive.member(0).await.map(|_| ())
             };
             assert_eq!(
-                archive.entries()[0]
-                    .resolved()
-                    .ok_or("unresolved entry")?
-                    .kind(),
+                archive.resolved(0).ok_or("unresolved entry")?.kind(),
                 DecodedEntryKind::SymbolicLink
             );
 
@@ -279,7 +273,7 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
         let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
         assert_eq!(archive.entries().len(), 5);
         assert_eq!(archive.entries()[1].directory().path(), "directory/file");
-        assert!(archive.entries()[1].resolved().is_none());
+        assert!(archive.resolved(1).is_none());
 
         {
             let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
@@ -291,11 +285,11 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
             assert_eq!(chunk, b"h");
         }
 
-        let entry = archive.entries()[1].resolved().ok_or("unresolved entry")?;
+        let entry = archive.resolved(1).ok_or("unresolved entry")?;
         assert_eq!(entry.directory().path(), "directory/file");
         assert_eq!(entry.directory().size(), 140_000);
         assert!(entry.data_offset() > entry.directory().position());
-        assert!(archive.entries()[2].resolved().is_none());
+        assert!(archive.resolved(2).is_none());
 
         // Source access drains the preceding payload and permits explicit
         // prefetching or seeking before the next member restores its cursor.
@@ -333,10 +327,7 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
     for original in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(original)).await?;
         archive.validate_all().await?;
-        let position = archive.entries()[2]
-            .resolved()
-            .ok_or("unresolved entry")?
-            .data_offset() as usize;
+        let position = archive.resolved(2).ok_or("unresolved entry")?.data_offset() as usize;
 
         for operation in ["read", "skip", "drop", "reader", "validate"] {
             let mut bytes = original.to_vec();
@@ -385,7 +376,7 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
         ("concatenated stream", encoded.repeat(2), 7),
         ("invalid stream", vec![0xff; 5], 7),
     ] {
-        let member = MemberHeader::new(
+        let member = PendingMember::new(
             "file",
             CompressionMethod::Deflate,
             EntryKind::File { executable: false },
@@ -588,10 +579,7 @@ async fn validates_empty_deflate_streams_in_directories() -> TestResult {
     ));
     assert!(archive.next_member().await?.is_none());
 
-    let position = archive.entries()[1]
-        .resolved()
-        .ok_or("unresolved entry")?
-        .data_offset() as usize;
+    let position = archive.resolved(1).ok_or("unresolved entry")?.data_offset() as usize;
     let mut corrupt = bytes.to_vec();
     corrupt[position] = 0xff;
 

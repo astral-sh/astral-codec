@@ -1,14 +1,28 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
-//! [`Index::read`] indexes the directory; [`Index::entry`] checks local records
-//! and kind-specific metadata on access. [`Entry::kind`] returns the cached
-//! classification. [`Index::validate_all`] checks all members without decoding payloads.
-//! Filenames and archive/member comments must be UTF-8.
-//! It does not read file contents: consumers must verify decoded sizes and CRCs.
-//! The source must remain unchanged while the index and its payloads are used.
+//! The core API in this crate is [`Index`], which can be built from a ZIP's
+//! central directory and used to access individual members (after reconciling
+//! their central and local states).
+//!
+//! Potentially relevant internals:
+//!
+//! - [`CentralDirectoryEntry`], [`IndexedEntry`], and [`Entry`] represent a refinement
+//!   type hierarchy, i.e. they go from fewest invariants preserved (just parsing
+//!   the central directory entry) to the most invariants preserved (a member whose
+//!   central and local states are fully reconciled).
+//!
+//! - zip-framing enforces that all parsed filenames, UNIX extra-field link targets,
+//!   and archive/per-member comments are UTF-8. This is an intentional limitation.
+//!
+//! - zip-framing does not decode or validate member payloads. It exposes their
+//!   offsets and compressed sizes so consumers can read and decode them,
+//!   then verify their decoded sizes and CRC32s.
+//!
+//! - zip-framing assumes that the ZIP source does not change.
 
 #![forbid(unsafe_code)]
 
+mod budget;
 pub mod constants;
 mod extra;
 mod host;
@@ -21,9 +35,10 @@ use std::io;
 
 use thiserror::Error;
 
-pub use extra::ExtraHeaderId;
+pub use budget::{Budget, BudgetError, Limits};
+pub use extra::{ExtraHeaderId, UnixData};
 pub use host::HostSystem;
-pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
+pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::EntryKind;
 
 /// A supported ZIP compression method.
@@ -50,38 +65,6 @@ impl CompressionMethod {
                 position,
                 feature: "compression method",
             }),
-        }
-    }
-}
-
-/// Budgets applied before indexing or consuming payloads.
-///
-/// Raising these values permits correspondingly more memory, I/O, or CPU work.
-/// Compressed input and decoded output have independent bounds; no compression
-/// ratio heuristic is needed to bound highly compressible files.
-#[derive(Clone, Copy, Debug)]
-pub struct Limits {
-    /// Maximum source length (default: 128 GiB).
-    pub archive_size: u64,
-    /// Maximum number of members (default: 100,000).
-    pub entries: usize,
-    /// Total central directory, resolved local, and ZIP64 end record metadata
-    /// bytes (default: 64 MiB).
-    pub metadata_size: u64,
-    /// Maximum decoded size of one member (default: 8 GiB).
-    pub member_size: u64,
-    /// Maximum sum of decoded member sizes (default: 64 GiB).
-    pub total_size: u64,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            archive_size: 128 * 1024 * 1024 * 1024,
-            entries: 100_000,
-            metadata_size: 64 * 1024 * 1024,
-            member_size: 8 * 1024 * 1024 * 1024,
-            total_size: 64 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -116,6 +99,20 @@ pub enum Error {
         /// Configured maximum.
         limit: u64,
     },
+}
+
+impl From<BudgetError> for Error {
+    fn from(error: BudgetError) -> Self {
+        let (resource, limit) = match error {
+            BudgetError::ArchiveSize(limit) => ("archive bytes", limit),
+            BudgetError::EntryCount(limit) => ("entry count", limit),
+            BudgetError::MetadataSize(limit) => ("metadata bytes", limit),
+            BudgetError::MemberSize(limit) => ("decoded member bytes", limit),
+            BudgetError::TotalSize(limit) => ("total decoded bytes", limit),
+            BudgetError::Overflow(usage) => return invalid(usage, "offset or size overflow"),
+        };
+        Self::Limit { resource, limit }
+    }
 }
 
 pub(crate) fn invalid(position: u64, reason: &'static str) -> Error {

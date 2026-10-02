@@ -10,9 +10,10 @@ use std::{
 
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
-    Archive, ArchiveBuilder, BuildError, CompressionMethod, EntryMetadata, FilePayload, Limits,
-    Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
+    Archive, ArchiveBuilder, BuildError, CompressionMethod, EncodeError, EntryMetadata,
+    FilePayload, Limits, Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
 };
+use zip_framing::write::{EntryKind, PendingMember};
 
 #[cfg(unix)]
 use tokio::fs::File;
@@ -41,7 +42,7 @@ async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> Te
         for length in [0, 1, 131_089, 2 * 1024 * 1024 + 3] {
             let source = source_bytes(length);
             let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-                .compression(method)
+                .with_compression(method)
                 .builder();
             builder.add_directory("directory").await?;
             builder
@@ -97,7 +98,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
         let cases = [
             (
                 "stored",
-                ZipFileOptions::default().compression(CompressionMethod::Stored),
+                ZipFileOptions::default().with_compression(CompressionMethod::Stored),
                 source,
                 CompressionMethod::Stored,
             ),
@@ -109,7 +110,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             ),
             (
                 "deflated",
-                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
                 source,
                 CompressionMethod::Deflate,
             ),
@@ -121,13 +122,13 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             ),
             (
                 "empty",
-                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
                 b"".as_slice(),
                 CompressionMethod::Stored,
             ),
         ];
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-            .compression(default_method)
+            .with_compression(default_method)
             .builder();
 
         for (path, options, contents, _) in cases {
@@ -179,18 +180,27 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
 
     assert!(ZipArchive::open(output).await?.entries().is_empty());
 
+    let header = PendingMember::new(
+        "file",
+        CompressionMethod::Deflate,
+        EntryKind::File { executable: false },
+    )?;
+    let limits = Limits {
+        metadata_size: header.local_header_size() as u64 + header.central_header_size() as u64,
+        ..Limits::default()
+    };
     for limits in [
         Limits {
             member_size: 3,
-            ..Limits::default()
+            ..limits
         },
         Limits {
             total_size: 3,
-            ..Limits::default()
+            ..limits
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-            .limits(limits)
+            .with_limits(limits)
             .builder();
         assert!(matches!(
             builder
@@ -202,6 +212,13 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
         builder
             .add_file("file", &b"ok"[..], EntryMetadata::default())
             .await?;
+        assert!(matches!(
+            builder
+                .add_file("next", &b""[..], EntryMetadata::default())
+                .await,
+            Err(BuildError::Encoder(EncodeError::Limit { resource: "metadata bytes", limit }))
+                if limit == limits.metadata_size
+        ));
         let output = builder.finish_into_inner().await?.into_inner();
 
         assert_eq!(ZipArchive::open(output).await?.entries().len(), 1);

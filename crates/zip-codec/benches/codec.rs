@@ -107,7 +107,7 @@ fn fixture(case: &Case, runtime: &Runtime) -> Fixture {
 
 async fn encode_archive(entries: &[Entry], method: CompressionMethod) -> Vec<u8> {
     let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-        .compression(method)
+        .with_compression(method)
         .builder();
     for entry in entries {
         builder
