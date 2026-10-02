@@ -171,7 +171,16 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
 #[tokio::test]
 async fn reads_python_archives_and_projects_members() -> TestResult {
     for (label, bytes) in FIXTURES {
-        let mut members = ZipArchive::open(Cursor::new(bytes)).await?.members();
+        // Short reads must work across headers, descriptors, and payloads,
+        // including when a DEFLATE input buffer needs more than one read.
+        let mut members = ZipArchive::open(Interruptible {
+            source: Cursor::new(bytes.to_vec()),
+            interrupt: Rc::new(Cell::new(false)),
+            read_bytes: Rc::new(Cell::new(0)),
+            max_read: 3,
+        })
+        .await?
+        .members();
 
         assert!(
             matches!(members.next().await?, Some(Member::Directory { metadata }) if metadata.path == "directory/"),
@@ -407,6 +416,7 @@ struct Interruptible {
     source: Cursor<Vec<u8>>,
     interrupt: Rc<Cell<bool>>,
     read_bytes: Rc<Cell<usize>>,
+    max_read: usize,
 }
 
 impl AsyncRead for Interruptible {
@@ -422,7 +432,7 @@ impl AsyncRead for Interruptible {
         let limit = if self.interrupt.get() {
             2
         } else {
-            buffer.remaining()
+            self.max_read
         };
         let start = self.source.position() as usize;
         let length = limit
@@ -460,6 +470,7 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
             source: Cursor::new(STORED.to_vec()),
             interrupt: interrupt.clone(),
             read_bytes: read_bytes.clone(),
+            max_read: usize::MAX,
         };
         let mut archive = ZipArchive::open(source).await?;
         if operation == "reader" {

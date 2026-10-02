@@ -57,6 +57,141 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 }
 
 #[tokio::test]
+async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
+    // Central ZIP64 values are present only for sentinel fields, in specification
+    // order. Local ZIP64 extras must contain both sizes (APPNOTE 4.5.3).
+    for mask in 1..16 {
+        let mut central_extra = Vec::new();
+        for (bit, value, width) in [(1, 17_u64, 8), (2, 7, 8), (4, 0, 8), (8, 0, 4)] {
+            if mask & bit != 0 {
+                central_extra.extend_from_slice(&value.to_le_bytes()[..width]);
+            }
+        }
+        let mut archive = Fixture {
+            local_extra: if mask & 3 != 0 {
+                field(1, &[17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat())
+            } else {
+                Vec::new()
+            },
+            central_extra: field(1, &central_extra),
+            ..Fixture::default()
+        }
+        .build();
+        set16(&mut archive.bytes, 4, 45);
+        set16(&mut archive.bytes, archive.central + 6, 45);
+        // Different decoded and compressed sizes expose swapped or shifted fields.
+        set16(&mut archive.bytes, 8, 8);
+        set16(&mut archive.bytes, archive.central + 10, 8);
+        set32(&mut archive.bytes, 22, 17);
+        set32(&mut archive.bytes, archive.central + 24, 17);
+        if mask & 3 != 0 {
+            set32(&mut archive.bytes, 18, u32::MAX);
+            set32(&mut archive.bytes, 22, u32::MAX);
+        }
+        for (bit, central) in [(1, 24), (2, 20)] {
+            if mask & bit != 0 {
+                set32(&mut archive.bytes, archive.central + central, u32::MAX);
+            }
+        }
+        if mask & 4 != 0 {
+            set32(&mut archive.bytes, archive.central + 42, u32::MAX);
+        }
+        if mask & 8 != 0 {
+            set16(&mut archive.bytes, archive.central + 34, u16::MAX);
+        }
+
+        let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+        let entry = index.resolved(0).ok_or("unresolved entry")?;
+        assert_eq!(entry.directory().position(), 0);
+        assert_eq!(entry.directory().size(), 17);
+        assert_eq!(entry.directory().compressed_size(), 7);
+        assert_eq!(
+            &archive.bytes[entry.data_offset() as usize..archive.central],
+            b"payload"
+        );
+
+        // A well-formed unknown field cannot substitute for the required ZIP64 field.
+        for position in [0, archive.central] {
+            if position == 0 && mask & 3 == 0 {
+                continue;
+            }
+            let mut bytes = archive.bytes.clone();
+            let extra = position + if position == 0 { 30 } else { 46 } + 4;
+            set16(&mut bytes, extra, 0xcafe);
+            assert!(
+                matches!(
+                    read_validated(&mut Cursor::new(bytes), Limits::default()).await,
+                    Err(FrameError::Invalid {
+                        position: error_position,
+                        reason: "missing or superfluous ZIP64 values",
+                    }) if error_position == position as u64
+                ),
+                "mask={mask}, position={position}"
+            );
+        }
+    }
+
+    for offset in [18, 22] {
+        let mut archive = Fixture {
+            zip64: true,
+            ..Fixture::default()
+        }
+        .build();
+        set32(&mut archive.bytes, offset, 7);
+        assert!(matches!(
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Err(FrameError::Invalid {
+                position: 0,
+                reason: "local ZIP64 must contain both sizes"
+            })
+        ));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn reconciles_each_concrete_zip64_end_field() -> TestResult {
+    let archive = Fixture {
+        zip64: true,
+        ..Fixture::default()
+    }
+    .build();
+    let directory_size = archive.zip64_end.ok_or("missing ZIP64 end")? - archive.central;
+    for (offset, width, expected) in [
+        (4, 2, 0),
+        (6, 2, 0),
+        (8, 2, 1),
+        (10, 2, 1),
+        (12, 4, directory_size as u32),
+        (16, 4, archive.central as u32),
+    ] {
+        // Hold every other classic field at its sentinel. Agreement must be
+        // checked independently even when only one concrete value is present.
+        for (value, valid) in [(expected, true), (expected + 1, false)] {
+            let mut bytes = archive.bytes.clone();
+            bytes[archive.end + 4..archive.end + 20].fill(0xff);
+            bytes[archive.end + offset..archive.end + offset + width]
+                .copy_from_slice(&value.to_le_bytes()[..width]);
+            let result = Index::read(&mut Cursor::new(bytes), Limits::default()).await;
+            if valid {
+                assert_eq!(result?.entries().len(), 1);
+            } else {
+                assert!(
+                    matches!(result, Err(FrameError::Invalid {
+                        position,
+                        reason: "classic and ZIP64 end records disagree",
+                    }) if position == archive.end as u64),
+                    "offset={offset}"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let extra = field(0xcafe, &[0x51; 257]);
     let archive = Fixture {
@@ -461,6 +596,42 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
 }
 
 #[tokio::test]
+async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult {
+    for (method, minimum) in [(0, 10), (8, 20)] {
+        for version in [minimum - 1, minimum, 45, 46, 0x0314] {
+            let mut archive = Fixture::default().build();
+            set16(&mut archive.bytes, 8, method);
+            set16(&mut archive.bytes, archive.central + 10, method);
+            set16(&mut archive.bytes, 4, version);
+            set16(&mut archive.bytes, archive.central + 6, version);
+            let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+            if version < minimum {
+                assert!(matches!(
+                    result,
+                    Err(FrameError::Invalid {
+                        reason: "extraction version is too low",
+                        ..
+                    })
+                ));
+            } else if version > 45 {
+                // Unlike rs-async-zip, we do not discard a nonzero high byte.
+                assert!(matches!(
+                    result,
+                    Err(FrameError::Unsupported {
+                        feature: "extraction version",
+                        ..
+                    })
+                ));
+            } else {
+                result?;
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_unsupported_extras_in_either_header() {
     for (identifier, expected) in [
         (0x0007, "authenticity verification"),
@@ -541,20 +712,64 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         );
     }
 
+    let mut invalid = Vec::new();
     for change in [0, 1, 5] {
         let mut value = unicode.clone();
         value[change] ^= 1;
-        let fixture = Fixture {
-            name: name.to_vec(),
-            central_extra: field(0x7075, &value),
-            ..Fixture::default()
-        };
+        invalid.push(value);
+    }
+    for replacement in [
+        b"\xff".as_slice(),
+        b"\xef\xbb\xbfcaf\xc3\xa9",
+        b"",
+        b"caf\xc3",
+    ] {
+        invalid.push([unicode[..5].to_vec(), replacement.to_vec()].concat());
+    }
+    for value in invalid {
+        for local in [false, true] {
+            let mut fixture = Fixture {
+                name: name.to_vec(),
+                ..Fixture::default()
+            };
+            if local {
+                fixture.local_extra = field(0x7075, &value);
+            } else {
+                fixture.central_extra = field(0x7075, &value);
+            }
+            assert!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                    .await
+                    .is_err(),
+                "Unicode field={value:?}, local={local}"
+            );
+        }
+    }
 
-        assert!(
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                .await
-                .is_err()
+    // A valid Unicode extra is corroborating metadata, not a replacement for
+    // a legacy-encoded name or a missing UTF-8 flag on a non-ASCII name.
+    for original in [b"caf\xe9".as_slice(), name] {
+        let mut crc = Crc::new();
+        crc.update(original);
+        let extra = field(
+            0x7075,
+            &[vec![1], crc.sum().to_le_bytes().to_vec(), name.to_vec()].concat(),
         );
+        let archive = Fixture {
+            name: original.to_vec(),
+            flags: Some(0),
+            local_extra: extra.clone(),
+            central_extra: extra,
+            ..Fixture::default()
+        }
+        .build();
+        assert!(matches!(
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Err(FrameError::Invalid {
+                reason: "non-UTF-8 filename" | "non-ASCII filename without UTF-8 flag",
+                ..
+            })
+        ));
     }
 
     Ok(())
@@ -791,6 +1006,73 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
 }
 
 #[tokio::test]
+async fn bounds_end_record_search_with_short_reads() -> TestResult {
+    for byte in [0, b'a'] {
+        let mut comment = vec![byte; usize::from(u16::MAX)];
+        // A signature whose declared comment does not reach EOF is not another
+        // end record. Place it across a short-read boundary near the real EOCD.
+        comment[1..5].copy_from_slice(b"PK\x05\x06");
+        let mut source = Observed::new(end_record(0, 0, 0, &comment));
+        source.max_read = 3;
+        assert!(
+            read_validated(&mut source, Limits::default())
+                .await?
+                .entries()
+                .is_empty()
+        );
+    }
+
+    // Failed searches must stay within the maximum EOCD + comment span even
+    // when the source is large and every read is short.
+    let mut source = Observed::new(vec![0; 2 * 1024 * 1024]);
+    source.max_read = 3;
+    assert!(matches!(
+        Index::read(&mut source, Limits::default()).await,
+        Err(FrameError::Invalid {
+            reason: "missing end record or trailing bytes",
+            ..
+        })
+    ));
+    assert!(
+        source
+            .reads
+            .iter()
+            .all(|range| range.start >= 2 * 1024 * 1024 - 65_557)
+    );
+    assert_eq!(
+        source
+            .reads
+            .iter()
+            .map(|range| range.end - range.start)
+            .sum::<u64>(),
+        65_557
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_unaccounted_records_inside_the_directory() {
+    let archive = Fixture::default().build();
+    for suffix in [
+        vec![0],
+        // A well-formed digital signature is still outside the supported format.
+        b"PK\x05\x05\x03\x00sig".to_vec(),
+        archive.bytes[archive.central..archive.end].to_vec(),
+    ] {
+        let mut bytes = archive.bytes[..archive.end].to_vec();
+        bytes.extend(suffix);
+        let directory_size = (bytes.len() - archive.central) as u32;
+        bytes.extend(end_record(1, archive.central as u32, directory_size, &[]));
+        assert!(matches!(
+            Index::read(&mut Cursor::new(bytes), Limits::default()).await,
+            Err(FrameError::Invalid { position, reason: "unaccounted directory bytes or digital signature" })
+                if position == archive.end as u64
+        ));
+    }
+}
+
+#[tokio::test]
 async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResult {
     let mut data = vec![0; 12];
     data.extend_from_slice(b"target");
@@ -1023,6 +1305,42 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
     assert_eq!(index.entries()[0].directory().size(), size);
     assert_eq!(index.entries()[0].directory().compressed_size(), size);
     assert!(source.bytes_read < 70_000);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn indexes_zip64_counts_above_the_classic_limit() -> TestResult {
+    let count = u64::from(u16::MAX) + 2;
+    let mut bytes = Vec::new();
+    let mut directory = Vec::new();
+    for ordinal in 0..count {
+        let name = format!("{ordinal}.txt");
+        let member = PendingMember::new(
+            &name,
+            CompressionMethod::Stored,
+            WriteEntryKind::File { executable: false },
+        )?
+        .finish(0, 0, 0, bytes.len() as u64)?;
+        bytes.extend(member.local_header());
+        directory.extend(member.central_header());
+    }
+    let offset = bytes.len() as u64;
+    let size = directory.len() as u64;
+    bytes.extend(directory);
+    bytes.extend(end_records(count, offset, size)?);
+    let mut source = Cursor::new(bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+    assert_eq!(index.entries().len() as u64, count);
+    // Select both sides of the classic sentinel, in reverse directory order.
+    for ordinal in [count - 1, count - 2, count - 3, 0] {
+        let entry = index
+            .entry(&mut source, ordinal as usize)
+            .await?
+            .ok_or("missing entry")?;
+        assert_eq!(entry.directory().path(), format!("{ordinal}.txt"));
+        assert_eq!(entry.directory().size(), 0);
+    }
 
     Ok(())
 }
