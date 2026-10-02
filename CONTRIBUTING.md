@@ -45,7 +45,7 @@ resolves ZIP64 fields, and reads the central directory through a bounded window.
 The index preserves directory order and derives each member's physical boundary
 from sorted local offsets, without fetching local records during opening.
 
-`IndexedEntry` owns a `DirectoryEntry` with declared metadata and tracks the
+`IndexedEntry` owns a `CentralDirectoryEntry` with declared metadata and tracks the
 derived record boundary and cached resolution. `Index::entry` checks a selected
 local header, extras, descriptor, exact record extent, and kind-specific metadata
 before constructing a borrowed `Entry`. The resolved member data is cached only

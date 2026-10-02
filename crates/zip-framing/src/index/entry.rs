@@ -106,14 +106,14 @@ struct ResolvedMember {
 
 /// Metadata retained from a member's central directory entry.
 #[derive(Debug)]
-pub struct DirectoryEntry {
+pub struct CentralDirectoryEntry {
     /// Central directory entry metadata.
     metadata: Metadata,
     /// Raw extra data for the central directory entry.
     extra: Vec<u8>,
 }
 
-impl DirectoryEntry {
+impl CentralDirectoryEntry {
     /// Returns the exact UTF-8 archive path, without filesystem normalization.
     pub fn path(&self) -> &str {
         &self.metadata.path
@@ -233,7 +233,7 @@ impl DirectoryEntry {
 /// through [`Self::resolved`].
 #[derive(Debug)]
 pub struct IndexedEntry {
-    directory: DirectoryEntry,
+    directory: CentralDirectoryEntry,
     /// The exclusive end offset of the span assigned to the local header,
     /// filename, extras, data, and optional data descriptor.
     boundary: u64,
@@ -242,7 +242,7 @@ pub struct IndexedEntry {
 
 impl IndexedEntry {
     /// Returns the member's central directory entry.
-    pub fn directory(&self) -> &DirectoryEntry {
+    pub fn directory(&self) -> &CentralDirectoryEntry {
         &self.directory
     }
 
@@ -262,7 +262,7 @@ impl IndexedEntry {
         })
     }
 
-    pub(super) fn new(directory: DirectoryEntry, boundary: u64) -> Result<Self, Error> {
+    pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(

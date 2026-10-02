@@ -12,7 +12,7 @@ use crate::{
 
 mod entry;
 
-pub use entry::{DirectoryEntry, Entry, IndexedEntry};
+pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
 /// A ZIP member index.
 ///
@@ -356,7 +356,7 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-    ) -> Result<Vec<DirectoryEntry>, Error> {
+    ) -> Result<Vec<CentralDirectoryEntry>, Error> {
         let mut pending_budget = *budget;
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
@@ -382,7 +382,7 @@ impl CentralDirectory {
 
         for _ in 0..self.count {
             let (entry, next) =
-                DirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
+                CentralDirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
             entries.push(entry);
             position = next;
 

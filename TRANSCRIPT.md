@@ -31,8 +31,8 @@ implementations, their integration tests and fixtures, and crate dependencies.
 Compared ownership boundaries with tar-codec and archive-trait contracts.
 
 - Framing owns record bounds, ZIP64 resolution, redundant metadata agreement,
-  and budgets. `DirectoryEntry` remains distinct from checked `Entry`; resolved
-  extras and cached local metadata are published only after successful checks.
+  and budgets. `CentralDirectoryEntry` remains distinct from checked `Entry`;
+  resolved extras and cached local metadata are published only after successful checks.
 - The codec owns member projection, decompression, CRC/decoded-size checks,
   lending, draining, and poisoning. Extraction policy stays in `archive-trait`.
 - Serialization uses validated `PendingMember` and `CompletedMember` states to

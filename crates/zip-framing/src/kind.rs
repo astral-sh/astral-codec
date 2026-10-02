@@ -1,4 +1,4 @@
-use crate::{DirectoryEntry, Error, HostSystem, constants::version, invalid};
+use crate::{CentralDirectoryEntry, Error, HostSystem, constants::version, invalid};
 
 /// A ZIP member's kind, determined from its reconciled metadata.
 ///
@@ -32,7 +32,7 @@ pub enum EntryKind {
 
 impl EntryKind {
     pub(crate) fn resolve(
-        directory: &DirectoryEntry,
+        directory: &CentralDirectoryEntry,
         unix_data: Option<&[u8]>,
         attributes: &ExternalAttributes,
     ) -> Result<Self, Error> {
@@ -160,7 +160,7 @@ impl From<UnixFileType> for u16 {
 
 /// An extracted form of a central directory entry's "external attributes" field.
 ///
-/// See [`DirectoryEntry::external_attributes`].
+/// See [`CentralDirectoryEntry::external_attributes`].
 pub(crate) struct ExternalAttributes {
     /// The UNIX file mode.
     ///

@@ -5,7 +5,7 @@ use std::{error::Error, io::Cursor};
 use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CompressionMethod, DirectoryEntry, EntryKind, Error as FrameError, HostSystem, Index,
+    CentralDirectoryEntry, CompressionMethod, EntryKind, Error as FrameError, HostSystem, Index,
     IndexedEntry, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
@@ -840,7 +840,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let mut index = Index::read(&mut source, Limits::default()).await?;
 
     let entries: &[IndexedEntry] = index.entries();
-    let directory: &DirectoryEntry = entries[0].directory();
+    let directory: &CentralDirectoryEntry = entries[0].directory();
     assert_eq!(directory.path(), "next");
     assert_eq!(
         entries[0].record_range(),

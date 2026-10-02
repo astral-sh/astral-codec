@@ -23,7 +23,7 @@ use thiserror::Error;
 
 pub use extra::ExtraHeaderId;
 pub use host::HostSystem;
-pub use index::{DirectoryEntry, Entry, Index, IndexedEntry};
+pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::EntryKind;
 
 /// A supported ZIP compression method.
