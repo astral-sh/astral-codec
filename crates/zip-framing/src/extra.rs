@@ -219,26 +219,59 @@ impl<'a> Extras<'a> {
             .map(|data| &data[extra::UNIX_PREFIX_SIZE..])
     }
 
-    pub(crate) fn zip64(
-        &self,
-        common: Common,
-        offset: Option<u32>,
-        disk: Option<u16>,
-        position: u64,
-    ) -> Result<Sizes, Error> {
-        let local = offset.is_none();
-        let mut expected = 0;
-        let uncompressed = common.uncompressed == SizeField::Zip64;
-        let compressed = common.compressed == SizeField::Zip64;
-        if local && uncompressed != compressed {
+    pub(crate) fn local_sizes(&self, common: Common, position: u64) -> Result<Sizes, Error> {
+        if (common.uncompressed == SizeField::Zip64) != (common.compressed == SizeField::Zip64) {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
 
-        expected += usize::from(uncompressed) * 8;
-        expected += usize::from(compressed) * 8;
-        expected += usize::from(offset == Some(u32::MAX)) * 8;
-        expected += usize::from(disk == Some(u16::MAX)) * 4;
+        self.zip64_sizes(common, 0, position)
+            .map(|(sizes, _)| sizes)
+    }
 
+    pub(crate) fn central_sizes(
+        &self,
+        common: Common,
+        offset: u32,
+        disk: u16,
+        position: u64,
+    ) -> Result<(Sizes, u64), Error> {
+        let (sizes, bytes) = self.zip64_sizes(
+            common,
+            usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
+            position,
+        )?;
+        let (offset, bytes) = if offset == u32::MAX {
+            let (offset, bytes) = bytes
+                .split_first_chunk::<8>()
+                .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
+            (u64::from_le_bytes(*offset), bytes)
+        } else {
+            (u64::from(offset), bytes)
+        };
+        let disk = if disk == u16::MAX {
+            u32::from_le_bytes(bytes_at(bytes, 0, position)?)
+        } else {
+            u32::from(disk)
+        };
+        if disk != 0 {
+            return Err(Error::Unsupported {
+                position,
+                feature: "multiple volumes",
+            });
+        }
+
+        Ok((sizes, offset))
+    }
+
+    fn zip64_sizes(
+        &self,
+        common: Common,
+        location_size: usize,
+        position: u64,
+    ) -> Result<(Sizes, &[u8]), Error> {
+        let expected = usize::from(common.uncompressed == SizeField::Zip64) * 8
+            + usize::from(common.compressed == SizeField::Zip64) * 8
+            + location_size;
         let field = self.fields.get(&ExtraHeaderId::Zip64).copied();
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
@@ -261,30 +294,14 @@ impl<'a> Extras<'a> {
 
         let uncompressed = take_size(common.uncompressed)?;
         let compressed = take_size(common.compressed)?;
-        let offset = match offset {
-            Some(u32::MAX) => take_size(SizeField::Zip64)?,
-            Some(offset) => u64::from(offset),
-            None => 0,
-        };
-
-        let disk = match disk {
-            Some(u16::MAX) => u32::from_le_bytes(bytes_at(bytes, 0, position)?),
-            Some(disk) => u32::from(disk),
-            None => 0,
-        };
-        if disk != 0 {
-            return Err(Error::Unsupported {
-                position,
-                feature: "multiple volumes",
-            });
-        }
-
-        Ok(Sizes {
-            uncompressed,
-            compressed,
-            offset,
-            zip64: field.is_some(),
-        })
+        Ok((
+            Sizes {
+                uncompressed,
+                compressed,
+                zip64: field.is_some(),
+            },
+            bytes,
+        ))
     }
 
     pub(crate) fn name<'name>(
@@ -380,6 +397,5 @@ fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<
 pub(crate) struct Sizes {
     pub(crate) uncompressed: u64,
     pub(crate) compressed: u64,
-    pub(crate) offset: u64,
     pub(crate) zip64: bool,
 }

@@ -74,6 +74,14 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
             1,
             "directory has file data",
         ),
+        (
+            CompressionMethod::Stored,
+            EntryKind::SymbolicLink,
+            0,
+            0,
+            0,
+            "empty symbolic-link target",
+        ),
     ] {
         let path = if matches!(kind, EntryKind::Directory) {
             "directory/"

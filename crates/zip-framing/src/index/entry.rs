@@ -185,10 +185,10 @@ impl CentralDirectoryEntry {
             .await?;
 
         let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
-        let sizes = extras.zip64(
+        let (sizes, local_offset) = extras.central_sizes(
             common,
-            Some(u32::from_le_bytes(array_at::<42, 4, _>(&header))),
-            Some(u16::from_le_bytes(array_at::<34, 2, _>(&header))),
+            u32::from_le_bytes(array_at::<42, 4, _>(&header)),
+            u16::from_le_bytes(array_at::<34, 2, _>(&header)),
             position,
         )?;
 
@@ -210,7 +210,7 @@ impl CentralDirectoryEntry {
                 common,
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
-                local_offset: sizes.offset,
+                local_offset,
                 made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
                 attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
@@ -315,7 +315,7 @@ impl IndexedEntry {
             .await?;
 
         let extras = Extras::parse(&variable[name_length..], position)?;
-        let sizes = extras.zip64(common, None, None, position)?;
+        let sizes = extras.local_sizes(common, position)?;
         if extras.name(&variable[..name_length], common.flags, position)? != metadata.path {
             return Err(invalid(position, "local and central filenames disagree"));
         }

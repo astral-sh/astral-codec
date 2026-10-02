@@ -9,25 +9,44 @@ use crate::decode::DecodeError;
 pub(crate) const CHUNK_SIZE: usize = 64 * 1024;
 
 pub(crate) struct Payload {
-    position: u64,
-    expected_crc: u32,
-    crc: Crc,
+    integrity: Integrity,
     encoded_remaining: u64,
-    decoded_remaining: u64,
-    decoder: Option<Decompress>,
+    encoding: Encoding,
+}
+
+enum Encoding {
+    Stored,
+    Deflate(Box<DeflateState>),
+}
+
+struct DeflateState {
+    decoder: Decompress,
     input: Vec<u8>,
     output: Vec<u8>,
     consumed: usize,
     available: usize,
+}
+
+struct Integrity {
+    position: u64,
+    expected_crc: u32,
+    crc: Crc,
+    decoded_remaining: u64,
     done: bool,
 }
 
 impl Payload {
     pub(crate) fn new(entry: &Entry<'_>) -> Result<Self, DecodeError> {
         let directory = entry.directory();
-        let decoder = match directory.method() {
-            CompressionMethod::Stored => None,
-            CompressionMethod::Deflate => Some(Decompress::new(false)),
+        let encoding = match directory.method() {
+            CompressionMethod::Stored => Encoding::Stored,
+            CompressionMethod::Deflate => Encoding::Deflate(Box::new(DeflateState {
+                decoder: Decompress::new(false),
+                input: vec![0; directory.compressed_size().min(CHUNK_SIZE as u64) as usize],
+                output: Vec::new(),
+                consumed: 0,
+                available: 0,
+            })),
             _ => {
                 return Err(DecodeError::Unsupported {
                     position: directory.position(),
@@ -37,21 +56,15 @@ impl Payload {
         };
 
         Ok(Self {
-            position: directory.position(),
-            expected_crc: directory.crc32(),
-            crc: Crc::new(),
-            encoded_remaining: directory.compressed_size(),
-            decoded_remaining: directory.size(),
-            input: if decoder.is_some() {
-                vec![0; directory.compressed_size().min(CHUNK_SIZE as u64) as usize]
-            } else {
-                Vec::new()
+            integrity: Integrity {
+                position: directory.position(),
+                expected_crc: directory.crc32(),
+                crc: Crc::new(),
+                decoded_remaining: directory.size(),
+                done: false,
             },
-            decoder,
-            output: Vec::new(),
-            consumed: 0,
-            available: 0,
-            done: false,
+            encoded_remaining: directory.compressed_size(),
+            encoding,
         })
     }
 
@@ -62,107 +75,111 @@ impl Payload {
         target_len: usize,
     ) -> Result<bool, DecodeError> {
         if target_len == 0 {
-            return Err(self.invalid("zero payload chunk target"));
+            return Err(self.integrity.invalid("zero payload chunk target"));
         }
 
-        if self.done {
+        if self.integrity.done {
             return Ok(false);
         }
 
         // Empty ZIP members contain no file data, including when the method
         // field names DEFLATE. No decoder invocation is needed in that case.
-        if self.encoded_remaining == 0 && self.decoded_remaining == 0 && self.available == 0 {
-            self.finish()?;
+        if self.encoded_remaining == 0
+            && self.integrity.decoded_remaining == 0
+            && !matches!(&self.encoding, Encoding::Deflate(state) if state.available != 0)
+        {
+            self.integrity.finish()?;
             return Ok(false);
         }
 
         tokio::task::yield_now().await;
 
         let length = (target_len.min(CHUNK_SIZE) as u64)
-            .min(self.decoded_remaining.saturating_add(1)) as usize;
-        if self.decoder.is_none() {
-            let length = (length as u64).min(self.encoded_remaining) as usize;
-            if length == 0 {
-                return Err(self.invalid("stored payload ended early"));
-            }
-
-            output.resize(length, 0);
-            reader.read_exact(output).await?;
-
-            self.encoded_remaining -= length as u64;
-            self.account(output)?;
-            if self.encoded_remaining == 0 {
-                self.finish()?;
-            }
-
-            return Ok(true);
-        }
-
-        loop {
-            if self.consumed == self.available && self.encoded_remaining != 0 {
-                let length = self.encoded_remaining.min(CHUNK_SIZE as u64) as usize;
-                reader.read_exact(&mut self.input[..length]).await?;
-                self.encoded_remaining -= length as u64;
-                self.consumed = 0;
-                self.available = length;
-            }
-
-            // Use a separate output buffer until nonempty output is available,
-            // preserving MemberPayload's buffer contract on a successful EOF.
-            let mut decoded = mem::take(&mut self.output);
-            decoded.resize(length, 0);
-
-            let Some(decoder) = &mut self.decoder else {
-                return Err(self.invalid("missing DEFLATE state"));
-            };
-
-            let before_input = decoder.total_in();
-            let before_output = decoder.total_out();
-            let status = decoder
-                .decompress(
-                    &self.input[self.consumed..self.available],
-                    &mut decoded,
-                    FlushDecompress::None,
-                )
-                .map_err(|_| DecodeError::Integrity {
-                    position: self.position,
-                    reason: "invalid DEFLATE stream",
-                })?;
-
-            let consumed = (decoder.total_in() - before_input) as usize;
-            let produced = (decoder.total_out() - before_output) as usize;
-            self.consumed += consumed;
-            decoded.truncate(produced);
-            self.account(&decoded)?;
-
-            if status == Status::StreamEnd {
-                if self.encoded_remaining != 0 || self.consumed != self.available {
-                    return Err(self.invalid("trailing bytes after DEFLATE stream"));
+            .min(self.integrity.decoded_remaining.saturating_add(1)) as usize;
+        match &mut self.encoding {
+            Encoding::Stored => {
+                let length = (length as u64).min(self.encoded_remaining) as usize;
+                if length == 0 {
+                    return Err(self.integrity.invalid("stored payload ended early"));
                 }
 
-                self.finish()?;
-            } else if consumed == 0 && produced == 0 {
-                return Err(self.invalid("truncated or stalled DEFLATE stream"));
+                output.resize(length, 0);
+                reader.read_exact(output).await?;
+
+                self.encoded_remaining -= length as u64;
+                self.integrity.account(output)?;
+                if self.encoded_remaining == 0 {
+                    self.integrity.finish()?;
+                }
+
+                Ok(true)
             }
+            Encoding::Deflate(state) => loop {
+                if state.consumed == state.available && self.encoded_remaining != 0 {
+                    let length = self.encoded_remaining.min(CHUNK_SIZE as u64) as usize;
+                    reader.read_exact(&mut state.input[..length]).await?;
+                    self.encoded_remaining -= length as u64;
+                    state.consumed = 0;
+                    state.available = length;
+                }
 
-            if produced != 0 {
-                mem::swap(output, &mut decoded);
-                self.output = decoded;
+                // Use a separate output buffer until nonempty output is available,
+                // preserving MemberPayload's buffer contract on a successful EOF.
+                let mut decoded = mem::take(&mut state.output);
+                decoded.resize(length, 0);
 
-                return Ok(true);
-            }
+                let before_input = state.decoder.total_in();
+                let before_output = state.decoder.total_out();
+                let status = state
+                    .decoder
+                    .decompress(
+                        &state.input[state.consumed..state.available],
+                        &mut decoded,
+                        FlushDecompress::None,
+                    )
+                    .map_err(|_| self.integrity.invalid("invalid DEFLATE stream"))?;
 
-            self.output = decoded;
-            if self.done {
-                return Ok(false);
-            }
+                let consumed = (state.decoder.total_in() - before_input) as usize;
+                let produced = (state.decoder.total_out() - before_output) as usize;
+                state.consumed += consumed;
+                decoded.truncate(produced);
+                self.integrity.account(&decoded)?;
 
-            // A hostile stream can consume many empty blocks without emitting
-            // output. Bound each decoder call and give the executor a turn.
-            tokio::task::yield_now().await;
+                if status == Status::StreamEnd {
+                    if self.encoded_remaining != 0 || state.consumed != state.available {
+                        return Err(self
+                            .integrity
+                            .invalid("trailing bytes after DEFLATE stream"));
+                    }
+
+                    self.integrity.finish()?;
+                } else if consumed == 0 && produced == 0 {
+                    return Err(self
+                        .integrity
+                        .invalid("truncated or stalled DEFLATE stream"));
+                }
+
+                if produced != 0 {
+                    mem::swap(output, &mut decoded);
+                    state.output = decoded;
+
+                    return Ok(true);
+                }
+
+                state.output = decoded;
+                if self.integrity.done {
+                    return Ok(false);
+                }
+
+                // A hostile stream can consume many empty blocks without emitting
+                // output. Bound each decoder call and give the executor a turn.
+                tokio::task::yield_now().await;
+            },
         }
     }
+}
 
+impl Integrity {
     fn account(&mut self, bytes: &[u8]) -> Result<(), DecodeError> {
         self.decoded_remaining = self
             .decoded_remaining

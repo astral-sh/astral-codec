@@ -96,6 +96,10 @@ impl<'a> PendingMember<'a> {
             return Err(invalid(offset, "directory has file data"));
         }
 
+        if matches!(self.kind, EntryKind::SymbolicLink) && uncompressed == 0 {
+            return Err(invalid(offset, "empty symbolic-link target"));
+        }
+
         Ok(CompletedMember {
             header: self,
             crc,
