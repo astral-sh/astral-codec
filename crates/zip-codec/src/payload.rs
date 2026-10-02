@@ -27,6 +27,18 @@ struct DeflateState {
     available: usize,
 }
 
+impl DeflateState {
+    fn new(compressed_size: u64) -> Self {
+        Self {
+            decoder: Decompress::new(false),
+            input: vec![0; compressed_size.min(CHUNK_SIZE as u64) as usize],
+            output: Vec::new(),
+            consumed: 0,
+            available: 0,
+        }
+    }
+}
+
 struct Integrity {
     position: u64,
     expected_crc: u32,
@@ -40,13 +52,9 @@ impl Payload {
         let directory = entry.directory();
         let encoding = match directory.method() {
             CompressionMethod::Stored => Encoding::Stored,
-            CompressionMethod::Deflate => Encoding::Deflate(Box::new(DeflateState {
-                decoder: Decompress::new(false),
-                input: vec![0; directory.compressed_size().min(CHUNK_SIZE as u64) as usize],
-                output: Vec::new(),
-                consumed: 0,
-                available: 0,
-            })),
+            CompressionMethod::Deflate => {
+                Encoding::Deflate(Box::new(DeflateState::new(directory.compressed_size())))
+            }
             _ => {
                 return Err(DecodeError::Unsupported {
                     position: directory.position(),
