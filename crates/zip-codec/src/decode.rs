@@ -85,7 +85,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         let member = operation.state.prepare_member(index).await?;
         operation.commit();
 
-        Ok(member.map(|member| attach_payload(member, self)))
+        Ok(member.map(|member| self.attach_payload(member)))
     }
 
     /// Checks metadata for all members, including those never selected.
@@ -116,6 +116,36 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// Returns the source without validating any remaining payloads.
     pub fn into_inner(self) -> R {
         self.state.reader
+    }
+
+    fn attach_payload(&mut self, member: Member<()>) -> Member<ZipMemberPayload<'_, R>> {
+        match member {
+            Member::File {
+                metadata,
+                size,
+                executable,
+                ..
+            } => Member::File {
+                metadata,
+                size,
+                executable,
+                payload: ZipMemberPayload { archive: self },
+            },
+            Member::HardLink {
+                metadata,
+                target,
+                size,
+                ..
+            } => Member::HardLink {
+                metadata,
+                target,
+                size,
+                payload: ZipMemberPayload { archive: self },
+            },
+            Member::Directory { metadata } => Member::Directory { metadata },
+            Member::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
+            Member::Special { metadata, kind } => Member::Special { metadata, kind },
+        }
     }
 
     fn begin_operation(&mut self) -> Result<Operation<'_, R>, DecodeError> {
@@ -289,39 +319,6 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
         operation.commit();
 
         Ok(())
-    }
-}
-
-fn attach_payload<R>(
-    member: Member<()>,
-    archive: &mut ZipArchive<R>,
-) -> Member<ZipMemberPayload<'_, R>> {
-    match member {
-        Member::File {
-            metadata,
-            size,
-            executable,
-            ..
-        } => Member::File {
-            metadata,
-            size,
-            executable,
-            payload: ZipMemberPayload { archive },
-        },
-        Member::HardLink {
-            metadata,
-            target,
-            size,
-            ..
-        } => Member::HardLink {
-            metadata,
-            target,
-            size,
-            payload: ZipMemberPayload { archive },
-        },
-        Member::Directory { metadata } => Member::Directory { metadata },
-        Member::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
-        Member::Special { metadata, kind } => Member::Special { metadata, kind },
     }
 }
 
