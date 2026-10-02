@@ -22,6 +22,7 @@
 
 #![forbid(unsafe_code)]
 
+mod budget;
 pub mod constants;
 mod extra;
 mod host;
@@ -34,6 +35,7 @@ use std::io;
 
 use thiserror::Error;
 
+pub use budget::{Budget, BudgetError, Limits};
 pub use extra::{ExtraHeaderId, UnixData};
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
@@ -63,38 +65,6 @@ impl CompressionMethod {
                 position,
                 feature: "compression method",
             }),
-        }
-    }
-}
-
-/// Budgets applied before indexing or consuming payloads.
-///
-/// Raising these values permits correspondingly more memory, I/O, or CPU work.
-/// Compressed input and decoded output have independent bounds; no compression
-/// ratio heuristic is needed to bound highly compressible files.
-#[derive(Clone, Copy, Debug)]
-pub struct Limits {
-    /// Maximum source length (default: 128 GiB).
-    pub archive_size: u64,
-    /// Maximum number of members (default: 100,000).
-    pub entries: usize,
-    /// Total central directory, resolved local, and ZIP64 end record metadata
-    /// bytes (default: 64 MiB).
-    pub metadata_size: u64,
-    /// Maximum decoded size of one member (default: 8 GiB).
-    pub member_size: u64,
-    /// Maximum sum of decoded member sizes (default: 64 GiB).
-    pub total_size: u64,
-}
-
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            archive_size: 128 * 1024 * 1024 * 1024,
-            entries: 100_000,
-            metadata_size: 64 * 1024 * 1024,
-            member_size: 8 * 1024 * 1024 * 1024,
-            total_size: 64 * 1024 * 1024 * 1024,
         }
     }
 }
@@ -129,6 +99,20 @@ pub enum Error {
         /// Configured maximum.
         limit: u64,
     },
+}
+
+impl From<BudgetError> for Error {
+    fn from(error: BudgetError) -> Self {
+        let (resource, limit) = match error {
+            BudgetError::ArchiveSize(limit) => ("archive bytes", limit),
+            BudgetError::EntryCount(limit) => ("entry count", limit),
+            BudgetError::MetadataSize(limit) => ("metadata bytes", limit),
+            BudgetError::MemberSize(limit) => ("decoded member bytes", limit),
+            BudgetError::TotalSize(limit) => ("total decoded bytes", limit),
+            BudgetError::Overflow(usage) => return invalid(usage, "offset or size overflow"),
+        };
+        Self::Limit { resource, limit }
+    }
 }
 
 pub(crate) fn invalid(position: u64, reason: &'static str) -> Error {

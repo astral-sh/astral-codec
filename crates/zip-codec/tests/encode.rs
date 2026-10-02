@@ -10,9 +10,10 @@ use std::{
 
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
-    Archive, ArchiveBuilder, BuildError, CompressionMethod, EntryMetadata, FilePayload, Limits,
-    Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
+    Archive, ArchiveBuilder, BuildError, CompressionMethod, EncodeError, EntryMetadata,
+    FilePayload, Limits, Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
 };
+use zip_framing::write::{EntryKind, PendingMember};
 
 #[cfg(unix)]
 use tokio::fs::File;
@@ -179,14 +180,23 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
 
     assert!(ZipArchive::open(output).await?.entries().is_empty());
 
+    let header = PendingMember::new(
+        "file",
+        CompressionMethod::Deflate,
+        EntryKind::File { executable: false },
+    )?;
+    let limits = Limits {
+        metadata_size: header.local_header_size() as u64 + header.central_header_size() as u64,
+        ..Limits::default()
+    };
     for limits in [
         Limits {
             member_size: 3,
-            ..Limits::default()
+            ..limits
         },
         Limits {
             total_size: 3,
-            ..Limits::default()
+            ..limits
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
@@ -202,6 +212,13 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
         builder
             .add_file("file", &b"ok"[..], EntryMetadata::default())
             .await?;
+        assert!(matches!(
+            builder
+                .add_file("next", &b""[..], EntryMetadata::default())
+                .await,
+            Err(BuildError::Encoder(EncodeError::Limit { resource: "metadata bytes", limit }))
+                if limit == limits.metadata_size
+        ));
         let output = builder.finish_into_inner().await?.into_inner();
 
         assert_eq!(ZipArchive::open(output).await?.entries().len(), 1);

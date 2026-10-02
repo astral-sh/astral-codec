@@ -60,7 +60,9 @@ budgets are charged once per successful resolution.
 Parsing constructors own their resource checks. Callers must not need separate
 validation or budget calls to make a returned value usable. Check limits before
 allocating variable-size metadata and commit usage only after successful
-construction.
+construction. The index and encoder share `zip-framing::Budget` for limit checks
+and cumulative metadata and uncompressed-size accounting. Both charge a pending
+copy and commit it after the operation succeeds.
 
 `zip-codec` resolves entries before projecting them into `archive-trait` members.
 It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,

@@ -9,7 +9,7 @@ use flate2::{Compress, Compression, Crc, FlushCompress, Status};
 use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
-    CompressionMethod, Limits,
+    Budget, BudgetError, CompressionMethod, Limits,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -41,11 +41,9 @@ impl ZipFileOptions {
 pub struct ZipEncoder<W> {
     writer: W,
     method: CompressionMethod,
-    limits: Limits,
+    budget: Budget,
     position: u64,
     count: usize,
-    metadata: u64,
-    total_size: u64,
     directory: Vec<u8>,
     finished: bool,
 }
@@ -56,11 +54,9 @@ impl<W> ZipEncoder<W> {
         Self {
             writer,
             method: CompressionMethod::Deflate,
-            limits: Limits::default(),
+            budget: Budget::new(Limits::default()),
             position: 0,
             count: 0,
-            metadata: 0,
-            total_size: 0,
             directory: Vec::new(),
             finished: false,
         }
@@ -76,7 +72,7 @@ impl<W> ZipEncoder<W> {
 
     /// Sets archive, member, metadata, entry-count, and total-input budgets.
     pub fn limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
+        self.budget.set_limits(limits);
         self
     }
 
@@ -90,36 +86,53 @@ impl<W> ZipEncoder<W> {
 }
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
-    fn preflight(&self, metadata_size: u64, size: u64) -> Result<(), EncodeError> {
+    fn prepare_member<'a>(
+        &self,
+        path: &'a str,
+        method: CompressionMethod,
+        kind: EntryKind,
+        size: u64,
+    ) -> Result<(PendingMember<'a>, Budget), EncodeError> {
+        let header = PendingMember::new(path, method, kind)?;
         if self.finished {
             return Err(EncodeError::Finished);
         }
 
-        limit(
-            self.count as u64 + 1,
-            self.limits.entries as u64,
-            "entry count",
+        let mut pending_budget = self.budget;
+        pending_budget.check_entry_count(self.count as u64 + 1)?;
+        pending_budget.charge_metadata(
+            header.local_header_size() as u64 + header.central_header_size() as u64,
         )?;
+        pending_budget.charge_member(size)?;
 
-        limit(
-            checked_add(self.metadata, metadata_size)?,
-            self.limits.metadata_size,
-            "metadata bytes",
-        )?;
+        Ok((header, pending_budget))
+    }
 
-        limit(size, self.limits.member_size, "member bytes")?;
-        limit(
-            checked_add(self.total_size, size)?,
-            self.limits.total_size,
-            "total member bytes",
-        )?;
+    async fn add_member(
+        &mut self,
+        path: &str,
+        method: CompressionMethod,
+        kind: EntryKind,
+        payload: &mut FilePayload<'_>,
+    ) -> Result<(), BuildFailure<EncodeError>> {
+        let (header, pending_budget) = self
+            .prepare_member(path, method, kind, payload.size())
+            .map_err(BuildFailure::recoverable)?;
+
+        self.write_member(header, payload)
+            .await
+            .map_err(BuildFailure::poisoned)?;
+        self.budget = pending_budget;
 
         Ok(())
     }
 
     async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
-        let end = checked_add(self.position, bytes.len() as u64)?;
-        limit(end, self.limits.archive_size, "archive bytes")?;
+        let end = self
+            .position
+            .checked_add(bytes.len() as u64)
+            .ok_or(EncodeError::Overflow)?;
+        self.budget.check_archive_size(end)?;
 
         self.writer.write_all(bytes).await?;
         self.position = end;
@@ -170,44 +183,41 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         &mut self,
         header: PendingMember<'_>,
         payload: &mut FilePayload<'_>,
-    ) -> Result<(), BuildFailure<EncodeError>> {
+    ) -> Result<(), BuildError<EncodeError>> {
         let size = payload.size();
-        let metadata_size = header.local_header_size() as u64 + header.central_header_size() as u64;
-        self.preflight(metadata_size, size).map_err(recoverable)?;
-
         let offset = self.position;
         self.write_bytes(&vec![0; header.local_header_size()])
-            .await
-            .map_err(poisoned)?;
+            .await?;
 
         let start = self.position;
         let mut crc = Crc::new();
         let mut compressor = match header.method() {
             CompressionMethod::Stored => None,
             CompressionMethod::Deflate => Some(Compress::new(Compression::default(), false)),
-            _ => return Err(poisoned(EncodeError::Compression)),
+            _ => return Err(EncodeError::Compression.into()),
         };
         let mut output = if compressor.is_some() {
             vec![0; CHUNK_SIZE]
         } else {
             Vec::new()
         };
-        let mut consumed = 0;
+        let mut consumed = 0_u64;
 
-        while let Some(chunk) = payload.next_chunk().await.map_err(BuildFailure::poisoned)? {
-            consumed = checked_add(consumed, chunk.len() as u64).map_err(poisoned)?;
+        while let Some(chunk) = payload.next_chunk().await? {
+            consumed = consumed
+                .checked_add(chunk.len() as u64)
+                .ok_or(EncodeError::Overflow)?;
             if consumed > size {
-                return Err(poisoned(EncodeError::SizeMismatch));
+                return Err(EncodeError::SizeMismatch.into());
             }
 
             for chunk in chunk.chunks(CHUNK_SIZE) {
                 crc.update(chunk);
                 if let Some(compressor) = &mut compressor {
                     self.compress_chunk(compressor, chunk, false, &mut output)
-                        .await
-                        .map_err(poisoned)?;
+                        .await?;
                 } else {
-                    self.write_bytes(chunk).await.map_err(poisoned)?;
+                    self.write_bytes(chunk).await?;
                 }
 
                 tokio::task::yield_now().await;
@@ -215,37 +225,66 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         }
 
         if consumed != size {
-            return Err(poisoned(EncodeError::SizeMismatch));
+            return Err(EncodeError::SizeMismatch.into());
         }
 
         if let Some(compressor) = &mut compressor {
             self.compress_chunk(compressor, &[], true, &mut output)
-                .await
-                .map_err(poisoned)?;
+                .await?;
         }
 
         let member = header
             .finish(crc.sum(), self.position - start, size, offset)
-            .map_err(poisoned)?;
+            .map_err(EncodeError::Framing)?;
 
         // Rewriting the reserved header does not advance the archive's end.
         self.writer
             .seek(SeekFrom::Start(offset))
             .await
-            .map_err(poisoned)?;
+            .map_err(EncodeError::Io)?;
         self.writer
             .write_all(&member.local_header())
             .await
-            .map_err(poisoned)?;
+            .map_err(EncodeError::Io)?;
         self.writer
             .seek(SeekFrom::Start(self.position))
             .await
-            .map_err(poisoned)?;
+            .map_err(EncodeError::Io)?;
 
         self.directory.extend_from_slice(&member.central_header());
         self.count += 1;
-        self.metadata += metadata_size;
-        self.total_size += size;
+
+        Ok(())
+    }
+
+    fn prepare_end(&self) -> Result<(Vec<u8>, u64), EncodeError> {
+        if self.finished {
+            return Err(EncodeError::Finished);
+        }
+
+        let end = end_records(
+            self.count as u64,
+            self.position,
+            self.directory.len() as u64,
+        )?;
+
+        let position = self
+            .position
+            .checked_add(self.directory.len() as u64)
+            .and_then(|position| position.checked_add(end.len() as u64))
+            .ok_or(EncodeError::Overflow)?;
+        self.budget.check_archive_size(position)?;
+
+        Ok((end, position))
+    }
+
+    async fn write_end(&mut self, end: &[u8], position: u64) -> Result<(), EncodeError> {
+        self.writer.write_all(&self.directory).await?;
+        self.writer.write_all(end).await?;
+        self.writer.flush().await?;
+
+        self.position = position;
+        self.finished = true;
 
         Ok(())
     }
@@ -256,35 +295,11 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type FileOptions = ZipFileOptions;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
-        if self.finished {
-            return Err(recoverable(EncodeError::Finished));
-        }
+        let (end, position) = self.prepare_end().map_err(BuildFailure::recoverable)?;
 
-        let end = end_records(
-            self.count as u64,
-            self.position,
-            self.directory.len() as u64,
-        )
-        .map_err(recoverable)?;
-
-        let position = checked_add(self.position, self.directory.len() as u64)
-            .and_then(|position| checked_add(position, end.len() as u64))
-            .map_err(recoverable)?;
-        limit(position, self.limits.archive_size, "archive bytes").map_err(recoverable)?;
-
-        self.writer
-            .write_all(&self.directory)
+        self.write_end(&end, position)
             .await
-            .map_err(poisoned)?;
-
-        self.writer.write_all(&end).await.map_err(poisoned)?;
-
-        self.writer.flush().await.map_err(poisoned)?;
-
-        self.position = position;
-        self.finished = true;
-
-        Ok(())
+            .map_err(BuildFailure::poisoned)
     }
 
     async fn write_file_member(
@@ -299,16 +314,15 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         } else {
             options.compression.unwrap_or(self.method)
         };
-        let header = PendingMember::new(
+        self.add_member(
             path,
             method,
             EntryKind::File {
                 executable: metadata.is_executable(),
             },
+            payload,
         )
-        .map_err(recoverable)?;
-
-        self.write_member(header, payload).await
+        .await
     }
 
     async fn write_directory_member(
@@ -320,11 +334,13 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         } else {
             format!("{path}/")
         };
-        let header = PendingMember::new(&path, CompressionMethod::Stored, EntryKind::Directory)
-            .map_err(recoverable)?;
-
-        self.write_member(header, &mut FilePayload::from(&b""[..]))
-            .await
+        self.add_member(
+            &path,
+            CompressionMethod::Stored,
+            EntryKind::Directory,
+            &mut FilePayload::from(&b""[..]),
+        )
+        .await
     }
 
     async fn write_symbolic_link_member(
@@ -333,35 +349,17 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         target: &str,
     ) -> Result<(), BuildFailure<Self::Error>> {
         if target.is_empty() || target.len() > usize::from(u16::MAX) || target.contains('\0') {
-            return Err(recoverable(EncodeError::InvalidLink));
+            return Err(BuildFailure::recoverable(EncodeError::InvalidLink));
         }
 
-        let header = PendingMember::new(path, CompressionMethod::Stored, EntryKind::SymbolicLink)
-            .map_err(recoverable)?;
-
-        self.write_member(header, &mut FilePayload::from(target.as_bytes()))
-            .await
+        self.add_member(
+            path,
+            CompressionMethod::Stored,
+            EntryKind::SymbolicLink,
+            &mut FilePayload::from(target.as_bytes()),
+        )
+        .await
     }
-}
-
-fn checked_add(left: u64, right: u64) -> Result<u64, EncodeError> {
-    left.checked_add(right).ok_or(EncodeError::Overflow)
-}
-
-fn limit(value: u64, limit: u64, resource: &'static str) -> Result<(), EncodeError> {
-    if value > limit {
-        return Err(EncodeError::Limit { resource, limit });
-    }
-
-    Ok(())
-}
-
-fn recoverable(error: impl Into<EncodeError>) -> BuildFailure<EncodeError> {
-    BuildFailure::recoverable(BuildError::Encoder(error.into()))
-}
-
-fn poisoned(error: impl Into<EncodeError>) -> BuildFailure<EncodeError> {
-    BuildFailure::poisoned(BuildError::Encoder(error.into()))
 }
 
 /// A failure while encoding ZIP records or payloads.
@@ -396,4 +394,24 @@ pub enum EncodeError {
     /// The writer has already emitted its directory and terminators.
     #[error("ZIP writer is already finalized")]
     Finished,
+}
+
+impl From<EncodeError> for BuildError<EncodeError> {
+    fn from(error: EncodeError) -> Self {
+        Self::Encoder(error)
+    }
+}
+
+impl From<BudgetError> for EncodeError {
+    fn from(error: BudgetError) -> Self {
+        let (resource, limit) = match error {
+            BudgetError::ArchiveSize(limit) => ("archive bytes", limit),
+            BudgetError::EntryCount(limit) => ("entry count", limit),
+            BudgetError::MetadataSize(limit) => ("metadata bytes", limit),
+            BudgetError::MemberSize(limit) => ("member bytes", limit),
+            BudgetError::TotalSize(limit) => ("total member bytes", limit),
+            BudgetError::Overflow(_) => return Self::Overflow,
+        };
+        Self::Limit { resource, limit }
+    }
 }

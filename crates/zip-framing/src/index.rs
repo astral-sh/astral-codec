@@ -3,7 +3,7 @@ use std::str;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Error, ExtraHeaderId, Limits, add,
+    Budget, Error, ExtraHeaderId, Limits, add,
     constants::{signature, size, version},
     extra::Extras,
     invalid,
@@ -143,95 +143,6 @@ impl Index {
     }
 }
 
-/// Our ZIP parsing budget.
-#[derive(Clone, Copy, Debug)]
-struct Budget {
-    /// The parse's cumulative metadata usage, in bytes.
-    ///
-    /// This is enforced against [`Limits::metadata_size`].
-    metadata: u64,
-
-    /// The parse's cumulative uncompressed member sizes,
-    /// as reported through the central directory.
-    ///
-    /// Each individual member's size is enforced against
-    /// [`Limits::member_size`], while the cumulative total
-    /// is enforced against [`Limits::total_size`].
-    output: u64,
-
-    /// The budget's enforced limits.
-    limits: Limits,
-}
-
-impl Budget {
-    fn new(limits: Limits) -> Self {
-        Self {
-            metadata: 0,
-            output: 0,
-            limits,
-        }
-    }
-
-    /// Check the archive's size against its limit.
-    fn check_archive_size(&self, size: u64) -> Result<(), Error> {
-        if size > self.limits.archive_size {
-            return Err(Error::Limit {
-                resource: "archive bytes",
-                limit: self.limits.archive_size,
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Check the central directory's entry count against its limit.
-    fn check_entry_count(&self, count: u64) -> Result<(), Error> {
-        if count > self.limits.entries as u64 {
-            return Err(Error::Limit {
-                resource: "entry count",
-                limit: self.limits.entries as u64,
-            });
-        }
-
-        Ok(())
-    }
-
-    /// Debit from the metadata budget.
-    fn metadata(&mut self, length: u64) -> Result<(), Error> {
-        let metadata = add(self.metadata, length)?;
-        if metadata > self.limits.metadata_size {
-            return Err(Error::Limit {
-                resource: "metadata bytes",
-                limit: self.limits.metadata_size,
-            });
-        }
-
-        self.metadata = metadata;
-        Ok(())
-    }
-
-    /// Debit from the output size budgets.
-    fn output(&mut self, size: u64) -> Result<(), Error> {
-        if size > self.limits.member_size {
-            return Err(Error::Limit {
-                resource: "decoded member bytes",
-                limit: self.limits.member_size,
-            });
-        }
-
-        let output = add(self.output, size)?;
-        if output > self.limits.total_size {
-            return Err(Error::Limit {
-                resource: "total decoded bytes",
-                limit: self.limits.total_size,
-            });
-        }
-
-        self.output = output;
-        Ok(())
-    }
-}
-
 /// A ZIP archive's central directory's validated location and extent.
 struct CentralDirectory {
     /// The absolute offset to the central directory, relative to the
@@ -361,7 +272,7 @@ impl CentralDirectory {
             }
 
             pending_budget.check_entry_count(count)?;
-            pending_budget.metadata(size)?;
+            pending_budget.charge_metadata(size)?;
             (offset, size, count, position)
         };
 
@@ -518,8 +429,8 @@ impl Zip64EndRecord {
         let directory_size = u64::from_le_bytes(array_at::<40, 8, _>(&header));
         let mut pending_budget = *budget;
         pending_budget.check_entry_count(entry_count)?;
-        pending_budget.metadata(directory_size)?;
-        pending_budget.metadata(locator_position - position)?;
+        pending_budget.charge_metadata(directory_size)?;
+        pending_budget.charge_metadata(locator_position - position)?;
         Self::check_extensible_sector(reader, position + size::ZIP64_END as u64, locator_position)
             .await?;
 

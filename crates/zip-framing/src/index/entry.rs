@@ -3,15 +3,13 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    CompressionMethod, EntryKind, Error, HostSystem, UnixData, add,
+    Budget, CompressionMethod, EntryKind, Error, HostSystem, UnixData, add,
     constants::{signature, size},
     extra::Extras,
     invalid,
     kind::ExternalAttributes,
     record::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at},
 };
-
-use super::Budget;
 
 /// Central directory metadata for a ZIP member.
 #[derive(Clone, Debug)]
@@ -205,7 +203,7 @@ impl CentralDirectoryEntry {
             return Err(invalid(position, "empty member has nonzero CRC"));
         }
 
-        budget.output(sizes.uncompressed)?;
+        budget.charge_member(sizes.uncompressed)?;
         let entry = Self {
             metadata: Metadata {
                 path: path.to_owned(),
@@ -306,7 +304,7 @@ impl IndexedEntry {
         let common = Common::parse(&array_at::<4, { Common::SIZE }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
-        budget.metadata((size::LOCAL + name_length + extra_length) as u64)?;
+        budget.charge_metadata((size::LOCAL + name_length + extra_length) as u64)?;
 
         let variable = reader
             .read_slice(
