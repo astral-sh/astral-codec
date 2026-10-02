@@ -41,7 +41,7 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
             let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
             assert_eq!(index.entries().len(), 1);
 
-            let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+            let entry = index.resolved(0).ok_or("unresolved entry")?;
             assert_eq!(entry.directory().path(), "file");
             assert_eq!(entry.directory().size(), 7);
             assert_eq!(entry.directory().compressed_size(), 7);
@@ -71,7 +71,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     .build();
     let mut reader = Cursor::new(archive.bytes);
     let index = read_validated(&mut reader, Limits::default()).await?;
-    let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+    let entry = index.resolved(0).ok_or("unresolved entry")?;
     assert_eq!(entry.directory().path(), "n".repeat(258));
     assert_eq!(entry.directory().host_system(), HostSystem::Os400);
     assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
@@ -144,14 +144,14 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
         .build();
         let mut source = Observed::new(archive.bytes);
         let mut index = Index::read(&mut source, Limits::default()).await?;
-        assert!(index.entries()[0].resolved().is_none());
+        assert!(index.resolved(0).is_none());
 
         let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
         assert_eq!(entry.kind(), expected, "{name}, host {host}");
         assert_eq!(entry.unix_mode(), mode, "{name}, host {host}");
 
         source.reads.clear();
-        let cached = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        let cached = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(cached.kind(), expected);
         index.validate_all(&mut source).await?;
         assert!(source.reads.is_empty());
@@ -248,7 +248,7 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
         }
         .build();
         let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
-        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), expected);
         assert_eq!(entry.unix_data(), Some(expected_data));
     }
@@ -388,7 +388,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
                 matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected),
                 "{name}, attributes {attributes:#x}: {result:?}"
             );
-            assert!(index.entries()[0].resolved().is_none());
+            assert!(index.resolved(0).is_none());
         }
     }
 
@@ -809,7 +809,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         let index =
             read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
 
-        let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
+        let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), EntryKind::HardLink);
         assert_eq!(
             entry.unix_data(),
@@ -934,7 +934,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         first.central as u64..central as u64
     );
     assert_eq!(entries[1].record_range(), 0..first.central as u64);
-    assert!(entries.iter().all(|entry| entry.resolved().is_none()));
+    assert!((0..entries.len()).all(|ordinal| index.resolved(ordinal).is_none()));
 
     let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
     assert_eq!(entry.directory().path(), "next");
@@ -943,8 +943,8 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         entry.unix_data(),
         Some(&UnixData::LinkTarget("target".to_owned()))
     );
-    assert!(index.entries()[0].resolved().is_some());
-    assert!(index.entries()[1].resolved().is_none());
+    assert!(index.resolved(0).is_some());
+    assert!(index.resolved(1).is_none());
 
     index.validate_all(&mut source).await?;
 
@@ -961,18 +961,12 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         first.central as u64
     );
     assert_eq!(
-        index.entries()[0]
-            .resolved()
-            .ok_or("unresolved entry")?
-            .unix_data(),
+        index.resolved(0).ok_or("unresolved entry")?.unix_data(),
         Some(&UnixData::LinkTarget("target".to_owned()))
     );
     assert_eq!(index.entries()[1].directory().position(), 0);
     assert_eq!(
-        index.entries()[1]
-            .resolved()
-            .ok_or("unresolved entry")?
-            .unix_data(),
+        index.resolved(1).ok_or("unresolved entry")?.unix_data(),
         None
     );
 
@@ -1212,12 +1206,7 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     let mut source = Observed::new(bytes);
     let mut index = Index::read(&mut source, Limits::default()).await?;
     assert_eq!(index.entries().len(), 2000);
-    assert!(
-        index
-            .entries()
-            .iter()
-            .all(|entry| entry.resolved().is_none())
-    );
+    assert!((0..index.entries().len()).all(|ordinal| index.resolved(ordinal).is_none()));
     assert!(
         source
             .reads
@@ -1237,10 +1226,11 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     source.reads.clear();
     assert!(index.entry(&mut source, 7).await?.is_some());
     assert!(index.entry(&mut source, 2000).await?.is_none());
+    assert!(index.resolved(2000).is_none());
     assert!(source.reads.is_empty());
-    assert!(index.entries()[0].resolved().is_none());
+    assert!(index.resolved(0).is_none());
     assert!(index.validate_all(&mut source).await.is_err());
-    assert!(index.entries()[0].resolved().is_none());
+    assert!(index.resolved(0).is_none());
 
     Ok(())
 }
@@ -1331,7 +1321,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
             index.entry(&mut source, 0).await,
             Err(FrameError::Io(_))
         ));
-        assert!(index.entries()[0].resolved().is_none());
+        assert!(index.resolved(0).is_none());
         assert!(index.entry(&mut source, 0).await?.is_some());
         source.reads.clear();
         index.validate_all(&mut source).await?;

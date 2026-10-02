@@ -12,6 +12,7 @@ use crate::{
 
 mod entry;
 
+use entry::ResolvedMember;
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
 /// A ZIP member index.
@@ -23,6 +24,8 @@ pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 pub struct Index {
     /// The indexed members, in central directory order.
     entries: Vec<IndexedEntry>,
+    /// Cached resolutions, with the same length and order as [`Self::entries`].
+    resolved: Vec<Option<ResolvedMember>>,
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
@@ -32,6 +35,16 @@ impl Index {
     /// Borrows indexed members, without fetching local records or payloads.
     pub fn entries(&self) -> &[IndexedEntry] {
         &self.entries
+    }
+
+    /// Returns a previously checked entry by index, without performing I/O.
+    ///
+    /// Returns [`None`] if the index is out of bounds or the member is unresolved.
+    pub fn resolved(&self, index: usize) -> Option<Entry<'_>> {
+        Some(Entry {
+            indexed: self.entries.get(index)?,
+            resolved: self.resolved.get(index)?.as_ref()?,
+        })
     }
 
     /// Indexes the directory and checks bounds derivable from its records.
@@ -71,9 +84,13 @@ impl Index {
             .into_iter()
             .zip(boundaries)
             .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
-            .collect::<Result<_, _>>()?;
+            .collect::<Result<Vec<_>, _>>()?;
 
-        Ok(Self { entries, budget })
+        Ok(Self {
+            resolved: (0..entries.len()).map(|_| None).collect(),
+            entries,
+            budget,
+        })
     }
 
     /// Checks one member's local header, extras and descriptor before exposing it.
@@ -85,11 +102,26 @@ impl Index {
         reader: &mut R,
         index: usize,
     ) -> Result<Option<Entry<'_>>, Error> {
-        let Some(entry) = self.entries.get_mut(index) else {
+        let Some(indexed) = self.entries.get(index) else {
             return Ok(None);
         };
 
-        Ok(Some(entry.resolve(reader, &mut self.budget).await?))
+        let resolved = match &mut self.resolved[index] {
+            Some(resolved) => resolved,
+            slot => {
+                let mut buffered = RecordReader::new(reader, 4096);
+                // Failed or cancelled resolution must not charge the same metadata
+                // again on retry. Publish the cache and budget only after success.
+                let mut pending_budget = self.budget;
+                let resolved = indexed
+                    .read_local(&mut buffered, &mut pending_budget)
+                    .await?;
+                self.budget = pending_budget;
+                slot.insert(resolved)
+            }
+        };
+
+        Ok(Some(Entry { indexed, resolved }))
     }
 
     /// Checks every local header, descriptor, and kind, including unselected members.
@@ -102,8 +134,8 @@ impl Index {
         &mut self,
         reader: &mut R,
     ) -> Result<(), Error> {
-        for entry in &mut self.entries {
-            entry.resolve(reader, &mut self.budget).await?;
+        for index in 0..self.entries.len() {
+            self.entry(reader, index).await?;
             tokio::task::yield_now().await;
         }
 

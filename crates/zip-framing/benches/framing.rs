@@ -55,9 +55,9 @@ fn fixtures() -> Vec<Fixture> {
                 .validate_all(&mut reader)
                 .await
                 .expect("fixture local records should validate");
-            for (entry, path) in index.entries().iter().zip(&paths) {
+            for (ordinal, (entry, path)) in index.entries().iter().zip(&paths).enumerate() {
                 assert_eq!(entry.directory().path(), path);
-                assert!(entry.resolved().is_some());
+                assert!(index.resolved(ordinal).is_some());
             }
         });
         Fixture { id, paths, archive }

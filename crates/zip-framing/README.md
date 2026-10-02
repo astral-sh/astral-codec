@@ -5,7 +5,8 @@ the central directory; `Index::entry` reconciles a selected local header,
 ZIP64 extensions, and data descriptor before returning a checked `Entry`.
 Resolution also interprets host-specific attributes and checks kind-specific
 metadata. `Entry::kind()` returns the cached `EntryKind`; `Entry::unix_mode()`
-preserves the Unix file type and permission bits. `Index::validate_all` checks
+preserves the Unix file type and permission bits. `Index::resolved()` returns
+an already checked entry without I/O. `Index::validate_all` checks
 complete physical coverage, redundant metadata, and member kinds, including
 unselected members. Payload integrity and compression belong to `zip-codec`.
 

@@ -54,9 +54,9 @@ struct Metadata {
 #[derive(Clone, Copy, Debug)]
 pub struct Entry<'a> {
     /// The indexed member.
-    indexed: &'a IndexedEntry,
+    pub(super) indexed: &'a IndexedEntry,
     /// The reconciled member state.
-    resolved: &'a ResolvedMember,
+    pub(super) resolved: &'a ResolvedMember,
 }
 
 impl Entry<'_> {
@@ -98,7 +98,7 @@ impl Entry<'_> {
 }
 
 #[derive(Debug)]
-struct ResolvedMember {
+pub(super) struct ResolvedMember {
     data_offset: u64,
     unix_data: Option<UnixData>,
     kind: EntryKind,
@@ -230,15 +230,14 @@ impl CentralDirectoryEntry {
 ///
 /// Its directory metadata is available through [`Self::directory`].
 /// The member's local records are checked on demand by [`super::Index::entry`]
-/// or [`super::Index::validate_all`]. Successful checks are cached and exposed
-/// through [`Self::resolved`].
+/// or [`super::Index::validate_all`]. Successful checks are cached by the index
+/// and exposed through [`super::Index::resolved`].
 #[derive(Debug)]
 pub struct IndexedEntry {
     directory: CentralDirectoryEntry,
     /// The exclusive end offset of the span assigned to the local header,
     /// filename, extras, data, and optional data descriptor.
     boundary: u64,
-    resolved: Option<ResolvedMember>,
 }
 
 impl IndexedEntry {
@@ -253,14 +252,6 @@ impl IndexedEntry {
     /// not necessarily been checked, and it includes headers and any descriptor.
     pub fn record_range(&self) -> Range<u64> {
         self.directory.position()..self.boundary
-    }
-
-    /// Returns the previously checked entry, without performing I/O.
-    pub fn resolved(&self) -> Option<Entry<'_>> {
-        self.resolved.as_ref().map(|resolved| Entry {
-            indexed: self,
-            resolved,
-        })
     }
 
     pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
@@ -293,37 +284,12 @@ impl IndexedEntry {
         Ok(Self {
             directory,
             boundary,
-            resolved: None,
         })
-    }
-
-    /// Refine this [`IndexedEntry`] into an [`Entry`].
-    ///
-    /// This function is lazy: if the [`Entry`] has already been resolved,
-    /// a cached version is returned. Otherwise, we do I/O to access the local
-    /// entry and reconcile it before returning it.
-    pub(super) async fn resolve<R: AsyncRead + AsyncSeek + Unpin>(
-        &mut self,
-        reader: &mut R,
-        budget: &mut Budget,
-    ) -> Result<Entry<'_>, Error> {
-        if self.resolved.is_none() {
-            let mut buffered = RecordReader::new(reader, 4096);
-            // Failed or cancelled resolution must not charge the same metadata
-            // again on retry. Publish the cache and budget only after success.
-            let mut pending_budget = *budget;
-            let resolved = self.read_local(&mut buffered, &mut pending_budget).await?;
-            self.resolved = Some(resolved);
-            *budget = pending_budget;
-        }
-
-        self.resolved()
-            .ok_or_else(|| invalid(self.directory.position(), "missing resolved local record"))
     }
 
     /// Read and validate an indexed entry's local header, filename, extras, and optional descriptor
     /// against its corresponding central directory entry.
-    async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
+    pub(super) async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,

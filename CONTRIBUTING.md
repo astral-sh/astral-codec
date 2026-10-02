@@ -46,8 +46,9 @@ The index preserves directory order and derives each member's physical boundary
 from sorted local offsets, without fetching local records during opening.
 
 `IndexedEntry` owns a `CentralDirectoryEntry` with declared metadata and tracks the
-derived record boundary and cached resolution. `Index::entry` checks a selected
-local header, extras, descriptor, exact record extent, and kind-specific metadata
+derived record boundary. `Index` owns the resolution cache, accessible through
+`Index::resolved`. `Index::entry` checks a selected local header, extras,
+descriptor, exact record extent, and kind-specific metadata
 before constructing a borrowed `Entry`. The resolved member data is cached only
 after every check succeeds; payload offsets, reconciled UNIX extras, and the
 ZIP-native `EntryKind` are available only through that checked type.

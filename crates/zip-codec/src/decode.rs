@@ -62,6 +62,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.state.index.entries()
     }
 
+    /// Returns a previously checked entry by index, without performing I/O.
+    ///
+    /// Returns [`None`] if the index is out of bounds or the member is unresolved.
+    pub fn resolved(&self, index: usize) -> Option<Entry<'_>> {
+        self.state.index.resolved(index)
+    }
+
     /// Selects a member by central-directory index.
     ///
     /// The selected local header and descriptor must agree with the directory
@@ -212,11 +219,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         self.drain().await?;
         self.index.validate_all(&mut self.reader).await?;
 
-        for entry in self
-            .index
-            .entries()
-            .iter()
-            .filter_map(IndexedEntry::resolved)
+        for entry in (0..self.index.entries().len()).filter_map(|index| self.index.resolved(index))
         {
             Kind::try_from(&entry)?;
         }
