@@ -6,7 +6,7 @@ use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, EntryKind, Error as FrameError, HostSystem, Index,
-    IndexedEntry, Limits,
+    IndexedEntry, Limits, UnixData,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -161,19 +161,87 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
 }
 
 #[tokio::test]
-async fn resolves_link_kinds_from_reconciled_unix_data() -> TestResult {
-    for (mode, data, payload, expected) in [
-        (0, b"target".as_slice(), b"".as_slice(), EntryKind::HardLink),
-        (0o100644, b"target", b"data", EntryKind::HardLink),
-        (0o120777, b"target", b"", EntryKind::SymbolicLink),
-        (0o120777, b"target", b"target", EntryKind::SymbolicLink),
-        (0o100644, b"", b"data", EntryKind::File),
-        (0o020600, &[0; 8], b"", EntryKind::CharacterDevice),
-        (0o060600, &[0; 8], b"", EntryKind::BlockDevice),
+async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
+    let device_numbers = [0x78, 0x56, 0x34, 0x92, 0xef, 0xcd, 0xab, 0x80];
+    let device = UnixData::Device {
+        major: 0x9234_5678,
+        minor: 0x80ab_cdef,
+    };
+    for (attributes, data, payload, expected, expected_data) in [
+        (
+            0,
+            b"target".as_slice(),
+            b"".as_slice(),
+            EntryKind::HardLink,
+            &UnixData::LinkTarget("target".to_owned()),
+        ),
+        (
+            0o100644 << 16,
+            b"target",
+            b"data",
+            EntryKind::HardLink,
+            &UnixData::LinkTarget("target".to_owned()),
+        ),
+        (
+            0o120777 << 16,
+            "../café".as_bytes(),
+            b"",
+            EntryKind::SymbolicLink,
+            &UnixData::LinkTarget("../café".to_owned()),
+        ),
+        (
+            0o120777 << 16,
+            b"target",
+            b"target",
+            EntryKind::SymbolicLink,
+            &UnixData::LinkTarget("target".to_owned()),
+        ),
+        (
+            0o100644 << 16,
+            b"",
+            b"data",
+            EntryKind::File,
+            &UnixData::Empty,
+        ),
+        (
+            0o020600 << 16,
+            device_numbers.as_slice(),
+            b"",
+            EntryKind::CharacterDevice,
+            &device,
+        ),
+        (
+            0o060600 << 16,
+            device_numbers.as_slice(),
+            b"",
+            EntryKind::BlockDevice,
+            &device,
+        ),
+        (
+            0o140600 << 16,
+            b"opaque",
+            b"",
+            EntryKind::Socket,
+            &UnixData::Opaque(b"opaque".to_vec()),
+        ),
+        (
+            0o030600 << 16,
+            b"opaque",
+            b"",
+            EntryKind::Unknown(0o030000),
+            &UnixData::Opaque(b"opaque".to_vec()),
+        ),
+        (
+            0x08,
+            b"opaque",
+            b"",
+            EntryKind::VolumeLabel,
+            &UnixData::Opaque(b"opaque".to_vec()),
+        ),
     ] {
         let archive = Fixture {
             payload: Some(payload.to_vec()),
-            external_attributes: mode << 16,
+            external_attributes: attributes,
             local_extra: field(0x000d, &[&[0; 12], data].concat()),
             central_extra: field(0x000d, &[0; 12]),
             ..Fixture::default()
@@ -182,7 +250,7 @@ async fn resolves_link_kinds_from_reconciled_unix_data() -> TestResult {
         let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
         let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), expected);
-        assert_eq!(entry.unix_extra_data(), Some(data));
+        assert_eq!(entry.unix_data(), Some(expected_data));
     }
 
     Ok(())
@@ -238,6 +306,22 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
             None,
             20,
             "empty symbolic-link target",
+        ),
+        (
+            "link",
+            0o100644 << 16,
+            b"",
+            Some(b"\xff".as_slice()),
+            20,
+            "non-UTF-8 UNIX link target",
+        ),
+        (
+            "link",
+            0o120777 << 16,
+            b"",
+            Some(b"target\0"),
+            20,
+            "NUL in UNIX link target",
         ),
         (
             "directory/",
@@ -727,7 +811,10 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 
         let entry = index.entries()[0].resolved().ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), EntryKind::HardLink);
-        assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
+        assert_eq!(
+            entry.unix_data(),
+            Some(&UnixData::LinkTarget("target".to_owned()))
+        );
     }
 
     for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
@@ -852,7 +939,10 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
     assert_eq!(entry.directory().path(), "next");
     assert_eq!(entry.record_range(), first.central as u64..central as u64);
-    assert_eq!(entry.unix_extra_data(), Some(b"target".as_slice()));
+    assert_eq!(
+        entry.unix_data(),
+        Some(&UnixData::LinkTarget("target".to_owned()))
+    );
     assert!(index.entries()[0].resolved().is_some());
     assert!(index.entries()[1].resolved().is_none());
 
@@ -874,15 +964,15 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         index.entries()[0]
             .resolved()
             .ok_or("unresolved entry")?
-            .unix_extra_data(),
-        Some(b"target".as_slice())
+            .unix_data(),
+        Some(&UnixData::LinkTarget("target".to_owned()))
     );
     assert_eq!(index.entries()[1].directory().position(), 0);
     assert_eq!(
         index.entries()[1]
             .resolved()
             .ok_or("unresolved entry")?
-            .unix_extra_data(),
+            .unix_data(),
         None
     );
 

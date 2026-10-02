@@ -3,10 +3,10 @@ use std::{collections::BTreeMap, str};
 use flate2::Crc;
 
 use crate::{
-    Error,
+    EntryKind, Error,
     constants::extra,
     invalid,
-    record::{Common, GeneralPurposeFlags, SizeField, bytes_at, parse_name},
+    record::{Common, GeneralPurposeFlags, SizeField, array_at, bytes_at, parse_name},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -108,15 +108,60 @@ pub(crate) struct Extras<'a> {
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
 }
 
-/// Member metadata obtained by reconciling local and central extra fields.
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedExtras {
-    unix_data: Option<Vec<u8>>,
+/// File-type data from the PKWARE UNIX extra field (APPNOTE 4.5.7).
+///
+/// The timestamp and ownership prefix is excluded. The member's reconciled
+/// [`EntryKind`] determines how the remaining bytes are interpreted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum UnixData {
+    /// The field contains only the timestamp and ownership prefix.
+    Empty,
+    /// A nonempty UTF-8 link target without NUL bytes.
+    LinkTarget(String),
+    /// Device numbers decoded from two little-endian 32-bit integers.
+    Device {
+        /// The device's major number.
+        major: u32,
+        /// The device's minor number.
+        minor: u32,
+    },
+    /// Nonempty data for a socket, volume label, or unrecognized file type.
+    Opaque(Vec<u8>),
 }
 
-impl ResolvedExtras {
-    pub(crate) fn unix_data(&self) -> Option<&[u8]> {
-        self.unix_data.as_deref()
+impl UnixData {
+    pub(crate) fn parse(kind: EntryKind, data: Vec<u8>, position: u64) -> Result<Self, Error> {
+        if data.is_empty() {
+            return Ok(Self::Empty);
+        }
+
+        match kind {
+            EntryKind::HardLink | EntryKind::SymbolicLink => {
+                let target = String::from_utf8(data)
+                    .map_err(|_| invalid(position, "non-UTF-8 UNIX link target"))?;
+                if target.contains('\0') {
+                    return Err(invalid(position, "NUL in UNIX link target"));
+                }
+                Ok(Self::LinkTarget(target))
+            }
+            EntryKind::CharacterDevice | EntryKind::BlockDevice => {
+                let bytes: [u8; 8] = data
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| invalid(position, "invalid UNIX device numbers"))?;
+                Ok(Self::Device {
+                    major: u32::from_le_bytes(array_at::<0, 4, _>(&bytes)),
+                    minor: u32::from_le_bytes(array_at::<4, 4, _>(&bytes)),
+                })
+            }
+            EntryKind::File | EntryKind::Directory | EntryKind::Fifo => {
+                Err(invalid(position, "unexpected UNIX file-type data"))
+            }
+            EntryKind::Socket | EntryKind::VolumeLabel | EntryKind::Unknown(_) => {
+                Ok(Self::Opaque(data))
+            }
+        }
     }
 }
 
@@ -273,11 +318,12 @@ impl<'a> Extras<'a> {
         Ok(())
     }
 
+    /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
     pub(crate) fn resolve(
         self,
         central: Extras<'_>,
         position: u64,
-    ) -> Result<ResolvedExtras, Error> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         for (identifier, local) in &self.fields {
             let Some(other) = central.fields.get(identifier) else {
                 continue;
@@ -301,12 +347,10 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(ResolvedExtras {
-            unix_data: self
-                .unix_data()
-                .or_else(|| central.unix_data())
-                .map(<[u8]>::to_vec),
-        })
+        Ok(self
+            .unix_data()
+            .or_else(|| central.unix_data())
+            .map(<[u8]>::to_vec))
     }
 }
 

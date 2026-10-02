@@ -1,10 +1,10 @@
-use crate::{CentralDirectoryEntry, Error, HostSystem, constants::version, invalid};
+use crate::{CentralDirectoryEntry, Error, HostSystem, UnixData, constants::version, invalid};
 
 /// A ZIP member's kind, determined from its reconciled metadata.
 ///
 /// This describes the archive entry without imposing an extraction policy.
-/// Link targets remain available through [`crate::Entry::unix_extra_data`] or
-/// the member's payload; their contents have not been validated.
+/// Link targets remain available through [`crate::Entry::unix_data`] or
+/// the member's payload. Targets in payloads have not been validated.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum EntryKind {
@@ -33,36 +33,36 @@ pub enum EntryKind {
 impl EntryKind {
     pub(crate) fn resolve(
         directory: &CentralDirectoryEntry,
-        unix_data: Option<&[u8]>,
+        unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
-    ) -> Result<Self, Error> {
-        let extra = unix_data.filter(|data| !data.is_empty());
+    ) -> Result<(Self, Option<UnixData>), Error> {
+        let extra = unix_data.as_deref().filter(|data| !data.is_empty());
         let is_directory = directory.path().ends_with('/') || attributes.dos_directory;
-        if attributes.dos_volume_label {
-            return Ok(Self::VolumeLabel);
-        }
-
-        let kind = match UnixFileType::from(attributes.unix_mode) {
-            UnixFileType::Unspecified if is_directory => Self::Directory,
-            UnixFileType::Unspecified | UnixFileType::Regular if !is_directory => {
-                if extra.is_some() {
-                    Self::HardLink
-                } else {
-                    Self::File
+        let kind = if attributes.dos_volume_label {
+            Self::VolumeLabel
+        } else {
+            match UnixFileType::from(attributes.unix_mode) {
+                UnixFileType::Unspecified if is_directory => Self::Directory,
+                UnixFileType::Unspecified | UnixFileType::Regular if !is_directory => {
+                    if extra.is_some() {
+                        Self::HardLink
+                    } else {
+                        Self::File
+                    }
                 }
-            }
-            UnixFileType::Directory => Self::Directory,
-            UnixFileType::SymbolicLink if !is_directory => Self::SymbolicLink,
-            UnixFileType::CharacterDevice if !is_directory => Self::CharacterDevice,
-            UnixFileType::BlockDevice if !is_directory => Self::BlockDevice,
-            UnixFileType::Fifo if !is_directory => Self::Fifo,
-            UnixFileType::Socket if !is_directory => Self::Socket,
-            UnixFileType::Unknown(mode) if !is_directory => Self::Unknown(mode),
-            _ => {
-                return Err(invalid(
-                    directory.position(),
-                    "inconsistent file attributes",
-                ));
+                UnixFileType::Directory => Self::Directory,
+                UnixFileType::SymbolicLink if !is_directory => Self::SymbolicLink,
+                UnixFileType::CharacterDevice if !is_directory => Self::CharacterDevice,
+                UnixFileType::BlockDevice if !is_directory => Self::BlockDevice,
+                UnixFileType::Fifo if !is_directory => Self::Fifo,
+                UnixFileType::Socket if !is_directory => Self::Socket,
+                UnixFileType::Unknown(mode) if !is_directory => Self::Unknown(mode),
+                _ => {
+                    return Err(invalid(
+                        directory.position(),
+                        "inconsistent file attributes",
+                    ));
+                }
             }
         };
 
@@ -88,21 +88,12 @@ impl EntryKind {
             return Err(invalid(directory.position(), "empty symbolic-link target"));
         }
 
-        if extra.is_some() && matches!(kind, Self::Directory | Self::Fifo) {
-            return Err(invalid(
-                directory.position(),
-                "unexpected UNIX file-type data",
-            ));
-        }
-
-        if let Some(data) = extra
-            && matches!(kind, Self::CharacterDevice | Self::BlockDevice)
-            && data.len() != 8
-        {
-            return Err(invalid(directory.position(), "invalid UNIX device numbers"));
-        }
-
-        Ok(kind)
+        Ok((
+            kind,
+            unix_data
+                .map(|data| UnixData::parse(kind, data, directory.position()))
+                .transpose()?,
+        ))
     }
 }
 

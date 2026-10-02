@@ -51,6 +51,7 @@ local header, extras, descriptor, exact record extent, and kind-specific metadat
 before constructing a borrowed `Entry`. The resolved member data is cached only
 after every check succeeds; payload offsets, reconciled UNIX extras, and the
 ZIP-native `EntryKind` are available only through that checked type.
+Link targets in UNIX extras must be UTF-8 and contain no NUL bytes.
 `Entry::kind` returns the cached kind without I/O or further validation.
 `Index::validate_all` checks all members without decoding payloads. Local metadata
 budgets are charged once per successful resolution.
@@ -64,9 +65,10 @@ construction.
 It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
 random access, and cursor poisoning. Advancing past an unfinished member drains
 and validates its payload. `ZipArchive::validate_all` also checks whether member
-kinds can be projected, link-target text in UNIX extras, and the symbolic-link
-size limit. Framing exposes volume labels, sockets, and unknown UNIX types;
-the codec rejects these kinds because they cannot be projected.
+kinds can be projected and enforces the symbolic-link size limit. Symbolic-link
+payloads are decoded and validated by the codec. Framing exposes volume labels,
+sockets, and unknown UNIX types; the codec rejects these kinds because they
+cannot be projected.
 `reader_mut().await` drains an active payload before lending the immutable source
 for caller-controlled prefetching or seeking. Filesystem extraction remains in
 `archive-trait`.

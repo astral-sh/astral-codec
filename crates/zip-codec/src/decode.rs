@@ -1,14 +1,11 @@
 //! ZIP member projection and seekable archive access.
 
-use std::{
-    io::{self, SeekFrom},
-    str,
-};
+use std::io::{self, SeekFrom};
 
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
+use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, UnixData, constants::attributes};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -338,23 +335,9 @@ impl TryFrom<&Entry<'_>> for Kind {
 
     fn try_from(entry: &Entry<'_>) -> Result<Self, Self::Error> {
         let directory = entry.directory();
-        let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
-            && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
-        {
-            let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
-                position: directory.position(),
-                reason: "non-UTF-8 UNIX link target",
-            })?;
-            if target.contains('\0') {
-                return Err(DecodeError::Integrity {
-                    position: directory.position(),
-                    reason: "NUL in UNIX link target",
-                });
-            }
-
-            Some(target.to_owned())
-        } else {
-            None
+        let link = match entry.unix_data() {
+            Some(UnixData::LinkTarget(target)) => Some(target.clone()),
+            _ => None,
         };
 
         match entry.kind() {

@@ -3,9 +3,9 @@ use std::ops::{Deref, Range};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    CompressionMethod, EntryKind, Error, HostSystem, add,
+    CompressionMethod, EntryKind, Error, HostSystem, UnixData, add,
     constants::{signature, size},
-    extra::{Extras, ResolvedExtras},
+    extra::Extras,
     invalid,
     kind::ExternalAttributes,
     record::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at},
@@ -79,12 +79,11 @@ impl Entry<'_> {
         self.resolved.data_offset
     }
 
-    /// Returns reconciled APPNOTE UNIX data for links or device numbers.
+    /// Returns reconciled PKWARE UNIX file-type data, if the field is present.
     ///
-    /// The timestamp/ownership prefix is excluded. Interpret this data with
-    /// the member's [`Self::kind`]. Link-target contents have not been validated.
-    pub fn unix_extra_data(&self) -> Option<&[u8]> {
-        self.resolved.extras.unix_data()
+    /// A prefix-only field returns [`UnixData::Empty`].
+    pub fn unix_data(&self) -> Option<&UnixData> {
+        self.resolved.unix_data.as_ref()
     }
 }
 
@@ -99,7 +98,7 @@ impl Deref for Entry<'_> {
 #[derive(Debug)]
 struct ResolvedMember {
     data_offset: u64,
-    extras: ResolvedExtras,
+    unix_data: Option<UnixData>,
     kind: EntryKind,
     unix_mode: u16,
 }
@@ -350,7 +349,8 @@ impl IndexedEntry {
             return Err(invalid(position, "local and central filenames disagree"));
         }
 
-        let extras = extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;
+        let unix_data =
+            extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;
 
         if (Common {
             crc: metadata.common.crc,
@@ -395,11 +395,11 @@ impl IndexedEntry {
             self.directory.host_system(),
             self.directory.external_attributes(),
         );
-        let kind = EntryKind::resolve(&self.directory, extras.unix_data(), &attributes)?;
+        let (kind, unix_data) = EntryKind::resolve(&self.directory, unix_data, &attributes)?;
 
         Ok(ResolvedMember {
             data_offset,
-            extras,
+            unix_data,
             kind,
             unix_mode: attributes.unix_mode,
         })
