@@ -4,7 +4,7 @@ use divan::{Bencher, counter::ItemsCount};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use zip_framing::{
     CompressionMethod, Index, Limits,
-    write::{EntryKind, MemberHeader, end_records},
+    write::{EntryKind, PendingMember, end_records},
 };
 
 const MANY_ENTRY_COUNT: usize = 1024;
@@ -55,9 +55,9 @@ fn fixtures() -> Vec<Fixture> {
                 .validate_all(&mut reader)
                 .await
                 .expect("fixture local records should validate");
-            for (entry, path) in index.entries().iter().zip(&paths) {
+            for (ordinal, (entry, path)) in index.entries().iter().zip(&paths).enumerate() {
                 assert_eq!(entry.directory().path(), path);
-                assert!(entry.resolved().is_some());
+                assert!(index.resolved(ordinal).is_some());
             }
         });
         Fixture { id, paths, archive }
@@ -70,7 +70,7 @@ fn encode_metadata(paths: &[String]) -> Vec<u8> {
     let mut archive = Vec::new();
     let mut directory = Vec::new();
     for path in paths {
-        let member = MemberHeader::new(
+        let member = PendingMember::new(
             path,
             CompressionMethod::Stored,
             EntryKind::File { executable: false },

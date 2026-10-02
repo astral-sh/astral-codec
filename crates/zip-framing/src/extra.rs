@@ -3,11 +3,14 @@ use std::{collections::BTreeMap, str};
 use flate2::Crc;
 
 use crate::{
-    Error,
+    EntryKind, Error,
     constants::extra,
     invalid,
-    record::{Common, bytes_at, parse_name},
+    record::{Common, GeneralPurposeFlags, SizeField, array_at, bytes_at, parse_name},
 };
+
+/// Version of the Info-ZIP Unicode path and comment fields.
+const UNICODE_VERSION: u8 = 1;
 
 /// An extra-field header identifier (APPNOTE sections 4.5 and 4.6).
 ///
@@ -105,15 +108,60 @@ pub(crate) struct Extras<'a> {
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
 }
 
-/// Member metadata obtained by reconciling local and central extra fields.
-#[derive(Clone, Debug)]
-pub(crate) struct ResolvedExtras {
-    unix_data: Option<Vec<u8>>,
+/// File-type data from the PKWARE UNIX extra field (APPNOTE 4.5.7).
+///
+/// The timestamp and ownership prefix is excluded. The member's reconciled
+/// [`EntryKind`] determines how the remaining bytes are interpreted.
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum UnixData {
+    /// The field contains only the timestamp and ownership prefix.
+    Empty,
+    /// A nonempty UTF-8 link target without NUL bytes.
+    LinkTarget(String),
+    /// Device numbers decoded from two little-endian 32-bit integers.
+    Device {
+        /// The device's major number.
+        major: u32,
+        /// The device's minor number.
+        minor: u32,
+    },
+    /// Nonempty data for a socket, volume label, or unrecognized file type.
+    Opaque(Vec<u8>),
 }
 
-impl ResolvedExtras {
-    pub(crate) fn unix_data(&self) -> Option<&[u8]> {
-        self.unix_data.as_deref()
+impl UnixData {
+    pub(crate) fn parse(kind: EntryKind, data: Vec<u8>, position: u64) -> Result<Self, Error> {
+        if data.is_empty() {
+            return Ok(Self::Empty);
+        }
+
+        match kind {
+            EntryKind::HardLink | EntryKind::SymbolicLink => {
+                let target = String::from_utf8(data)
+                    .map_err(|_| invalid(position, "non-UTF-8 UNIX link target"))?;
+                if target.contains('\0') {
+                    return Err(invalid(position, "NUL in UNIX link target"));
+                }
+                Ok(Self::LinkTarget(target))
+            }
+            EntryKind::CharacterDevice | EntryKind::BlockDevice => {
+                let bytes: [u8; 8] = data
+                    .as_slice()
+                    .try_into()
+                    .map_err(|_| invalid(position, "invalid UNIX device numbers"))?;
+                Ok(Self::Device {
+                    major: u32::from_le_bytes(array_at::<0, 4, _>(&bytes)),
+                    minor: u32::from_le_bytes(array_at::<4, 4, _>(&bytes)),
+                })
+            }
+            EntryKind::File | EntryKind::Directory | EntryKind::Fifo => {
+                Err(invalid(position, "unexpected UNIX file-type data"))
+            }
+            EntryKind::Socket | EntryKind::VolumeLabel | EntryKind::Unknown(_) => {
+                Ok(Self::Opaque(data))
+            }
+        }
     }
 }
 
@@ -171,53 +219,39 @@ impl<'a> Extras<'a> {
             .map(|data| &data[extra::UNIX_PREFIX_SIZE..])
     }
 
-    pub(crate) fn zip64(
-        &self,
-        common: Common,
-        offset: Option<u32>,
-        disk: Option<u16>,
-        position: u64,
-    ) -> Result<Sizes, Error> {
-        let local = offset.is_none();
-        let mut expected = 0;
-        let uncompressed = common.uncompressed == u32::MAX;
-        let compressed = common.compressed == u32::MAX;
-        if local && uncompressed != compressed {
+    pub(crate) fn local_sizes(&self, common: Common, position: u64) -> Result<Sizes, Error> {
+        if (common.uncompressed == SizeField::Zip64) != (common.compressed == SizeField::Zip64) {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
 
-        expected += usize::from(uncompressed) * 8;
-        expected += usize::from(compressed) * 8;
-        expected += usize::from(offset == Some(u32::MAX)) * 8;
-        expected += usize::from(disk == Some(u16::MAX)) * 4;
+        self.zip64_sizes(common, 0, position)
+            .map(|(sizes, _)| sizes)
+    }
 
-        let field = self.fields.get(&ExtraHeaderId::Zip64).copied();
-        if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
-            return Err(invalid(position, "missing or superfluous ZIP64 values"));
-        }
-        common.check_zip64(field.is_some(), position)?;
-
-        let mut bytes = field.unwrap_or_default();
-        let mut take_size = |small: u32| -> Result<u64, Error> {
-            if small == u32::MAX {
-                let (value, remaining) = bytes
-                    .split_first_chunk::<8>()
-                    .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
-                bytes = remaining;
-                Ok(u64::from_le_bytes(*value))
-            } else {
-                Ok(u64::from(small))
-            }
+    pub(crate) fn central_sizes(
+        &self,
+        common: Common,
+        offset: u32,
+        disk: u16,
+        position: u64,
+    ) -> Result<(Sizes, u64), Error> {
+        let (sizes, bytes) = self.zip64_sizes(
+            common,
+            usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
+            position,
+        )?;
+        let (offset, bytes) = if offset == u32::MAX {
+            let (offset, bytes) = bytes
+                .split_first_chunk::<8>()
+                .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
+            (u64::from_le_bytes(*offset), bytes)
+        } else {
+            (u64::from(offset), bytes)
         };
-
-        let uncompressed = take_size(common.uncompressed)?;
-        let compressed = take_size(common.compressed)?;
-        let offset = offset.map(&mut take_size).transpose()?.unwrap_or_default();
-
-        let disk = match disk {
-            Some(u16::MAX) => u32::from_le_bytes(bytes_at(bytes, 0, position)?),
-            Some(disk) => u32::from(disk),
-            None => 0,
+        let disk = if disk == u16::MAX {
+            u32::from_le_bytes(bytes_at(bytes, 0, position)?)
+        } else {
+            u32::from(disk)
         };
         if disk != 0 {
             return Err(Error::Unsupported {
@@ -226,18 +260,54 @@ impl<'a> Extras<'a> {
             });
         }
 
-        Ok(Sizes {
-            uncompressed,
-            compressed,
-            offset,
-            zip64: field.is_some(),
-        })
+        Ok((sizes, offset))
+    }
+
+    fn zip64_sizes(
+        &self,
+        common: Common,
+        location_size: usize,
+        position: u64,
+    ) -> Result<(Sizes, &[u8]), Error> {
+        let expected = usize::from(common.uncompressed == SizeField::Zip64) * 8
+            + usize::from(common.compressed == SizeField::Zip64) * 8
+            + location_size;
+        let field = self.fields.get(&ExtraHeaderId::Zip64).copied();
+        if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
+            return Err(invalid(position, "missing or superfluous ZIP64 values"));
+        }
+        common.check_zip64(field.is_some(), position)?;
+
+        let mut bytes = field.unwrap_or_default();
+        let mut take_size = |size: SizeField| -> Result<u64, Error> {
+            match size {
+                SizeField::Value(size) => Ok(u64::from(size)),
+                SizeField::Zip64 => {
+                    let (value, remaining) = bytes
+                        .split_first_chunk::<8>()
+                        .ok_or_else(|| invalid(position, "missing or superfluous ZIP64 values"))?;
+                    bytes = remaining;
+                    Ok(u64::from_le_bytes(*value))
+                }
+            }
+        };
+
+        let uncompressed = take_size(common.uncompressed)?;
+        let compressed = take_size(common.compressed)?;
+        Ok((
+            Sizes {
+                uncompressed,
+                compressed,
+                zip64: field.is_some(),
+            },
+            bytes,
+        ))
     }
 
     pub(crate) fn name<'name>(
         &self,
         bytes: &'name [u8],
-        flags: u16,
+        flags: GeneralPurposeFlags,
         position: u64,
     ) -> Result<&'name str, Error> {
         let name = parse_name(bytes, flags, position)?;
@@ -265,11 +335,12 @@ impl<'a> Extras<'a> {
         Ok(())
     }
 
+    /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
     pub(crate) fn resolve(
         self,
         central: Extras<'_>,
         position: u64,
-    ) -> Result<ResolvedExtras, Error> {
+    ) -> Result<Option<Vec<u8>>, Error> {
         for (identifier, local) in &self.fields {
             let Some(other) = central.fields.get(identifier) else {
                 continue;
@@ -293,17 +364,15 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(ResolvedExtras {
-            unix_data: self
-                .unix_data()
-                .or_else(|| central.unix_data())
-                .map(<[u8]>::to_vec),
-        })
+        Ok(self
+            .unix_data()
+            .or_else(|| central.unix_data())
+            .map(<[u8]>::to_vec))
     }
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {
-    let Some((&extra::UNICODE_VERSION, field)) = field.split_first() else {
+    let Some((&UNICODE_VERSION, field)) = field.split_first() else {
         return Err(invalid(position, "invalid Unicode extra field"));
     };
     let Some((expected_crc, value)) = field.split_first_chunk::<4>() else {
@@ -328,6 +397,5 @@ fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<
 pub(crate) struct Sizes {
     pub(crate) uncompressed: u64,
     pub(crate) compressed: u64,
-    pub(crate) offset: u64,
     pub(crate) zip64: bool,
 }
