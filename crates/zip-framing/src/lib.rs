@@ -1,11 +1,24 @@
 //! Strict ZIP record framing for asynchronous, seekable inputs.
 //!
-//! [`Index::read`] indexes the directory; [`Index::entry`] checks local records
-//! and kind-specific metadata on access. [`Entry::kind`] returns the cached
-//! classification. [`Index::validate_all`] checks all members without decoding payloads.
-//! Filenames and archive/member comments must be UTF-8.
-//! It does not read file contents: consumers must verify decoded sizes and CRCs.
-//! The source must remain unchanged while the index and its payloads are used.
+//! The core API in this crate is [`Index`], which can be built from a ZIP's
+//! central directory and used to access individual members (after reconciling
+//! their central and local states).
+//!
+//! Potentially relevant internals:
+//!
+//! - [`CentralDirectoryEntry`], [`IndexedEntry`], and [`Entry`] represent a refinement
+//!   type hierarchy, i.e. they go from fewest invariants preserved (just parsing
+//!   the central directory entry) to the most invariants preserved (a member whose
+//!   central and local states are fully reconciled).
+//!
+//! - zip-framing enforces that all parsed filenames and archive/per-member comments are UTF-8.
+//!   This is an intentional limitation.
+//!
+//! - zip-framing does not decode or validate member payloads. It exposes their
+//!   offsets and compressed sizes so consumers can read and decode them,
+//!   then verify their decoded sizes and CRC32s.
+//!
+//! - zip-framing assumes that the ZIP source does not change.
 
 #![forbid(unsafe_code)]
 

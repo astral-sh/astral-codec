@@ -94,7 +94,7 @@ impl Index {
 
     /// Checks every local header, descriptor, and kind, including unselected members.
     ///
-    /// Success establishes complete, nonoverlapping record coverage and
+    /// Success establishes complete, non-overlapping record coverage and
     /// agreement of redundant and kind-specific metadata. Payload sizes and
     /// CRCs still need to be verified when decoding. Already checked members
     /// require no I/O.
