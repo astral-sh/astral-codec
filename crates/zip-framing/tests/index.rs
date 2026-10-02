@@ -591,7 +591,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
             );
         }
 
-        for offset in [
+        let mut corrupt_offsets = vec![
             archive.central + 42,
             archive.descriptor,
             archive.descriptor + 4,
@@ -600,7 +600,16 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
             archive.end + 8,
             archive.end + 12,
             archive.end + 16,
-        ] {
+        ];
+        if let Some(position) = archive.zip64_end {
+            // Signature, length, version, disks, counts, and directory extent.
+            corrupt_offsets
+                .extend([0, 4, 14, 16, 20, 24, 32, 40, 48].map(|offset| position + offset));
+            // Locator disk, end-record offset, and total disks.
+            corrupt_offsets.extend([4, 8, 16].map(|offset| archive.end - 20 + offset));
+        }
+
+        for offset in corrupt_offsets {
             let mut bytes = archive.bytes.clone();
             bytes[offset] ^= 1;
 
