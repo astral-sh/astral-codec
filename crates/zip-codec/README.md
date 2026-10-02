@@ -22,14 +22,14 @@ use zip_codec::{ArchiveBuilder, CompressionMethod, EntryMetadata, ZipEncoder, Zi
 
 let output = tokio::fs::File::create("output.zip").await?;
 let mut builder = ZipEncoder::new(output)
-    .compression(CompressionMethod::Deflate)
+    .with_compression(CompressionMethod::Deflate)
     .builder();
 builder.add_file("hello.txt", &b"hello\n"[..], EntryMetadata::default()).await?;
 builder.add_file_with_options(
     "raw.bin",
     &b"store these bytes"[..],
     EntryMetadata::default(),
-    ZipFileOptions::default().compression(CompressionMethod::Stored),
+    ZipFileOptions::default().with_compression(CompressionMethod::Stored),
 ).await?;
 builder.finish().await?;
 # Ok(())
@@ -46,7 +46,7 @@ Empty files are always stored.
 `ZipArchive::entries` exposes indexed members; call `directory()` on an entry
 to access its central-directory metadata. `ZipArchive::member(index)` selects
 an entry. Sequential iteration resumes after the selected entry.
-`open_with_limits` and `ZipEncoder::limits` configure resource budgets.
+`open_with_limits` and `ZipEncoder::with_limits` configure resource budgets.
 
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks

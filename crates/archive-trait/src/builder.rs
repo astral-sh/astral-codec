@@ -313,17 +313,17 @@ pub struct BuildFailure<E> {
 
 impl<E> BuildFailure<E> {
     /// Reports a failure that occurred before the hook wrote any output.
-    pub fn recoverable(error: BuildError<E>) -> Self {
+    pub fn recoverable(error: impl Into<BuildError<E>>) -> Self {
         Self {
-            error,
+            error: error.into(),
             poisons_builder: false,
         }
     }
 
     /// Reports a failure that may have left partial output.
-    pub fn poisoned(error: BuildError<E>) -> Self {
+    pub fn poisoned(error: impl Into<BuildError<E>>) -> Self {
         Self {
-            error,
+            error: error.into(),
             poisons_builder: true,
         }
     }

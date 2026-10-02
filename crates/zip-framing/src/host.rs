@@ -1,5 +1,3 @@
-use crate::constants::host;
-
 /// The host-system interpretation of a ZIP member's external attributes.
 ///
 /// This is the high byte of "version made by" (APPNOTE section 4.4.2).
@@ -55,26 +53,26 @@ pub enum HostSystem {
 impl From<u8> for HostSystem {
     fn from(value: u8) -> Self {
         match value {
-            host::MS_DOS => Self::MsDos,
+            0 => Self::MsDos,
             1 => Self::Amiga,
             2 => Self::OpenVms,
-            host::UNIX => Self::Unix,
+            3 => Self::Unix,
             4 => Self::VmCms,
             5 => Self::AtariSt,
-            host::OS2_HPFS => Self::Os2Hpfs,
+            6 => Self::Os2Hpfs,
             7 => Self::Macintosh,
             8 => Self::ZSystem,
             9 => Self::Cpm,
-            host::WINDOWS_NTFS => Self::WindowsNtfs,
+            10 => Self::WindowsNtfs,
             11 => Self::Mvs,
             12 => Self::Vse,
             13 => Self::AcornRisc,
-            host::VFAT => Self::Vfat,
+            14 => Self::Vfat,
             15 => Self::AlternateMvs,
             16 => Self::BeOs,
             17 => Self::Tandem,
             18 => Self::Os400,
-            host::OS_X => Self::Darwin,
+            19 => Self::Darwin,
             _ => Self::Unknown(value),
         }
     }
@@ -82,28 +80,34 @@ impl From<u8> for HostSystem {
 
 impl From<HostSystem> for u8 {
     fn from(value: HostSystem) -> Self {
-        match value {
-            HostSystem::MsDos => host::MS_DOS,
-            HostSystem::Amiga => 1,
-            HostSystem::OpenVms => 2,
-            HostSystem::Unix => host::UNIX,
-            HostSystem::VmCms => 4,
-            HostSystem::AtariSt => 5,
-            HostSystem::Os2Hpfs => host::OS2_HPFS,
-            HostSystem::Macintosh => 7,
-            HostSystem::ZSystem => 8,
-            HostSystem::Cpm => 9,
-            HostSystem::WindowsNtfs => host::WINDOWS_NTFS,
-            HostSystem::Mvs => 11,
-            HostSystem::Vse => 12,
-            HostSystem::AcornRisc => 13,
-            HostSystem::Vfat => host::VFAT,
-            HostSystem::AlternateMvs => 15,
-            HostSystem::BeOs => 16,
-            HostSystem::Tandem => 17,
-            HostSystem::Os400 => 18,
-            HostSystem::Darwin => host::OS_X,
-            HostSystem::Unknown(value) => value,
+        value.to_byte()
+    }
+}
+
+impl HostSystem {
+    pub(crate) const fn to_byte(self) -> u8 {
+        match self {
+            Self::MsDos => 0,
+            Self::Amiga => 1,
+            Self::OpenVms => 2,
+            Self::Unix => 3,
+            Self::VmCms => 4,
+            Self::AtariSt => 5,
+            Self::Os2Hpfs => 6,
+            Self::Macintosh => 7,
+            Self::ZSystem => 8,
+            Self::Cpm => 9,
+            Self::WindowsNtfs => 10,
+            Self::Mvs => 11,
+            Self::Vse => 12,
+            Self::AcornRisc => 13,
+            Self::Vfat => 14,
+            Self::AlternateMvs => 15,
+            Self::BeOs => 16,
+            Self::Tandem => 17,
+            Self::Os400 => 18,
+            Self::Darwin => 19,
+            Self::Unknown(value) => value,
         }
     }
 }
