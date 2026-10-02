@@ -388,7 +388,7 @@ impl IndexedEntry {
             let zip64 = sizes.zip64
                 || metadata.common.compressed == SizeField::Zip64
                 || metadata.common.uncompressed == SizeField::Zip64;
-            read_descriptor(reader, metadata, data_end, boundary, zip64).await?;
+            self.check_descriptor(reader, data_end, zip64).await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
@@ -406,63 +406,63 @@ impl IndexedEntry {
             unix_mode: attributes.unix_mode,
         })
     }
-}
 
-async fn read_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
-    reader: &mut RecordReader<'_, R>,
-    metadata: &Metadata,
-    position: u64,
-    end: u64,
-    zip64: bool,
-) -> Result<(), Error> {
-    let unsigned_length = if zip64 {
-        size::ZIP64_DESCRIPTOR as u64
-    } else {
-        size::DESCRIPTOR as u64
-    };
-    let length = end - position;
-    if length != unsigned_length && length != unsigned_length + size::SIGNATURE as u64 {
-        return Err(invalid(position, "invalid data descriptor length"));
-    }
-
-    let mut bytes = [0; size::SIGNATURE + size::ZIP64_DESCRIPTOR];
-    reader
-        .read_at(position, &mut bytes[..length as usize], end)
-        .await?;
-
-    // Length disambiguates a signature-less descriptor whose CRC is itself
-    // 0x08074b50. Never search for a descriptor inside compressed data.
-    let offset = if length == unsigned_length + size::SIGNATURE as u64 {
-        if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != signature::DESCRIPTOR {
-            return Err(invalid(position, "invalid data descriptor signature"));
+    async fn check_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
+        &self,
+        reader: &mut RecordReader<'_, R>,
+        position: u64,
+        zip64: bool,
+    ) -> Result<(), Error> {
+        let metadata = &self.directory.metadata;
+        let unsigned_length = if zip64 {
+            size::ZIP64_DESCRIPTOR as u64
+        } else {
+            size::DESCRIPTOR as u64
+        };
+        let length = self.boundary - position;
+        if length != unsigned_length && length != unsigned_length + size::SIGNATURE as u64 {
+            return Err(invalid(position, "invalid data descriptor length"));
         }
 
-        size::SIGNATURE
-    } else {
-        0
-    };
+        let mut bytes = [0; size::SIGNATURE + size::ZIP64_DESCRIPTOR];
+        reader
+            .read_at(position, &mut bytes[..length as usize], self.boundary)
+            .await?;
 
-    let crc = u32::from_le_bytes(bytes_at(&bytes, offset, position)?);
-    let compressed = if zip64 {
-        u64::from_le_bytes(bytes_at(&bytes, offset + 4, position)?)
-    } else {
-        u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 4, position)?))
-    };
-    let uncompressed = if zip64 {
-        u64::from_le_bytes(bytes_at(&bytes, offset + 12, position)?)
-    } else {
-        u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?))
-    };
+        // Length disambiguates a signature-less descriptor whose CRC is itself
+        // 0x08074b50. Never search for a descriptor inside compressed data.
+        let offset = if length == unsigned_length + size::SIGNATURE as u64 {
+            if u32::from_le_bytes(array_at::<0, 4, _>(&bytes)) != signature::DESCRIPTOR {
+                return Err(invalid(position, "invalid data descriptor signature"));
+            }
 
-    if crc != metadata.common.crc
-        || compressed != metadata.compressed_size
-        || uncompressed != metadata.size
-    {
-        return Err(invalid(
-            position,
-            "data descriptor disagrees with central header",
-        ));
+            size::SIGNATURE
+        } else {
+            0
+        };
+
+        let crc = u32::from_le_bytes(bytes_at(&bytes, offset, position)?);
+        let compressed = if zip64 {
+            u64::from_le_bytes(bytes_at(&bytes, offset + 4, position)?)
+        } else {
+            u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 4, position)?))
+        };
+        let uncompressed = if zip64 {
+            u64::from_le_bytes(bytes_at(&bytes, offset + 12, position)?)
+        } else {
+            u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?))
+        };
+
+        if crc != metadata.common.crc
+            || compressed != metadata.compressed_size
+            || uncompressed != metadata.size
+        {
+            return Err(invalid(
+                position,
+                "data descriptor disagrees with central header",
+            ));
+        }
+
+        Ok(())
     }
-
-    Ok(())
 }
