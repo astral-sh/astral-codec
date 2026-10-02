@@ -29,27 +29,30 @@ async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
 async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
     for zip64 in [false, true] {
         for descriptor in [None, Some(false), Some(true)] {
-            // This CRC also tests the unsigned descriptor/signature ambiguity.
-            let archive = Fixture {
-                zip64,
-                descriptor,
-                crc: Some(0x0807_4b50),
-                ..Fixture::default()
+            // The nonempty payload's CRC is also the optional descriptor signature.
+            for (payload, crc) in [(b"\xac\x0a\x7a\xd5".as_slice(), 0x0807_4b50), (b"", 0)] {
+                let archive = Fixture {
+                    zip64,
+                    descriptor,
+                    payload: Some(payload.to_vec()),
+                    ..Fixture::default()
+                }
+                .build();
+
+                let index =
+                    read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+                assert_eq!(index.entries().len(), 1);
+
+                let entry = index.resolved(0).ok_or("unresolved entry")?;
+                assert_eq!(entry.directory().path(), "file");
+                assert_eq!(entry.directory().size(), payload.len() as u64);
+                assert_eq!(entry.directory().compressed_size(), payload.len() as u64);
+                assert_eq!(entry.directory().crc32(), crc);
+                assert_eq!(
+                    &archive.bytes[entry.data_offset() as usize..archive.descriptor],
+                    payload
+                );
             }
-            .build();
-
-            let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
-            assert_eq!(index.entries().len(), 1);
-
-            let entry = index.resolved(0).ok_or("unresolved entry")?;
-            assert_eq!(entry.directory().path(), "file");
-            assert_eq!(entry.directory().size(), 7);
-            assert_eq!(entry.directory().compressed_size(), 7);
-            assert_eq!(entry.directory().crc32(), 0x0807_4b50);
-            assert_eq!(
-                &archive.bytes[entry.data_offset() as usize..archive.descriptor],
-                b"payload"
-            );
         }
     }
 
@@ -892,9 +895,6 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
 
         let mut corrupt_offsets = vec![
             archive.central + 42,
-            archive.descriptor,
-            archive.descriptor + 4,
-            archive.descriptor + 8,
             archive.end + 4,
             archive.end + 8,
             archive.end + 12,
@@ -932,7 +932,71 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
 }
 
 #[tokio::test]
-async fn requires_utf8_archive_and_member_comments() {
+async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> TestResult {
+    for zip64 in [false, true] {
+        for signed in [false, true] {
+            let archive = Fixture {
+                zip64,
+                descriptor: Some(signed),
+                ..Fixture::default()
+            }
+            .build();
+            let fields = archive.descriptor + if signed { 4 } else { 0 };
+            let mut corrupt_offsets = vec![fields, fields + 4, archive.central - 1];
+            if signed {
+                corrupt_offsets.push(archive.descriptor);
+            }
+            for offset in corrupt_offsets {
+                let mut bytes = archive.bytes.clone();
+                bytes[offset] ^= 1;
+                let mut source = Cursor::new(bytes);
+                let mut index = Index::read(&mut source, Limits::default()).await?;
+                assert!(
+                    matches!(
+                        index.entry(&mut source, 0).await,
+                        Err(FrameError::Invalid {
+                            position,
+                            reason: "invalid data descriptor signature" | "data descriptor disagrees with central header",
+                        }) if position == archive.descriptor as u64
+                    ),
+                    "zip64={zip64}, signed={signed}, offset={offset}"
+                );
+                assert!(index.resolved(0).is_none());
+            }
+
+            let descriptor = &archive.bytes[archive.descriptor..archive.central];
+            for length in [0, descriptor.len() - 1, descriptor.len() + 1] {
+                // Rebuild the directory and footer so only the descriptor's span
+                // is wrong; truncating the whole archive would test its footer.
+                let mut bytes = archive.bytes[..archive.descriptor].to_vec();
+                bytes.extend_from_slice(&descriptor[..length.min(descriptor.len())]);
+                bytes.resize(archive.descriptor + length, 0);
+                let central = bytes.len();
+                bytes.extend_from_slice(
+                    &archive.bytes[archive.central..archive.zip64_end.unwrap_or(archive.end)],
+                );
+                let size = bytes.len() - central;
+                bytes.extend(end_record(1, central as u32, size as u32, &[]));
+                assert!(
+                    matches!(
+                        read_validated(&mut Cursor::new(bytes), Limits::default()).await,
+                        Err(FrameError::Invalid {
+                            reason: "member cannot fit before the next record"
+                                | "invalid data descriptor length",
+                            ..
+                        })
+                    ),
+                    "zip64={zip64}, signed={signed}, length={length}"
+                );
+            }
+        }
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn requires_utf8_archive_and_member_comments() -> TestResult {
     for (comment, valid) in [
         (b"zip".as_slice(), true),
         ("café".as_bytes(), true),
@@ -977,6 +1041,38 @@ async fn requires_utf8_archive_and_member_comments() {
             }
         }
     }
+
+    // Incomplete Unicode comments remain invalid even when the ordinary comment
+    // is usable; do not fall back to treating a recognized field as opaque data.
+    let comment = b"comment";
+    let mut crc = Crc::new();
+    crc.update(comment);
+    let unicode = [vec![1], crc.sum().to_le_bytes().to_vec(), comment.to_vec()].concat();
+    for length in (0..5).chain([unicode.len()]) {
+        let archive = Fixture {
+            member_comment: comment.to_vec(),
+            central_extra: field(0x6375, &unicode[..length]),
+            ..Fixture::default()
+        }
+        .build();
+        let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        if length == unicode.len() {
+            result?;
+        } else {
+            assert!(
+                matches!(
+                    result,
+                    Err(FrameError::Invalid {
+                        position,
+                        reason: "invalid Unicode extra field",
+                    }) if position == archive.central as u64
+                ),
+                "length={length}"
+            );
+        }
+    }
+
+    Ok(())
 }
 
 #[tokio::test]
@@ -1001,6 +1097,58 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
             .await
             .is_err()
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_prefixed_and_concatenated_archives_with_consistent_offsets() -> TestResult {
+    let first = Fixture::default().build();
+    for (prefix, payload_size) in [
+        (b"junk".as_slice(), 7),
+        (&first.bytes, 7),
+        (&first.bytes, 131_072),
+    ] {
+        let archive = Fixture {
+            payload: Some(vec![b'x'; payload_size]),
+            local_offset: prefix.len() as u32,
+            ..Fixture::default()
+        }
+        .build();
+        let mut bytes = prefix.to_vec();
+        bytes.extend_from_slice(&archive.bytes);
+        // All offsets identify real records, including when the earlier footer
+        // is outside the search window. The selected archive must start at zero.
+        set32(
+            &mut bytes,
+            prefix.len() + archive.end + 16,
+            (prefix.len() + archive.central) as u32,
+        );
+        assert!(matches!(
+            Index::read(&mut Cursor::new(bytes), Limits::default()).await,
+            Err(FrameError::Invalid {
+                position: 0,
+                reason: "unaccounted bytes before the first member"
+            })
+        ));
+    }
+
+    // Referencing the first archive's local member does not account for the
+    // directory, footer, and second local record between it and the selected CD.
+    let mut bytes = first.bytes.repeat(2);
+    set32(
+        &mut bytes,
+        first.bytes.len() + first.end + 16,
+        (first.bytes.len() + first.central) as u32,
+    );
+    let mut source = Cursor::new(bytes);
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+    assert!(matches!(
+        index.entry(&mut source, 0).await,
+        Err(FrameError::Invalid { position, reason: "unaccounted bytes after payload" })
+            if position == first.central as u64
+    ));
+    assert!(index.resolved(0).is_none());
 
     Ok(())
 }

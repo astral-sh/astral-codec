@@ -178,6 +178,8 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
             interrupt: Rc::new(Cell::new(false)),
             read_bytes: Rc::new(Cell::new(0)),
             max_read: 3,
+            yield_reads: true,
+            pending: false,
         })
         .await?
         .members();
@@ -382,6 +384,12 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
         ("long size", encoded.clone(), 1000),
         ("truncated", encoded[..encoded.len() - 1].to_vec(), 7),
         ("trailing byte", [encoded.as_slice(), &[0]].concat(), 7),
+        // StreamEnd can arrive while declared bytes remain outside the input buffer.
+        (
+            "unread trailing bytes",
+            [encoded.as_slice(), &vec![0; 64 * 1024]].concat(),
+            7,
+        ),
         ("concatenated stream", encoded.repeat(2), 7),
         ("invalid stream", vec![0xff; 5], 7),
     ] {
@@ -412,20 +420,41 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
     Ok(())
 }
 
+#[tokio::test]
+async fn reads_nested_zip_payload_without_interpreting_its_records() -> TestResult {
+    let mut archive =
+        ZipArchive::open(Cursor::new(member_with_attributes(STORED, 0o100644 << 16)?)).await?;
+    assert_eq!(archive.entries().len(), 1);
+    let Some(Member::File { payload, .. }) = archive.next_member().await? else {
+        return Err(io::Error::other("expected outer file").into());
+    };
+    assert_eq!(contents(payload).await?, STORED);
+    assert!(archive.next_member().await?.is_none());
+
+    Ok(())
+}
+
 struct Interruptible {
     source: Cursor<Vec<u8>>,
     interrupt: Rc<Cell<bool>>,
     read_bytes: Rc<Cell<usize>>,
     max_read: usize,
+    yield_reads: bool,
+    pending: bool,
 }
 
 impl AsyncRead for Interruptible {
     fn poll_read(
         mut self: Pin<&mut Self>,
-        _: &mut Context<'_>,
+        context: &mut Context<'_>,
         buffer: &mut ReadBuf<'_>,
     ) -> Poll<io::Result<()>> {
         if self.interrupt.get() && self.read_bytes.get() != 0 {
+            return Poll::Pending;
+        }
+        if self.pending {
+            self.pending = false;
+            context.waker().wake_by_ref();
             return Poll::Pending;
         }
 
@@ -441,6 +470,7 @@ impl AsyncRead for Interruptible {
 
         buffer.put_slice(&self.source.get_ref()[start..start + length]);
         self.source.set_position((start + length) as u64);
+        self.pending = self.yield_reads;
         if self.interrupt.get() {
             self.read_bytes.set(length);
         }
@@ -471,6 +501,8 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
             interrupt: interrupt.clone(),
             read_bytes: read_bytes.clone(),
             max_read: usize::MAX,
+            yield_reads: false,
+            pending: false,
         };
         let mut archive = ZipArchive::open(source).await?;
         if operation == "reader" {
