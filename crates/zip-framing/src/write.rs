@@ -4,13 +4,18 @@
 //! descriptors. Writers can reserve local header space before streaming data.
 
 use crate::{
-    CompressionMethod, Error, ExtraHeaderId, add,
-    constants::{attributes, extra, flags, host, signature, size, version},
+    CompressionMethod, Error, ExtraHeaderId, HostSystem, add,
+    constants::{extra, signature, size, version},
     invalid,
-    record::validate_name,
+    kind::{ExternalAttributes, UnixFileType},
+    record::{Common, GeneralPurposeFlags, SizeField, validate_name},
 };
 
-const VERSION_MADE_BY: u16 = ((host::UNIX as u16) << 8) | version::ZIP64;
+// APPNOTE 4.4.2: the high byte identifies the host system for external
+// attributes; the low byte is the ZIP specification version (45 = 4.5).
+// We always emit UNIX mode bits, regardless of the platform running the encoder.
+const VERSION_MADE_BY: u16 = ((HostSystem::Unix.to_byte() as u16) << 8) | version::ZIP64;
+
 // 00:00:00, 1980-01-01 in the DOS date/time format.
 const DEFAULT_TIME: u16 = 0;
 const DEFAULT_DATE: u16 = 0x0021;
@@ -26,14 +31,17 @@ pub enum EntryKind {
     SymbolicLink,
 }
 
-/// Validated metadata for one streaming ZIP64 member.
-pub struct MemberHeader<'a> {
+/// Validated metadata for a ZIP64 member awaiting its final CRC and sizes.
+///
+/// Once the payload's CRC and sizes are known, [`Self::finish`] produces a
+/// [`CompletedMember`] that can serialize the local and central headers.
+pub struct PendingMember<'a> {
     path: &'a str,
     method: CompressionMethod,
     kind: EntryKind,
 }
 
-impl<'a> MemberHeader<'a> {
+impl<'a> PendingMember<'a> {
     /// Checks the path and method before any output is written.
     pub fn new(path: &'a str, method: CompressionMethod, kind: EntryKind) -> Result<Self, Error> {
         if path.is_empty() || path.len() > usize::from(u16::MAX) {
@@ -52,15 +60,6 @@ impl<'a> MemberHeader<'a> {
         Ok(Self { path, method, kind })
     }
 
-    /// Returns total local and central metadata bytes.
-    pub fn metadata_size(&self) -> u64 {
-        (self.local_header_size()
-            + size::CENTRAL
-            + extra::HEADER_SIZE
-            + extra::ZIP64_CENTRAL_SIZE
-            + self.path.len()) as u64
-    }
-
     /// Returns the payload compression method.
     pub fn method(&self) -> CompressionMethod {
         self.method
@@ -69,6 +68,12 @@ impl<'a> MemberHeader<'a> {
     /// Returns the space to reserve for the completed local header.
     pub fn local_header_size(&self) -> usize {
         size::LOCAL + extra::HEADER_SIZE + extra::ZIP64_LOCAL_SIZE + self.path.len()
+    }
+
+    /// Returns the central header size in bytes, including the filename and
+    /// ZIP64 extra field.
+    pub fn central_header_size(&self) -> usize {
+        size::CENTRAL + extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE + self.path.len()
     }
 
     /// Completes metadata after the payload's CRC and sizes are known.
@@ -91,6 +96,10 @@ impl<'a> MemberHeader<'a> {
             return Err(invalid(offset, "directory has file data"));
         }
 
+        if matches!(self.kind, EntryKind::SymbolicLink) && uncompressed == 0 {
+            return Err(invalid(offset, "empty symbolic-link target"));
+        }
+
         Ok(CompletedMember {
             header: self,
             crc,
@@ -99,22 +108,11 @@ impl<'a> MemberHeader<'a> {
             offset,
         })
     }
-
-    fn common(&self, bytes: &mut Vec<u8>, crc: u32) {
-        push16(bytes, version::ZIP64);
-        push16(bytes, flags::UTF8);
-        push16(bytes, self.method as u16);
-        push16(bytes, DEFAULT_TIME);
-        push16(bytes, DEFAULT_DATE);
-        push32(bytes, crc);
-        push32(bytes, u32::MAX);
-        push32(bytes, u32::MAX);
-    }
 }
 
 /// Final member metadata with a consistent method, CRC, and size tuple.
 pub struct CompletedMember<'a> {
-    header: MemberHeader<'a>,
+    header: PendingMember<'a>,
     crc: u32,
     compressed: u64,
     uncompressed: u64,
@@ -126,7 +124,7 @@ impl CompletedMember<'_> {
     pub fn local_header(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.header.local_header_size());
         push32(&mut bytes, signature::LOCAL);
-        self.header.common(&mut bytes, self.crc);
+        bytes.extend_from_slice(&self.common().to_bytes());
         push16(&mut bytes, self.header.path.len() as u16);
         push16(
             &mut bytes,
@@ -145,12 +143,10 @@ impl CompletedMember<'_> {
 
     /// Serializes the matching central-directory header.
     pub fn central_header(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(
-            size::CENTRAL + extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE + self.header.path.len(),
-        );
+        let mut bytes = Vec::with_capacity(self.header.central_header_size());
         push32(&mut bytes, signature::CENTRAL);
         push16(&mut bytes, VERSION_MADE_BY);
-        self.header.common(&mut bytes, self.crc);
+        bytes.extend_from_slice(&self.common().to_bytes());
         push16(&mut bytes, self.header.path.len() as u16);
         push16(
             &mut bytes,
@@ -160,20 +156,21 @@ impl CompletedMember<'_> {
         push16(&mut bytes, 0); // Starting disk.
         push16(&mut bytes, 0); // Internal attributes.
 
-        let mode = match self.header.kind {
-            EntryKind::File { executable: true } => attributes::UNIX_REGULAR | 0o755,
-            EntryKind::File { executable: false } => attributes::UNIX_REGULAR | 0o644,
-            EntryKind::Directory => attributes::UNIX_DIRECTORY | 0o755,
-            EntryKind::SymbolicLink => attributes::UNIX_SYMLINK | 0o777,
+        let (file_type, permissions) = match self.header.kind {
+            EntryKind::File { executable: true } => (UnixFileType::Regular, 0o755),
+            EntryKind::File { executable: false } => (UnixFileType::Regular, 0o644),
+            EntryKind::Directory => (UnixFileType::Directory, 0o755),
+            EntryKind::SymbolicLink => (UnixFileType::SymbolicLink, 0o777),
         };
         let dos = if matches!(self.header.kind, EntryKind::Directory) {
-            attributes::DOS_DIRECTORY
+            ExternalAttributes::DOS_DIRECTORY
         } else {
             0
         };
         push32(
             &mut bytes,
-            (u32::from(mode) << attributes::UNIX_MODE_SHIFT) | dos,
+            (u32::from(u16::from(file_type) | permissions) << ExternalAttributes::UNIX_MODE_SHIFT)
+                | dos,
         );
         push32(&mut bytes, u32::MAX);
 
@@ -187,28 +184,54 @@ impl CompletedMember<'_> {
 
         bytes
     }
+
+    /// Returns a [`Common`] for this completed member's common metadata.
+    fn common(&self) -> Common {
+        Common {
+            version: version::ZIP64,
+            flags: GeneralPurposeFlags::UTF8,
+            method: self.header.method,
+            time: DEFAULT_TIME,
+            date: DEFAULT_DATE,
+            crc: self.crc,
+            compressed: SizeField::Zip64,
+            uncompressed: SizeField::Zip64,
+        }
+    }
 }
 
 /// Serializes the ZIP64 end record, locator, and classic end record.
+///
+/// See [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+/// sections 4.3.14 through 4.3.16 for the record layouts.
 pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
     let position = add(offset, size)?;
     let mut bytes = Vec::with_capacity(size::ZIP64_END + size::ZIP64_LOCATOR + size::END);
+
+    // ZIP64 end of central directory record (APPNOTE 4.3.14): stores the
+    // entry count and central directory size and offset as 64-bit values.
     push32(&mut bytes, signature::ZIP64_END);
+    // The size excludes the 12-byte signature/size prefix (APPNOTE 4.3.14.1).
     push64(&mut bytes, size::ZIP64_END_BODY as u64);
     push16(&mut bytes, VERSION_MADE_BY);
     push16(&mut bytes, version::ZIP64);
-    push32(&mut bytes, 0);
-    push32(&mut bytes, 0);
-    push64(&mut bytes, count);
-    push64(&mut bytes, count);
+    push32(&mut bytes, 0); // This disk.
+    push32(&mut bytes, 0); // Disk containing the central directory.
+    push64(&mut bytes, count); // Entries on this disk.
+    push64(&mut bytes, count); // Total entries.
     push64(&mut bytes, size);
     push64(&mut bytes, offset);
 
+    // ZIP64 end of central directory locator (APPNOTE 4.3.15): points to
+    // the ZIP64 end record above. This single-volume archive uses disk 0.
     push32(&mut bytes, signature::ZIP64_LOCATOR);
     push32(&mut bytes, 0);
     push64(&mut bytes, position);
-    push32(&mut bytes, 1);
+    push32(&mut bytes, 1); // Total disks.
 
+    // End of central directory record (APPNOTE 4.3.16): the required archive
+    // terminator. The maximum count, size, and offset values select the ZIP64
+    // fields above (APPNOTE 4.4.21 through 4.4.24).
     push32(&mut bytes, signature::END);
     push16(&mut bytes, 0);
     push16(&mut bytes, 0);
@@ -216,7 +239,7 @@ pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error>
     push16(&mut bytes, u16::MAX);
     push32(&mut bytes, u32::MAX);
     push32(&mut bytes, u32::MAX);
-    push16(&mut bytes, 0);
+    push16(&mut bytes, 0); // No archive comment.
 
     Ok(bytes)
 }

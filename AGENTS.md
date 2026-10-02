@@ -1,7 +1,8 @@
 - Read CONTRIBUTING.md for guidelines on how to run tools
-- ALWAYS attempt to add a test case for changed behavior, except for the `tarpit` CLI since it's dev only
+- ONLY add tests for new or changed behavior that existing tests do not cover, or a concrete coverage gap relevant to the task.
+- For behavior-preserving refactors, API renames, and code movement, update and run existing tests as needed; do not add tests merely because code changed.
+- Before adding a test, identify the distinct failure it would catch that existing tests would miss. PREFER extending an existing test when practical.
 - PREFER integration tests (`tar-codec/tests`) over unit tests when changed behavior concerns multiple APIs or whole tar streams
-- AVOID writing duplicate or tautological testcases
 - NEVER perform builds with the release profile, unless asked or reproducing performance issues
 - PREFER running specific tests over running the entire test suite
 - AVOID using `panic!`, `unreachable!`, `.unwrap()`, unsafe code, and clippy rule ignores

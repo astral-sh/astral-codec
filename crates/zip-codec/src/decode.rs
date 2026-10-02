@@ -1,14 +1,11 @@
 //! ZIP member projection and seekable archive access.
 
-use std::{
-    io::{self, SeekFrom},
-    str,
-};
+use std::io::{self, SeekFrom};
 
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
+use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, UnixData, constants::attributes};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -65,6 +62,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.state.index.entries()
     }
 
+    /// Returns a previously checked entry by index, without performing I/O.
+    ///
+    /// Returns [`None`] if the index is out of bounds or the member is unresolved.
+    pub fn resolved(&self, index: usize) -> Option<Entry<'_>> {
+        self.state.index.resolved(index)
+    }
+
     /// Selects a member by central-directory index.
     ///
     /// The selected local header and descriptor must agree with the directory
@@ -81,7 +85,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         let member = operation.state.prepare_member(index).await?;
         operation.commit();
 
-        Ok(member.map(|member| attach_payload(member, self)))
+        Ok(member.map(|member| self.attach_payload(member)))
     }
 
     /// Checks metadata for all members, including those never selected.
@@ -112,6 +116,36 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// Returns the source without validating any remaining payloads.
     pub fn into_inner(self) -> R {
         self.state.reader
+    }
+
+    fn attach_payload(&mut self, member: Member<()>) -> Member<ZipMemberPayload<'_, R>> {
+        match member {
+            Member::File {
+                metadata,
+                size,
+                executable,
+                ..
+            } => Member::File {
+                metadata,
+                size,
+                executable,
+                payload: ZipMemberPayload { archive: self },
+            },
+            Member::HardLink {
+                metadata,
+                target,
+                size,
+                ..
+            } => Member::HardLink {
+                metadata,
+                target,
+                size,
+                payload: ZipMemberPayload { archive: self },
+            },
+            Member::Directory { metadata } => Member::Directory { metadata },
+            Member::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
+            Member::Special { metadata, kind } => Member::Special { metadata, kind },
+        }
     }
 
     fn begin_operation(&mut self) -> Result<Operation<'_, R>, DecodeError> {
@@ -215,11 +249,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         self.drain().await?;
         self.index.validate_all(&mut self.reader).await?;
 
-        for entry in self
-            .index
-            .entries()
-            .iter()
-            .filter_map(IndexedEntry::resolved)
+        for entry in (0..self.index.entries().len()).filter_map(|index| self.index.resolved(index))
         {
             Kind::try_from(&entry)?;
         }
@@ -292,39 +322,6 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
     }
 }
 
-fn attach_payload<R>(
-    member: Member<()>,
-    archive: &mut ZipArchive<R>,
-) -> Member<ZipMemberPayload<'_, R>> {
-    match member {
-        Member::File {
-            metadata,
-            size,
-            executable,
-            ..
-        } => Member::File {
-            metadata,
-            size,
-            executable,
-            payload: ZipMemberPayload { archive },
-        },
-        Member::HardLink {
-            metadata,
-            target,
-            size,
-            ..
-        } => Member::HardLink {
-            metadata,
-            target,
-            size,
-            payload: ZipMemberPayload { archive },
-        },
-        Member::Directory { metadata } => Member::Directory { metadata },
-        Member::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
-        Member::Special { metadata, kind } => Member::Special { metadata, kind },
-    }
-}
-
 enum Kind {
     File(bool),
     Directory,
@@ -338,23 +335,9 @@ impl TryFrom<&Entry<'_>> for Kind {
 
     fn try_from(entry: &Entry<'_>) -> Result<Self, Self::Error> {
         let directory = entry.directory();
-        let link = if let Some(data) = entry.unix_extra_data().filter(|data| !data.is_empty())
-            && matches!(entry.kind(), EntryKind::HardLink | EntryKind::SymbolicLink)
-        {
-            let target = str::from_utf8(data).map_err(|_| DecodeError::Integrity {
-                position: directory.position(),
-                reason: "non-UTF-8 UNIX link target",
-            })?;
-            if target.contains('\0') {
-                return Err(DecodeError::Integrity {
-                    position: directory.position(),
-                    reason: "NUL in UNIX link target",
-                });
-            }
-
-            Some(target.to_owned())
-        } else {
-            None
+        let link = match entry.unix_data() {
+            Some(UnixData::LinkTarget(target)) => Some(target.clone()),
+            _ => None,
         };
 
         match entry.kind() {
