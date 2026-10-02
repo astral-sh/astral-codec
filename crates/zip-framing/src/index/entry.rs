@@ -1,4 +1,4 @@
-use std::ops::{Deref, Range};
+use std::ops::Range;
 
 use tokio::io::{AsyncRead, AsyncSeek};
 
@@ -60,6 +60,16 @@ pub struct Entry<'a> {
 }
 
 impl Entry<'_> {
+    /// Returns the member's central directory entry.
+    pub fn directory(&self) -> &CentralDirectoryEntry {
+        &self.indexed.directory
+    }
+
+    /// Returns the member's full byte range, including headers and any descriptor.
+    pub fn record_range(&self) -> Range<u64> {
+        self.indexed.record_range()
+    }
+
     /// Returns the member's kind, validated during local record resolution.
     ///
     /// This does not decode payloads or apply an extraction policy.
@@ -84,14 +94,6 @@ impl Entry<'_> {
     /// A prefix-only field returns [`UnixData::Empty`].
     pub fn unix_data(&self) -> Option<&UnixData> {
         self.resolved.unix_data.as_ref()
-    }
-}
-
-impl Deref for Entry<'_> {
-    type Target = IndexedEntry;
-
-    fn deref(&self) -> &Self::Target {
-        self.indexed
     }
 }
 
