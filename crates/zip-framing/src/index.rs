@@ -417,6 +417,57 @@ impl CentralDirectory {
             count,
         })
     }
+
+    /// Reads the entries from this checked directory and charges their output sizes.
+    ///
+    /// Failed or cancelled reads leave the budget unchanged.
+    async fn read_entries<R: AsyncRead + AsyncSeek + Unpin>(
+        &self,
+        reader: &mut RecordReader<'_, R>,
+        budget: &mut Budget,
+    ) -> Result<Vec<DirectoryEntry>, Error> {
+        let mut pending_budget = *budget;
+        let end = add(self.offset, self.size)?;
+        let mut position = self.offset;
+        let mut entries = Vec::new();
+
+        // The archive extra record is part of the directory's declared size.
+        if self.size >= size::ARCHIVE_EXTRA as u64 {
+            let mut header = [0; size::ARCHIVE_EXTRA];
+            reader.read_at(position, &mut header, end).await?;
+            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == signature::ARCHIVE_EXTRA {
+                let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
+                if add(position, size::ARCHIVE_EXTRA as u64 + length as u64)? > end {
+                    return Err(invalid(position, "truncated archive extra record"));
+                }
+
+                let bytes = reader
+                    .read_vec(position + size::ARCHIVE_EXTRA as u64, length, end)
+                    .await?;
+                Extras::parse(&bytes, position)?;
+                position += size::ARCHIVE_EXTRA as u64 + length as u64;
+            }
+        }
+
+        for _ in 0..self.count {
+            let (entry, next) =
+                DirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
+            entries.push(entry);
+            position = next;
+
+            tokio::task::yield_now().await;
+        }
+
+        if position != end {
+            return Err(invalid(
+                position,
+                "unaccounted directory bytes or digital signature",
+            ));
+        }
+
+        *budget = pending_budget;
+        Ok(entries)
+    }
 }
 
 async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
@@ -479,57 +530,4 @@ async fn read_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
     }
 
     Ok(())
-}
-
-impl CentralDirectory {
-    /// Reads the entries from this checked directory and charges their output sizes.
-    ///
-    /// Failed or cancelled reads leave the budget unchanged.
-    async fn read_entries<R: AsyncRead + AsyncSeek + Unpin>(
-        &self,
-        reader: &mut RecordReader<'_, R>,
-        budget: &mut Budget,
-    ) -> Result<Vec<DirectoryEntry>, Error> {
-        let mut pending_budget = *budget;
-        let end = add(self.offset, self.size)?;
-        let mut position = self.offset;
-        let mut entries = Vec::new();
-
-        // The archive extra record is part of the directory's declared size.
-        if self.size >= size::ARCHIVE_EXTRA as u64 {
-            let mut header = [0; size::ARCHIVE_EXTRA];
-            reader.read_at(position, &mut header, end).await?;
-            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == signature::ARCHIVE_EXTRA {
-                let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
-                if add(position, size::ARCHIVE_EXTRA as u64 + length as u64)? > end {
-                    return Err(invalid(position, "truncated archive extra record"));
-                }
-
-                let bytes = reader
-                    .read_vec(position + size::ARCHIVE_EXTRA as u64, length, end)
-                    .await?;
-                Extras::parse(&bytes, position)?;
-                position += size::ARCHIVE_EXTRA as u64 + length as u64;
-            }
-        }
-
-        for _ in 0..self.count {
-            let (entry, next) =
-                DirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
-            entries.push(entry);
-            position = next;
-
-            tokio::task::yield_now().await;
-        }
-
-        if position != end {
-            return Err(invalid(
-                position,
-                "unaccounted directory bytes or digital signature",
-            ));
-        }
-
-        *budget = pending_budget;
-        Ok(entries)
-    }
 }

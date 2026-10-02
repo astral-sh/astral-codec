@@ -160,6 +160,69 @@ impl DirectoryEntry {
     pub fn version_needed(&self) -> u16 {
         self.metadata.common.version
     }
+
+    pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
+        reader: &mut RecordReader<'_, R>,
+        position: u64,
+        end: u64,
+        budget: &mut Budget,
+    ) -> Result<(Self, u64), Error> {
+        let mut header = [0; size::CENTRAL];
+        reader.read_at(position, &mut header, end).await?;
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::CENTRAL {
+            return Err(invalid(position, "invalid central header signature"));
+        }
+
+        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(&header), position)?;
+        let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
+        let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
+        let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
+        let variable = reader
+            .read_slice(
+                position + size::CENTRAL as u64,
+                name_length + extra_length + comment_length,
+                end,
+            )
+            .await?;
+
+        let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
+        let sizes = extras.zip64(
+            common,
+            Some(u32::from_le_bytes(array_at::<42, 4, _>(&header))),
+            Some(u16::from_le_bytes(array_at::<34, 2, _>(&header))),
+            position,
+        )?;
+
+        let path = extras.name(&variable[..name_length], common.flags, position)?;
+        extras.comment(&variable[name_length + extra_length..], position)?;
+
+        if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
+            return Err(invalid(position, "stored member sizes differ"));
+        }
+
+        if sizes.uncompressed == 0 && common.crc != 0 {
+            return Err(invalid(position, "empty member has nonzero CRC"));
+        }
+
+        budget.output(sizes.uncompressed)?;
+        let entry = Self {
+            metadata: Metadata {
+                path: path.to_owned(),
+                common,
+                compressed_size: sizes.compressed,
+                size: sizes.uncompressed,
+                local_offset: sizes.offset,
+                made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
+                attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
+            },
+            extra: variable[name_length..name_length + extra_length].to_vec(),
+        };
+
+        Ok((
+            entry,
+            position + size::CENTRAL as u64 + variable.len() as u64,
+        ))
+    }
 }
 
 /// An indexed ZIP member and its central directory entry.
@@ -251,74 +314,9 @@ impl IndexedEntry {
         self.resolved()
             .ok_or_else(|| invalid(self.directory.position(), "missing resolved local record"))
     }
-}
 
-impl DirectoryEntry {
-    pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
-        reader: &mut RecordReader<'_, R>,
-        position: u64,
-        end: u64,
-        budget: &mut Budget,
-    ) -> Result<(Self, u64), Error> {
-        let mut header = [0; size::CENTRAL];
-        reader.read_at(position, &mut header, end).await?;
-        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::CENTRAL {
-            return Err(invalid(position, "invalid central header signature"));
-        }
-
-        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(&header), position)?;
-        let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
-        let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
-        let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
-        let variable = reader
-            .read_slice(
-                position + size::CENTRAL as u64,
-                name_length + extra_length + comment_length,
-                end,
-            )
-            .await?;
-
-        let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
-        let sizes = extras.zip64(
-            common,
-            Some(u32::from_le_bytes(array_at::<42, 4, _>(&header))),
-            Some(u16::from_le_bytes(array_at::<34, 2, _>(&header))),
-            position,
-        )?;
-
-        let path = extras.name(&variable[..name_length], common.flags, position)?;
-        extras.comment(&variable[name_length + extra_length..], position)?;
-
-        if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
-            return Err(invalid(position, "stored member sizes differ"));
-        }
-
-        if sizes.uncompressed == 0 && common.crc != 0 {
-            return Err(invalid(position, "empty member has nonzero CRC"));
-        }
-
-        budget.output(sizes.uncompressed)?;
-        let entry = Self {
-            metadata: Metadata {
-                path: path.to_owned(),
-                common,
-                compressed_size: sizes.compressed,
-                size: sizes.uncompressed,
-                local_offset: sizes.offset,
-                made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
-                attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
-            },
-            extra: variable[name_length..name_length + extra_length].to_vec(),
-        };
-
-        Ok((
-            entry,
-            position + size::CENTRAL as u64 + variable.len() as u64,
-        ))
-    }
-}
-
-impl IndexedEntry {
+    /// Read and validate an indexed entry's local header, filename, extras, and optional descriptor
+    /// against its corresponding central directory entry.
     async fn read_local<R: AsyncRead + AsyncSeek + Unpin>(
         &self,
         reader: &mut RecordReader<'_, R>,
@@ -407,6 +405,11 @@ impl IndexedEntry {
         })
     }
 
+    /// Validate a data descriptor after a member's compressed contents.
+    ///
+    /// The data descriptor supplies a local entry's sizes and CRC32 when
+    /// the local header leaves them as placeholders (and the general purpose
+    /// flag indicates that a descriptor follows the contents).
     async fn check_descriptor<R: AsyncRead + AsyncSeek + Unpin>(
         &self,
         reader: &mut RecordReader<'_, R>,
