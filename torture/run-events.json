@@ -1,0 +1,25 @@
+[
+  {
+    "at": "2026-10-01T19:03:41.735030+00:00",
+    "event": "monitor_disconnected_and_process_absent",
+    "completed_results": 758,
+    "detail": "The execution session disappeared; ps confirmed no runner or parser processes. Resume from the existing manifest and results without rerunning completed hashes."
+  },
+  {
+    "at": "2026-10-01T19:13:41.702922+00:00",
+    "event": "download_cap_raised",
+    "previous_cap_bytes": 134217728,
+    "cap_bytes": 1073741824,
+    "additional_projects": 6,
+    "additional_manifest": "large-wheels/manifest.json",
+    "detail": "Run the six previously excluded pinned wheels with two workers and a 600-second parser timeout. The parser binary is unchanged."
+  },
+  {
+    "at": "2026-10-01T19:26:54.410735+00:00",
+    "event": "large_wheel_batch_completed",
+    "additional_passes": 6,
+    "combined_passes": 962,
+    "parser_failures": 0,
+    "detail": "All six previously oversized wheel hashes were tested successfully. Combined manifest, results, summary, and report updated; temporary downloads removed."
+  }
+]

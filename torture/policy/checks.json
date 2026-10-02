@@ -1,0 +1,15 @@
+{
+  "checked_at": "2026-10-01T19:36:16.871002+00:00",
+  "command": "PYTHONDONTWRITEBYTECODE=1 python3 -m unittest discover -s scripts -p 'test_torture_policy.py' -v",
+  "passed": 5,
+  "cases": [
+    "clean directory and file",
+    "real paths, namespace conflicts, Unicode/quote/control round-trip",
+    "actual PKWARE UNIX hardlinks, symlinks, FIFO, setuid bits",
+    "framing rejections for absolute, drive, backslash, BOM names",
+    "file/directory destination aliases; child-before-parent conflicts; Unicode-normalized/casefold parent aliases; COM superscript device names"
+  ],
+  "build": "cargo build -p zip-codec --example torture_policy --locked",
+  "clippy": "cargo clippy -p zip-codec --example torture_policy --locked -- -D warnings",
+  "format": "cargo fmt --all --check"
+}
