@@ -297,6 +297,11 @@ impl IndexedEntry {
         })
     }
 
+    /// Refine this [`IndexedEntry`] into an [`Entry`].
+    ///
+    /// This function is lazy: if the [`Entry`] has already been resolved,
+    /// a cached version is returned. Otherwise, we do I/O to access the local
+    /// entry and reconcile it before returning it.
     pub(super) async fn resolve<R: AsyncRead + AsyncSeek + Unpin>(
         &mut self,
         reader: &mut R,
