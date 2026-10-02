@@ -17,7 +17,7 @@ use crate::payload::CHUNK_SIZE;
 
 /// Per-file ZIP settings for [`archive_trait::Builder::add_file_with_options`].
 ///
-/// Default options inherit the method configured by [`ZipEncoder::compression`].
+/// Default options inherit the method configured by [`ZipEncoder::with_compression`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ZipFileOptions {
     compression: Option<CompressionMethod>,
@@ -27,7 +27,7 @@ impl ZipFileOptions {
     /// Selects the compression method for this file.
     ///
     /// Empty files are always stored, regardless of this setting.
-    pub fn compression(mut self, method: CompressionMethod) -> Self {
+    pub fn with_compression(mut self, method: CompressionMethod) -> Self {
         self.compression = Some(method);
         self
     }
@@ -64,14 +64,14 @@ impl<W> ZipEncoder<W> {
 
     /// Selects the default compression method for nonempty regular files.
     ///
-    /// Individual files can override this with [`ZipFileOptions::compression`].
-    pub fn compression(mut self, method: CompressionMethod) -> Self {
+    /// Individual files can override this with [`ZipFileOptions::with_compression`].
+    pub fn with_compression(mut self, method: CompressionMethod) -> Self {
         self.method = method;
         self
     }
 
     /// Sets archive, member, metadata, entry-count, and total-input budgets.
-    pub fn limits(mut self, limits: Limits) -> Self {
+    pub fn with_limits(mut self, limits: Limits) -> Self {
         self.budget.set_limits(limits);
         self
     }

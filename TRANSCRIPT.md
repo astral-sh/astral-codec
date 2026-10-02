@@ -20,7 +20,7 @@
 - Per-file settings use `ArchiveBuilder::FileOptions` and
   `Builder::add_file_with_options`. Plain `add_file` and recursive builds use
   default options; `EntryMetadata` remains format-neutral.
-- `ZipFileOptions::compression` overrides the method for one nonempty file.
+- `ZipFileOptions::with_compression` overrides the method for one nonempty file.
   Default options inherit the encoder's method; empty files remain stored.
 - Only added runtime dependency: `flate2` with the `zlib-rs` backend.
 

@@ -42,7 +42,7 @@ async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> Te
         for length in [0, 1, 131_089, 2 * 1024 * 1024 + 3] {
             let source = source_bytes(length);
             let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-                .compression(method)
+                .with_compression(method)
                 .builder();
             builder.add_directory("directory").await?;
             builder
@@ -98,7 +98,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
         let cases = [
             (
                 "stored",
-                ZipFileOptions::default().compression(CompressionMethod::Stored),
+                ZipFileOptions::default().with_compression(CompressionMethod::Stored),
                 source,
                 CompressionMethod::Stored,
             ),
@@ -110,7 +110,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             ),
             (
                 "deflated",
-                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
                 source,
                 CompressionMethod::Deflate,
             ),
@@ -122,13 +122,13 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             ),
             (
                 "empty",
-                ZipFileOptions::default().compression(CompressionMethod::Deflate),
+                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
                 b"".as_slice(),
                 CompressionMethod::Stored,
             ),
         ];
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-            .compression(default_method)
+            .with_compression(default_method)
             .builder();
 
         for (path, options, contents, _) in cases {
@@ -200,7 +200,7 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-            .limits(limits)
+            .with_limits(limits)
             .builder();
         assert!(matches!(
             builder
