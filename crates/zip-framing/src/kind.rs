@@ -121,6 +121,8 @@ pub(crate) enum UnixFileType {
 }
 
 impl UnixFileType {
+    /// The top 4 bits of a UNIX file mode, indicating the file type.
+    /// This is equivalent extracting the `S_IFMT` masked bits from a `st_mode`.
     const TYPE_MASK: u16 = 0o170000;
 }
 
@@ -182,8 +184,21 @@ pub(crate) struct ExternalAttributes {
 }
 
 impl ExternalAttributes {
+    /// The DOS/FAT volume-label attribute.
+    ///
+    /// APPNOTE 4.4.15 places DOS attributes in the low byte for MS-DOS entries.
+    /// The bit value is `FAT_DIRENT_ATTR_VOLUME_ID` in
+    /// [Microsoft's FAT header](https://github.com/microsoft/Windows-driver-samples/blob/main/filesys/fastfat/fat.h).
     const DOS_VOLUME_LABEL: u32 = 0x08;
+
+    /// The DOS/FAT directory attribute.
+    ///
+    /// APPNOTE 4.4.15 places DOS attributes in the low byte for MS-DOS entries.
+    /// The bit value is `FAT_DIRENT_ATTR_DIRECTORY` in
+    /// [Microsoft's FAT header](https://github.com/microsoft/Windows-driver-samples/blob/main/filesys/fastfat/fat.h).
     pub(crate) const DOS_DIRECTORY: u32 = 0x10;
+
+    /// See the comment on [`ExternalAttributes::unix_mode`].
     pub(crate) const UNIX_MODE_SHIFT: u32 = 16;
 
     pub(crate) fn new(host_system: HostSystem, raw: u32) -> Self {
