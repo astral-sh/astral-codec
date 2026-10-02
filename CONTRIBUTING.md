@@ -25,6 +25,8 @@ Archive building follows the same separation in reverse:
 - archive-trait: the _build_ layer wraps format writers in a stateful engine
   that owns entry addition, name validation, collision tracking, recursive
   filesystem traversal, source streaming, and poisoning semantics.
+  It forwards format-specific file options to the writer; each codec defines
+  and interprets its own options type.
 - tar-codec: the _encode_ layer implements the format-writer hooks that project
   generic build operations into pax members and owns tar framing, padding,
   sequence numbers, and terminators.
@@ -35,6 +37,60 @@ For example, any change that affects framing (which blocks are considered
 headers, extensions, data, etc.) should occur in the physical layer, while a
 change to source traversal, path containment, or filesystem behavior belongs in
 `archive-trait`.
+
+### ZIP archives
+
+ZIP reading starts from a seekable source. `zip-framing` finds the end records,
+resolves ZIP64 fields, and reads the central directory through a bounded window.
+The index preserves directory order and derives each member's physical boundary
+from sorted local offsets, without fetching local records during opening.
+
+`IndexedEntry` owns a `CentralDirectoryEntry` with declared metadata and tracks the
+derived record boundary. `Index` owns the resolution cache, accessible through
+`Index::resolved`. `Index::entry` checks a selected local header, extras,
+descriptor, exact record extent, and kind-specific metadata
+before constructing a borrowed `Entry`. The resolved member data is cached only
+after every check succeeds; payload offsets, reconciled UNIX extras, and the
+ZIP-native `EntryKind` are available only through that checked type.
+Link targets in UNIX extras must be UTF-8 and contain no NUL bytes.
+`Entry::kind` returns the cached kind without I/O or further validation.
+`Index::validate_all` checks all members without decoding payloads. Local metadata
+budgets are charged once per successful resolution.
+
+Parsing constructors own their resource checks. Callers must not need separate
+validation or budget calls to make a returned value usable. Check limits before
+allocating variable-size metadata and commit usage only after successful
+construction. The index and encoder share `zip-framing::Budget` for limit checks
+and cumulative metadata and uncompressed-size accounting. Both charge a pending
+copy and commit it after the operation succeeds.
+
+`zip-codec` resolves entries before projecting them into `archive-trait` members.
+It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
+random access, and cursor poisoning. Advancing past an unfinished member drains
+and validates its payload. `ZipArchive::validate_all` also checks whether member
+kinds can be projected and enforces the symbolic-link size limit. Symbolic-link
+payloads are decoded and validated by the codec. Framing exposes volume labels,
+sockets, and unknown UNIX types; the codec rejects these kinds because they
+cannot be projected.
+`reader_mut().await` drains an active payload before lending the immutable source
+for caller-controlled prefetching or seeking. Filesystem extraction remains in
+`archive-trait`.
+
+Decoder I/O runs through a private operation guard. The archive remains poisoned
+unless the operation commits after all fallible work succeeds. Member preparation
+returns owned metadata before attaching a payload that borrows the archive.
+
+Writing follows the same separation. `archive-trait::Builder` handles names,
+collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
+and retains bounded central-directory metadata. `zip-framing::write` serializes
+UTF-8 ZIP64 headers and end records. ZIP output requires seeking so the encoder
+can fill in each local header after streaming its payload, without descriptors.
+
+Test record-layout behavior in `zip-framing/tests` and compression, projection,
+or builder behavior in `zip-codec/tests`. The checked-in Python-generated ZIP
+fixtures can be reproduced with
+`python3 crates/zip-codec/tests/fixtures/generate.py`; Python is not required to
+run the Rust tests.
 
 ## Formatting and linting
 
@@ -62,30 +118,53 @@ Run local wall-clock benchmarks with:
 ```shell
 cargo bench -p tar-codec --bench comparison --locked
 cargo bench -p tar-framing --bench framing --locked
+cargo bench -p zip-framing --bench framing --locked
+cargo bench -p zip-codec --bench codec --locked
 ```
 
 The `comparison` target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
 recursive directory encoding and USTAR extraction.
+
+The ZIP benchmarks use in-memory ZIP64 archives. `zip-framing` measures header
+serialization, directory indexing, and uncached local-record validation with
+single-entry, many-entry, and long Unicode path fixtures. `zip-codec` measures
+encoding and payload decoding with stored and DEFLATE compression, using large
+compressible files, large incompressible files, and many small files. Decoding
+includes local-record validation, member projection, and integrity checks;
+directory indexing is excluded. Encoding includes builder bookkeeping and output
+allocation. Fixture generation and correctness checks run outside measurements.
+
+Smoke-test the ZIP benchmarks in the test profile with:
+
+```shell
+cargo test -p zip-framing --bench framing --locked -- --test
+cargo test -p zip-codec --bench codec --locked -- --test
+```
 
 ### CodSpeed
 
 [The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
 and pushes to `main`, and supports manual runs:
 
-- `framing`: CPU simulation on a GitHub-hosted Linux runner.
+- `tar-framing`, `zip-framing`, and `zip-codec`: CPU simulation on GitHub-hosted
+  Linux runners.
 - `comparison`: walltime on a CodSpeed Graviton macro runner, including time
   spent in filesystem operations and other system calls.
 
-By default, the workflow runs all framing cases and the four `tar-codec` cases
-in `comparison`. Add the `benchmarks:compare` PR label or enable
+By default, the workflow runs all framing and ZIP codec cases and the four
+`tar-codec` cases in `comparison`. Add the `benchmarks:compare` PR label or enable
 **Compare implementations** in a manual run to include the other implementations.
 
 Build and check all instrumented benchmarks locally with:
 
 ```shell
 uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p zip-framing --bench framing --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
+uv run --only-dev --locked cargo codspeed run -p zip-framing --bench framing -m simulation
+uv run --only-dev --locked cargo codspeed run -p zip-codec --bench codec -m simulation
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
 ```
 
