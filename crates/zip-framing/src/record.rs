@@ -8,16 +8,18 @@ use crate::{CompressionMethod, Error, add, constants::version, invalid};
 /// Ordinary buffered readers discard their buffer on those seeks.
 pub(crate) struct RecordReader<'a, R> {
     inner: &'a mut R,
-    buffer: Vec<u8>,
+    buffer: &'a mut Vec<u8>,
     start: u64,
     capacity: usize,
 }
 
 impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
-    pub(crate) fn new(inner: &'a mut R, capacity: usize) -> Self {
+    pub(crate) fn new(inner: &'a mut R, capacity: usize, buffer: &'a mut Vec<u8>) -> Self {
+        // Reuse allocation, never bytes from a previous reader or operation.
+        buffer.clear();
         Self {
             inner,
-            buffer: Vec::new(),
+            buffer,
             start: 0,
             capacity,
         }
@@ -63,7 +65,7 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
             self.inner.seek(SeekFrom::Start(position)).await?;
             let read_length = (end - position).min(self.capacity.max(length) as u64) as usize;
             self.buffer.resize(read_length, 0);
-            self.inner.read_exact(&mut self.buffer).await?;
+            self.inner.read_exact(self.buffer).await?;
             self.start = position;
         }
 
@@ -101,7 +103,7 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
 
         let length = (end - position).min(self.capacity as u64) as usize;
         self.buffer.resize(length, 0);
-        self.inner.read_exact(&mut self.buffer).await?;
+        self.inner.read_exact(self.buffer).await?;
         self.start = position;
         bytes.copy_from_slice(&self.buffer[..bytes.len()]);
 
@@ -371,7 +373,8 @@ mod tests {
     #[tokio::test]
     async fn bounds_reads_before_allocation() -> Result<(), Error> {
         let mut source = Cursor::new([1, 2, 3, 4]);
-        let mut reader = RecordReader::new(&mut source, 4);
+        let mut buffer = Vec::new();
+        let mut reader = RecordReader::new(&mut source, 4, &mut buffer);
 
         // An allocation of this size would fail before any I/O could occur.
         assert!(matches!(
