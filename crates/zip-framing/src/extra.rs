@@ -6,7 +6,7 @@ use crate::{
     EntryKind, Error,
     constants::extra,
     invalid,
-    record::{Common, GeneralPurposeFlags, SizeField, array_at, bytes_at, parse_name},
+    record::{Common, SizeField, array_at, bytes_at},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -317,16 +317,10 @@ impl<'a> Extras<'a> {
         ))
     }
 
-    pub(crate) fn name<'name>(
-        &self,
-        bytes: &'name [u8],
-        flags: GeneralPurposeFlags,
-        position: u64,
-    ) -> Result<&'name str, Error> {
-        let name = parse_name(bytes, flags, position)?;
-
+    /// Checks Unicode metadata against an already validated filename.
+    pub(crate) fn check_name(&self, name: &str, position: u64) -> Result<(), Error> {
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodePath) {
-            let unicode = unicode_field(field, bytes, position)?;
+            let unicode = unicode_field(field, name.as_bytes(), position)?;
             if unicode != name {
                 return Err(invalid(
                     position,
@@ -335,7 +329,7 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(name)
+        Ok(())
     }
 
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
