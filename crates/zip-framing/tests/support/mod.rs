@@ -274,6 +274,7 @@ pub(super) struct Observed {
     pub(super) inner: Cursor<Vec<u8>>,
     pub(super) reads: Vec<Range<u64>>,
     pub(super) fail_at: Option<u64>,
+    pub(super) max_read: usize,
 }
 
 impl Observed {
@@ -282,6 +283,7 @@ impl Observed {
             inner: Cursor::new(bytes),
             reads: Vec::new(),
             fail_at: None,
+            max_read: usize::MAX,
         }
     }
 }
@@ -298,9 +300,11 @@ impl AsyncRead for Observed {
             return Poll::Ready(Err(io::Error::other("injected read failure")));
         }
 
-        let before = buffer.filled().len();
-        let result = Pin::new(&mut self.inner).poll_read(context, buffer);
-        let length = buffer.filled().len() - before;
+        let length = self.max_read.min(buffer.remaining());
+        let mut limited = ReadBuf::new(&mut buffer.initialize_unfilled()[..length]);
+        let result = Pin::new(&mut self.inner).poll_read(context, &mut limited);
+        let length = limited.filled().len();
+        buffer.advance(length);
         if length != 0 {
             self.reads.push(start..start + length as u64);
         }
