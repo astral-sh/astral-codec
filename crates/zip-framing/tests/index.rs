@@ -1806,6 +1806,16 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     // Resolve in reverse order after the directory window has been replaced.
     // The middle member exceeds both local and directory read-ahead windows.
     for ordinal in (0..names.len()).rev() {
+        // A partial read into reused scratch space must not publish stale
+        // bytes or a resolution. Retrying the unchanged source must succeed.
+        source.max_read = 3;
+        source.fail_at = Some(index.entries()[ordinal].directory().position() + 3);
+        assert!(matches!(
+            index.entry(&mut source, ordinal).await,
+            Err(FrameError::Io(_))
+        ));
+        assert!(index.resolved(ordinal).is_none());
+        source.max_read = usize::MAX;
         let entry = index
             .entry(&mut source, ordinal)
             .await?
