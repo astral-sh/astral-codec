@@ -29,6 +29,8 @@ pub struct Index {
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
+    /// Scratch space for local records, cleared between resolutions.
+    buffer: Vec<u8>,
 }
 
 impl Index {
@@ -58,7 +60,8 @@ impl Index {
         limits: Limits,
     ) -> Result<Self, Error> {
         let mut budget = Budget::new(limits);
-        let mut buffered = RecordReader::new(reader, 64 * 1024);
+        let mut buffer = Vec::new();
+        let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer);
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
         let entries = end.read_entries(&mut buffered, &mut budget).await?;
 
@@ -90,6 +93,7 @@ impl Index {
             resolved: (0..entries.len()).map(|_| None).collect(),
             entries,
             budget,
+            buffer: Vec::new(),
         })
     }
 
@@ -109,7 +113,7 @@ impl Index {
         let resolved = match &mut self.resolved[index] {
             Some(resolved) => resolved,
             slot => {
-                let mut buffered = RecordReader::new(reader, 4096);
+                let mut buffered = RecordReader::new(reader, 4096, &mut self.buffer);
                 // Failed or cancelled resolution must not charge the same metadata
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
