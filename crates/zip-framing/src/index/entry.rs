@@ -108,7 +108,8 @@ pub(super) struct ResolvedMember {
 pub struct CentralDirectoryEntry {
     /// Central directory entry metadata.
     metadata: Metadata,
-    /// Raw extra data for the central directory entry.
+    /// Extra data retained for local/central reconciliation. ZIP64-only extras
+    /// need no copy: their resolved values are already part of the metadata.
     extra: Vec<u8>,
 }
 
@@ -214,7 +215,11 @@ impl CentralDirectoryEntry {
                 made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
                 attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
-            extra: variable[name_length..name_length + extra_length].to_vec(),
+            extra: if extras.needs_reconciliation() {
+                variable[name_length..name_length + extra_length].to_vec()
+            } else {
+                Vec::new()
+            },
         };
 
         Ok((
