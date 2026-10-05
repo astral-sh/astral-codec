@@ -775,6 +775,31 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         ));
     }
 
+    // Valid directory names do not excuse malformed local names or a local
+    // encoding flag disagreement, even when both filename byte strings match.
+    for zip64 in [false, true] {
+        for change in [None, Some(0), Some(0xff), Some(b'/')] {
+            let mut archive = Fixture {
+                name: name.to_vec(),
+                zip64,
+                ..Fixture::default()
+            }
+            .build();
+            if let Some(byte) = change {
+                archive.bytes[30] = byte;
+            } else {
+                set16(&mut archive.bytes, 6, 0);
+            }
+            let mut source = Cursor::new(archive.bytes);
+            let mut index = Index::read(&mut source, Limits::default()).await?;
+            assert!(matches!(
+                index.entry(&mut source, 0).await,
+                Err(FrameError::Invalid { position: 0, .. })
+            ));
+            assert!(index.resolved(0).is_none());
+        }
+    }
+
     Ok(())
 }
 
@@ -1806,6 +1831,16 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     // Resolve in reverse order after the directory window has been replaced.
     // The middle member exceeds both local and directory read-ahead windows.
     for ordinal in (0..names.len()).rev() {
+        // A partial read into reused scratch space must not publish stale
+        // bytes or a resolution. Retrying the unchanged source must succeed.
+        source.max_read = 3;
+        source.fail_at = Some(index.entries()[ordinal].directory().position() + 3);
+        assert!(matches!(
+            index.entry(&mut source, ordinal).await,
+            Err(FrameError::Io(_))
+        ));
+        assert!(index.resolved(ordinal).is_none());
+        source.max_read = usize::MAX;
         let entry = index
             .entry(&mut source, ordinal)
             .await?
