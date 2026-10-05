@@ -85,14 +85,18 @@ fn payload(length: usize, salt: usize, incompressible: bool) -> Vec<u8> {
         .collect()
 }
 
-pub(super) fn fixture(case: &Case, runtime: &Runtime) -> Fixture {
-    let entries: Vec<_> = (0..case.entry_count)
+pub(super) fn entries(case: &Case) -> Vec<Entry> {
+    (0..case.entry_count)
         .map(|index| Entry {
             path: format!("package/file-{index:04}.bin"),
             data: payload(case.file_bytes, index, case.incompressible),
         })
-        .collect();
-    let archive = runtime.block_on(encode_archive(&entries, case.method));
+        .collect()
+}
+
+pub(super) fn fixture(case: &Case, runtime: &Runtime) -> Fixture {
+    let entries = entries(case);
+    let archive = runtime.block_on(encode_archive(&entries, case.method, 0));
     // Check paths, methods, and every decoded byte outside the measurement.
     runtime.block_on(validate_fixture(&archive, &entries, case.method));
     Fixture {
@@ -102,8 +106,12 @@ pub(super) fn fixture(case: &Case, runtime: &Runtime) -> Fixture {
     }
 }
 
-pub(super) async fn encode_archive(entries: &[Entry], method: CompressionMethod) -> Vec<u8> {
-    let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
+pub(super) async fn encode_archive(
+    entries: &[Entry],
+    method: CompressionMethod,
+    output_capacity: usize,
+) -> Vec<u8> {
+    let mut builder = ZipEncoder::new(Cursor::new(Vec::with_capacity(output_capacity)))
         .with_compression(method)
         .builder();
     for entry in entries {

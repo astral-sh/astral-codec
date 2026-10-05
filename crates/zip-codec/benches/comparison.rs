@@ -20,7 +20,9 @@ use zip::{
 };
 use zip_codec::{Archive, CompressionMethod, Member, MemberPayload, ZipArchive};
 
-use support::{Entry, PAYLOAD_CHUNK_BYTES, encode_archive, fixture, runtime, validate_fixture};
+use support::{
+    Entry, PAYLOAD_CHUNK_BYTES, encode_archive, entries, fixture, runtime, validate_fixture,
+};
 
 #[derive(Clone, Copy)]
 enum Implementation {
@@ -65,8 +67,8 @@ fn cases() -> impl Iterator<Item = Case> {
     })
 }
 
-fn encode_zip(entries: &[Entry], method: CompressionMethod) -> Vec<u8> {
-    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+fn encode_zip(entries: &[Entry], method: CompressionMethod, output_capacity: usize) -> Vec<u8> {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::with_capacity(output_capacity)));
     let method = match method {
         CompressionMethod::Stored => Some(ZipCompressionMethod::Stored),
         CompressionMethod::Deflate => Some(ZipCompressionMethod::Deflated),
@@ -88,8 +90,12 @@ fn encode_zip(entries: &[Entry], method: CompressionMethod) -> Vec<u8> {
         .into_inner()
 }
 
-async fn encode_async_zip(entries: &[Entry], method: CompressionMethod) -> Vec<u8> {
-    let mut writer = ZipFileWriter::with_tokio(Cursor::new(Vec::new()));
+async fn encode_async_zip(
+    entries: &[Entry],
+    method: CompressionMethod,
+    output_capacity: usize,
+) -> Vec<u8> {
+    let mut writer = ZipFileWriter::with_tokio(Cursor::new(Vec::with_capacity(output_capacity)));
     let method = Compression::try_from(method as u16)
         .expect("astral_async_zip should support the fixture compression method");
     for entry in entries {
@@ -352,31 +358,71 @@ fn open(bencher: Bencher, case: &Case) {
 
 #[divan::bench(args = cases())]
 fn encode(bencher: Bencher, case: &Case) {
+    let entries = entries(&case.workload);
+    bench_encode(bencher, case, &entries, 0);
+}
+
+#[divan::bench(args = cases())]
+fn encode_preallocated(bencher: Bencher, case: &Case) {
+    let entries = entries(&case.workload);
+    // Use the same allowance for all three encoders, independent of their
+    // output layouts or compression ratios. Post-measurement checks ensure
+    // this covers DEFLATE expansion and ZIP metadata for every fixture.
+    let output_capacity = 1024
+        + entries
+            .iter()
+            .map(|entry| 2 * entry.data.len() + 2 * entry.path.len() + 1024)
+            .sum::<usize>();
+    bench_encode(bencher, case, &entries, output_capacity);
+}
+
+fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacity: usize) {
     let runtime = runtime();
-    let fixture = fixture(&case.workload, &runtime);
     let method = case.workload.method;
-    // Validate the selected encoder's output before timing it. Encoders may use
-    // different ZIP record layouts, but must preserve every path and byte.
-    let encoded = match case.implementation {
-        Implementation::ZipCodec => runtime.block_on(encode_archive(&fixture.entries, method)),
-        Implementation::Zip => encode_zip(&fixture.entries, method),
-        Implementation::AsyncZip => runtime.block_on(encode_async_zip(&fixture.entries, method)),
-    };
-    runtime.block_on(validate_fixture(&encoded, &fixture.entries, method));
     let bencher = bencher
-        .counter(ItemsCount::new(fixture.entries.len()))
-        .counter(BytesCount::new(fixture.payload_bytes));
+        .counter(ItemsCount::new(entries.len()))
+        .counter(BytesCount::new(
+            entries.iter().map(|entry| entry.data.len()).sum::<usize>(),
+        ));
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
-            black_box(runtime.block_on(encode_archive(black_box(&fixture.entries), method)));
+            black_box(runtime.block_on(encode_archive(
+                black_box(entries),
+                method,
+                output_capacity,
+            )));
         }),
         Implementation::Zip => bencher.bench_local(|| {
-            black_box(encode_zip(black_box(&fixture.entries), method));
+            black_box(encode_zip(black_box(entries), method, output_capacity));
         }),
         Implementation::AsyncZip => bencher.bench_local(|| {
-            black_box(runtime.block_on(encode_async_zip(black_box(&fixture.entries), method)));
+            black_box(runtime.block_on(encode_async_zip(
+                black_box(entries),
+                method,
+                output_capacity,
+            )));
         }),
     }
+    // Check the selected encoder after timing to keep reader allocations out
+    // of this case's setup.
+    let encoded = match case.implementation {
+        Implementation::ZipCodec => {
+            runtime.block_on(encode_archive(entries, method, output_capacity))
+        }
+        Implementation::Zip => encode_zip(entries, method, output_capacity),
+        Implementation::AsyncZip => {
+            runtime.block_on(encode_async_zip(entries, method, output_capacity))
+        }
+    };
+    if output_capacity != 0 {
+        assert!(encoded.len() <= output_capacity);
+        assert_eq!(
+            encoded.capacity(),
+            output_capacity,
+            "output buffer must not grow"
+        );
+    }
+    runtime.block_on(validate_fixture(&encoded, entries, method));
 }
 
 #[divan::bench(args = cases())]
