@@ -193,6 +193,108 @@ async fn decode_async_zip(bytes: &[u8], mut consume: impl FnMut(&str, &[u8])) ->
     (archive.file().entries().len(), payload_bytes)
 }
 
+// Compare bounded streaming separately from collection. astral_async_zip's
+// checked helper collects the whole file; using its streaming traits here would
+// require another direct benchmark dependency.
+async fn stream_zip_codec(bytes: &[u8], mut consume: impl FnMut(&str, &[u8])) -> (usize, u64) {
+    let mut archive = ZipArchive::open(Cursor::new(bytes))
+        .await
+        .expect("zip-codec archive should open");
+    let mut chunk = Vec::new();
+    let mut entries = 0;
+    let mut payload_bytes = 0;
+    while let Some(member) = archive
+        .next_member()
+        .await
+        .expect("zip-codec member should decode")
+    {
+        assert!(matches!(member, Member::File { .. }));
+        if let Member::File {
+            metadata,
+            mut payload,
+            ..
+        } = member
+        {
+            while payload
+                .next_chunk(&mut chunk, PAYLOAD_CHUNK_BYTES)
+                .await
+                .expect("zip-codec payload should decode")
+            {
+                consume(&metadata.path, &chunk);
+                payload_bytes += chunk.len() as u64;
+            }
+            entries += 1;
+        }
+    }
+    (entries, payload_bytes)
+}
+
+fn stream_zip(bytes: &[u8], mut consume: impl FnMut(&str, &[u8])) -> (usize, u64) {
+    let mut archive = SyncZipArchive::new(Cursor::new(bytes)).expect("zip archive should open");
+    let mut chunk = vec![0; PAYLOAD_CHUNK_BYTES];
+    let mut payload_bytes = 0;
+    for index in 0..archive.len() {
+        let mut entry = archive.by_index(index).expect("zip member should decode");
+        loop {
+            let length = entry
+                .read(&mut chunk)
+                .expect("zip payload should decode and pass CRC validation");
+            if length == 0 {
+                break;
+            }
+            consume(entry.name(), &chunk[..length]);
+            payload_bytes += length as u64;
+        }
+    }
+    (archive.len(), payload_bytes)
+}
+
+fn streaming_cases() -> impl Iterator<Item = Case> {
+    cases().filter(|case| !matches!(case.implementation, Implementation::AsyncZip))
+}
+
+#[divan::bench(args = streaming_cases())]
+fn decode_stream(bencher: Bencher, case: &Case) {
+    assert!(!matches!(case.implementation, Implementation::AsyncZip));
+    let runtime = runtime();
+    let fixture = fixture(&case.workload, &runtime);
+    let mut index = 0;
+    let mut offset = 0;
+    let check = |path: &str, data: &[u8]| {
+        let expected = &fixture.entries[index];
+        assert_eq!(path, expected.path);
+        assert_eq!(data, &expected.data[offset..offset + data.len()]);
+        offset += data.len();
+        if offset == expected.data.len() {
+            index += 1;
+            offset = 0;
+        }
+    };
+    let decoded = match case.implementation {
+        Implementation::ZipCodec => runtime.block_on(stream_zip_codec(&fixture.archive, check)),
+        Implementation::Zip => stream_zip(&fixture.archive, check),
+        Implementation::AsyncZip => return,
+    };
+    assert_eq!(index, fixture.entries.len());
+    assert_eq!(offset, 0);
+    assert_eq!(decoded, (fixture.entries.len(), fixture.payload_bytes));
+    let consume = |path: &str, chunk: &[u8]| {
+        black_box((path, chunk));
+    };
+    let bencher = bencher
+        .counter(ItemsCount::new(fixture.entries.len()))
+        .counter(BytesCount::new(fixture.payload_bytes));
+    match case.implementation {
+        Implementation::ZipCodec => bencher.bench_local(|| {
+            black_box(runtime.block_on(stream_zip_codec(black_box(&fixture.archive), consume)));
+        }),
+        Implementation::Zip => bencher.bench_local(|| {
+            black_box(stream_zip(black_box(&fixture.archive), consume));
+        }),
+        Implementation::AsyncZip => {}
+    }
+}
+
 #[divan::bench(args = cases())]
 fn open(bencher: Bencher, case: &Case) {
     let runtime = runtime();
