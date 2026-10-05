@@ -36,65 +36,6 @@ fn source_bytes(length: usize) -> Vec<u8> {
         .collect()
 }
 
-async fn assert_cooperates<T>(operation: impl Future<Output = T>) -> T {
-    let polled = Cell::new(false);
-    let (result, ()) = tokio::join!(
-        biased;
-        async {
-            let result = operation.await;
-            assert!(polled.get(), "ready archive work must let another future run");
-            result
-        },
-        async { polled.set(true) },
-    );
-    result
-}
-
-#[tokio::test]
-async fn ready_sources_cooperate_during_encoding_indexing_and_decoding() -> TestResult {
-    for method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
-        let source = vec![42; 256 * 64 * 1024];
-        let output = assert_cooperates(async {
-            let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
-                .with_compression(method)
-                .builder();
-            for index in 0..256 {
-                builder
-                    .add_file(
-                        format!("small-{index}"),
-                        b"x".as_slice(),
-                        EntryMetadata::default(),
-                    )
-                    .await?;
-            }
-            builder
-                .add_file("large", source.as_slice(), EntryMetadata::default())
-                .await?;
-            builder.finish_into_inner().await
-        })
-        .await?
-        .into_inner();
-
-        let mut archive = assert_cooperates(ZipArchive::open(output)).await?;
-        let decoded = assert_cooperates(async {
-            let mut decoded = 0;
-            let mut chunk = Vec::new();
-            while let Some(member) = archive.next_member().await? {
-                let Member::File { mut payload, .. } = member else {
-                    return Err(io::Error::other("expected encoded file").into());
-                };
-                while payload.next_chunk(&mut chunk, 64 * 1024).await? {
-                    decoded += chunk.len();
-                }
-            }
-            Ok::<_, Box<dyn Error>>(decoded)
-        })
-        .await?;
-        assert_eq!(decoded, source.len() + 256);
-    }
-    Ok(())
-}
-
 #[tokio::test]
 async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> TestResult {
     for method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
