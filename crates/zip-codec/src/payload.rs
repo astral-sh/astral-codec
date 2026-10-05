@@ -100,7 +100,7 @@ impl Payload {
             return Ok(false);
         }
 
-        tokio::task::yield_now().await;
+        tokio::task::consume_budget().await;
 
         let length = (target_len.min(CHUNK_SIZE) as u64)
             .min(self.integrity.decoded_remaining.saturating_add(1)) as usize;
@@ -181,7 +181,7 @@ impl Payload {
 
                 // A hostile stream can consume many empty blocks without emitting
                 // output. Bound each decoder call and give the executor a turn.
-                tokio::task::yield_now().await;
+                tokio::task::consume_budget().await;
             },
         }
     }
