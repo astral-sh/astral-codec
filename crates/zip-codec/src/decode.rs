@@ -271,9 +271,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
 
     async fn drain(&mut self) -> Result<(), DecodeError> {
         let mut buffer = Vec::new();
-        while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {
-            tokio::task::yield_now().await;
-        }
+        while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {}
 
         self.active = None;
 
