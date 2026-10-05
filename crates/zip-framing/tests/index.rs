@@ -1154,6 +1154,49 @@ async fn rejects_prefixed_and_concatenated_archives_with_consistent_offsets() ->
 }
 
 #[tokio::test]
+async fn finds_end_records_across_scan_groups() -> TestResult {
+    for zip64 in [false, true] {
+        for length in 0..64 {
+            // With a full search window, changing the comment length moves the
+            // EOCD through every alignment, including split signatures/headers.
+            let archive = Fixture {
+                zip64,
+                payload: Some(vec![b'P'; 70_000]),
+                archive_comment: vec![b'P'; length],
+                ..Fixture::default()
+            }
+            .build();
+            assert_eq!(
+                Index::read(&mut Cursor::new(&archive.bytes), Limits::default())
+                    .await?
+                    .entries()
+                    .len(),
+                1
+            );
+
+            // Both end records reach EOF. Neither the earlier match nor one in
+            // the final partial scan group may hide the other candidate.
+            let mut comment = vec![b'P'; length];
+            comment.extend(end_record(0, 0, 0, &[]));
+            let archive = Fixture {
+                zip64,
+                archive_comment: comment,
+                ..Fixture::default()
+            }
+            .build();
+            assert!(matches!(
+                Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "ambiguous end records",
+                    ..
+                })
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn bounds_end_record_search_with_short_reads() -> TestResult {
     for byte in [0, b'a'] {
         let mut comment = vec![byte; usize::from(u16::MAX)];

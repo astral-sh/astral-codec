@@ -173,22 +173,37 @@ impl CentralDirectory {
             return Err(invalid(0, "missing end of central directory"));
         }
 
-        // EOCD has a 16-bit comment length. Never scan the payload for signatures.
+        // EOCD has a 16-bit comment length. Never search before this bounded tail.
         let tail_size = length.min(size::END as u64 + u64::from(u16::MAX)) as usize;
         let tail_start = length - tail_size as u64;
-        let tail = reader.read_vec(tail_start, tail_size, length).await?;
+        let tail = reader.read_slice(tail_start, tail_size, length).await?;
 
         let mut candidate = None;
-        for (offset, header) in tail.windows(size::END).enumerate() {
-            if header.starts_with(&signature::END.to_le_bytes())
-                && let Some(header) = header.first_chunk::<{ size::END }>()
-                && offset
-                    + size::END
-                    + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
-                    == tail.len()
-                && candidate.replace((offset, header)).is_some()
-            {
-                return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
+        // Skip groups without a possible signature before checking individual
+        // offsets. Scan the whole tail: a second valid EOCD is ambiguous even
+        // when the last 22 bytes already look like an end record.
+        let (groups, remainder) = tail[..=tail.len() - size::END].as_chunks::<8>();
+        let mut last = [0; 8];
+        last[..remainder.len()].copy_from_slice(remainder);
+        for (group, bytes) in groups.iter().chain([&last]).enumerate() {
+            let word = u64::from_le_bytes(*bytes) ^ u64::from_le_bytes([b'P'; 8]);
+            // Mark zero bytes after XORing with 'P'. Borrow propagation can
+            // also mark an adjacent byte; the full signature check rejects it.
+            let mut matches =
+                word.wrapping_sub(0x0101_0101_0101_0101) & !word & 0x8080_8080_8080_8080;
+            while matches != 0 {
+                let offset = group * 8 + matches.trailing_zeros() as usize / 8;
+                matches &= matches - 1;
+                if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
+                    && header.starts_with(&signature::END.to_le_bytes())
+                    && offset
+                        + size::END
+                        + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+                        == tail.len()
+                    && candidate.replace((offset, *header)).is_some()
+                {
+                    return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
+                }
             }
         }
 
@@ -204,32 +219,32 @@ impl CentralDirectory {
         {
             for (small, large, sentinel) in [
                 (
-                    u64::from(u16::from_le_bytes(array_at::<4, 2, _>(end))),
+                    u64::from(u16::from_le_bytes(array_at::<4, 2, _>(&end))),
                     0,
                     u64::from(u16::MAX),
                 ),
                 (
-                    u64::from(u16::from_le_bytes(array_at::<6, 2, _>(end))),
+                    u64::from(u16::from_le_bytes(array_at::<6, 2, _>(&end))),
                     0,
                     u64::from(u16::MAX),
                 ),
                 (
-                    u64::from(u16::from_le_bytes(array_at::<8, 2, _>(end))),
+                    u64::from(u16::from_le_bytes(array_at::<8, 2, _>(&end))),
                     record.entry_count,
                     u64::from(u16::MAX),
                 ),
                 (
-                    u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end))),
+                    u64::from(u16::from_le_bytes(array_at::<10, 2, _>(&end))),
                     record.entry_count,
                     u64::from(u16::MAX),
                 ),
                 (
-                    u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end))),
+                    u64::from(u32::from_le_bytes(array_at::<12, 4, _>(&end))),
                     record.directory_size,
                     u64::from(u32::MAX),
                 ),
                 (
-                    u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end))),
+                    u64::from(u32::from_le_bytes(array_at::<16, 4, _>(&end))),
                     record.directory_offset,
                     u64::from(u32::MAX),
                 ),
@@ -246,8 +261,8 @@ impl CentralDirectory {
                 record.position,
             )
         } else {
-            if u16::from_le_bytes(array_at::<4, 2, _>(end)) != 0
-                || u16::from_le_bytes(array_at::<6, 2, _>(end)) != 0
+            if u16::from_le_bytes(array_at::<4, 2, _>(&end)) != 0
+                || u16::from_le_bytes(array_at::<6, 2, _>(&end)) != 0
             {
                 return Err(Error::Unsupported {
                     position,
@@ -255,15 +270,15 @@ impl CentralDirectory {
                 });
             }
 
-            if u16::from_le_bytes(array_at::<8, 2, _>(end))
-                != u16::from_le_bytes(array_at::<10, 2, _>(end))
+            if u16::from_le_bytes(array_at::<8, 2, _>(&end))
+                != u16::from_le_bytes(array_at::<10, 2, _>(&end))
             {
                 return Err(invalid(position, "entry counts disagree"));
             }
 
-            let offset = u64::from(u32::from_le_bytes(array_at::<16, 4, _>(end)));
-            let size = u64::from(u32::from_le_bytes(array_at::<12, 4, _>(end)));
-            let count = u64::from(u16::from_le_bytes(array_at::<10, 2, _>(end)));
+            let offset = u64::from(u32::from_le_bytes(array_at::<16, 4, _>(&end)));
+            let size = u64::from(u32::from_le_bytes(array_at::<12, 4, _>(&end)));
+            let count = u64::from(u16::from_le_bytes(array_at::<10, 2, _>(&end)));
             if count == u64::from(u16::MAX)
                 || size == u64::from(u32::MAX)
                 || offset == u64::from(u32::MAX)
