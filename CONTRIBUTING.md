@@ -177,8 +177,10 @@ and pushes to `main`, and supports manual runs:
 
 - `tar-framing`, `zip-framing`, and both `zip-codec` targets: CPU simulation on
   GitHub-hosted Linux runners.
-- `tar-codec` comparison: walltime on a CodSpeed Graviton macro runner, including time
-  spent in filesystem operations and other system calls.
+- `tar-codec` and `zip-codec` comparisons: walltime on CodSpeed Graviton macro runners,
+  including time spent in filesystem operations and other system calls. Each
+  comparison target runs in its own job. ZIP comparisons run in both modes;
+  compare results within the same mode and runner architecture.
 
 By default, the workflow runs all framing and ZIP codec cases and only our
 implementation in each comparison target. Add the `benchmarks:compare` PR label or
@@ -193,11 +195,13 @@ uv run --only-dev --locked cargo codspeed build -p zip-framing --bench framing -
 uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
+uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-framing --bench framing -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench codec -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m simulation
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
+uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m walltime
 ```
 
 To select only our implementation in either comparison target, use:
@@ -205,4 +209,5 @@ To select only our implementation in either comparison target, use:
 ```shell
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m simulation -- '/zip-codec(\]|$)'
+uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m walltime -- '/zip-codec(\]|$)'
 ```

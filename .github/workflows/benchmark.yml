@@ -100,10 +100,13 @@ jobs:
             fi
 
   benchmark-comparison-build:
-    name: Build comparison benchmarks
+    name: Build comparison benchmarks (${{ matrix.package }})
     # Match the macro runner's architecture and Ubuntu version.
     runs-on: ubuntu-22.04-arm
     timeout-minutes: 20
+    strategy:
+      matrix:
+        package: [tar-codec, zip-codec]
     permissions:
       contents: read
 
@@ -122,7 +125,7 @@ jobs:
       - uses: Swatinem/rust-cache@c19371144df3bb44fab255c43d04cbc2ab54d1c4 # v2.9.1
 
       - name: Build benchmarks
-        run: uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
+        run: uv run --only-dev --locked cargo codspeed build -p ${{ matrix.package }} --bench comparison --locked -m walltime
 
       - name: Archive benchmarks
         run: tar -cf benchmarks-walltime.tar target/codspeed
@@ -130,16 +133,19 @@ jobs:
       - name: Upload benchmarks
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: benchmarks-walltime
+          name: benchmarks-walltime-${{ matrix.package }}
           path: benchmarks-walltime.tar
           if-no-files-found: error
           retention-days: 1
 
   benchmark-comparison-run:
-    name: CodSpeed (comparison, walltime)
+    name: CodSpeed (${{ matrix.package }}, comparison, walltime)
     runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
     needs: benchmark-comparison-build
     timeout-minutes: 20
+    strategy:
+      matrix:
+        package: [tar-codec, zip-codec]
     permissions:
       contents: read
       id-token: write # Authenticate uploads to CodSpeed with OIDC.
@@ -164,7 +170,7 @@ jobs:
       - name: Download benchmarks
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
         with:
-          name: benchmarks-walltime
+          name: benchmarks-walltime-${{ matrix.package }}
 
       - name: Extract benchmarks
         run: tar -xf benchmarks-walltime.tar
@@ -175,7 +181,7 @@ jobs:
           mode: walltime
           run: |
             if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
+              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime
             else
-              uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
+              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime -- '/${{ matrix.package }}(\]|$)'
             fi
