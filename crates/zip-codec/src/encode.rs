@@ -175,7 +175,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
                 return Err(EncodeError::Compression);
             }
 
-            tokio::task::yield_now().await;
+            tokio::task::consume_budget().await;
         }
     }
 
@@ -220,7 +220,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
                     self.write_bytes(chunk).await?;
                 }
 
-                tokio::task::yield_now().await;
+                tokio::task::consume_budget().await;
             }
         }
 
