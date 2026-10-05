@@ -8,7 +8,9 @@ use crate::{
     extra::Extras,
     invalid,
     kind::ExternalAttributes,
-    record::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at},
+    record::{
+        Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at, parse_name,
+    },
 };
 
 /// Central directory metadata for a ZIP member.
@@ -193,7 +195,8 @@ impl CentralDirectoryEntry {
             position,
         )?;
 
-        let path = extras.name(&variable[..name_length], common.flags, position)?;
+        let path = parse_name(&variable[..name_length], common.flags, position)?;
+        extras.check_name(path, position)?;
         extras.comment(&variable[name_length + extra_length..], position)?;
 
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
@@ -321,9 +324,12 @@ impl IndexedEntry {
 
         let extras = Extras::parse(&variable[name_length..], position)?;
         let sizes = extras.local_sizes(common, position)?;
-        if extras.name(&variable[..name_length], common.flags, position)? != metadata.path {
+        // Equal bytes inherit the directory's UTF-8 and filename validation.
+        // Header agreement below also requires identical encoding flags.
+        if &variable[..name_length] != metadata.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
+        extras.check_name(&metadata.path, position)?;
 
         let unix_data =
             extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;
