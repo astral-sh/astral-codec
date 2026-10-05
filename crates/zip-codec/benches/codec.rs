@@ -8,7 +8,9 @@ use divan::{
 };
 use zip_codec::{Archive, Member, MemberPayload, ZipArchive};
 
-use support::{Case, PAYLOAD_CHUNK_BYTES, cases, encode_archive, fixture, runtime};
+use support::{
+    Case, PAYLOAD_CHUNK_BYTES, cases, encode_archive, entries, fixture, runtime, validate_fixture,
+};
 
 async fn decode_members(archive: &mut ZipArchive<Cursor<&[u8]>>) -> (usize, u64) {
     let mut entries = 0;
@@ -34,13 +36,18 @@ async fn decode_members(archive: &mut ZipArchive<Cursor<&[u8]>>) -> (usize, u64)
 #[divan::bench(args = cases())]
 fn encode(bencher: Bencher, case: &Case) {
     let runtime = runtime();
-    let fixture = fixture(case, &runtime);
+    let entries = entries(case);
     bencher
-        .counter(ItemsCount::new(fixture.entries.len()))
-        .counter(BytesCount::new(fixture.payload_bytes))
+        .counter(ItemsCount::new(entries.len()))
+        .counter(BytesCount::new(
+            entries.iter().map(|entry| entry.data.len()).sum::<usize>(),
+        ))
         .bench_local(|| {
-            black_box(runtime.block_on(encode_archive(black_box(&fixture.entries), case.method)));
+            black_box(runtime.block_on(encode_archive(black_box(&entries), case.method, 0)));
         });
+    // Reader allocations must not affect the heap before encoding is measured.
+    let encoded = runtime.block_on(encode_archive(&entries, case.method, 0));
+    runtime.block_on(validate_fixture(&encoded, &entries, case.method));
 }
 
 #[divan::bench(args = cases(), sample_size = 1)]
