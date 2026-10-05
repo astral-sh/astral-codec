@@ -128,12 +128,16 @@ recursive directory encoding and USTAR extraction.
 
 The ZIP benchmarks use in-memory ZIP64 archives. `zip-framing` measures header
 serialization, directory indexing, and uncached local-record validation with
-single-entry, many-entry, and long Unicode path fixtures. `zip-codec` measures
-encoding and payload decoding with stored and DEFLATE compression, using large
+single-entry, many-entry, and long Unicode path fixtures. `encode_headers_preallocated`
+reserves the exact archive and directory capacities before writing; the initial
+allocations and per-record allocations remain inside the measurement. `zip-codec`
+measures encoding and payload decoding with stored and DEFLATE compression, using large
 compressible files, large incompressible files, and many small files. Decoding
 includes local-record validation, member projection, and integrity checks;
 directory indexing is excluded. Encoding includes builder bookkeeping and output
 allocation. Fixture generation and correctness checks run outside measurements.
+Encoding fixtures contain only input paths and payloads. Their output is validated
+after timing, so reader allocations do not affect encoding setup.
 
 The `zip-codec` comparison target compares `zip-codec`, `zip`, and `astral_async_zip`
 on in-memory archive opening, encoding, and decoding with the same workloads.
@@ -145,9 +149,15 @@ and `zip` with a reusable 64 KiB chunk buffer and no full-file collection. Both
 read to EOF and validate CRCs. `astral_async_zip` is omitted from this case because
 its checked helper collects the whole file, and its streaming traits require an
 additional direct dependency. Streaming and collection are separate workloads;
-compare implementations within the same workload. Encoding uses each library's buffered
-input API and includes output allocation and finalization; output record layouts
-may differ. All three use the default DEFLATE level and the shared `zlib-rs`
+compare implementations within the same workload. Encoding uses each library's
+buffered input API and includes output allocation and finalization; output record
+layouts may differ. `encode` starts with an empty output buffer and includes its
+growth. `encode_preallocated` gives all three encoders the same capacity, with
+room for DEFLATE expansion and their different headers. It includes the initial
+output allocation and internal allocations, but checks that output needs no
+growth. Compare these cases separately. The preallocated cases, including the
+renamed header serialization benchmark, start new baselines.
+All three use the default DEFLATE level and the shared `zlib-rs`
 backend. Every encoder's output and every decoder's paths and payloads are checked
 outside measurements. These comparisons do not imply equivalent validation or
 resource policies.

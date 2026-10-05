@@ -775,6 +775,31 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         ));
     }
 
+    // Valid directory names do not excuse malformed local names or a local
+    // encoding flag disagreement, even when both filename byte strings match.
+    for zip64 in [false, true] {
+        for change in [None, Some(0), Some(0xff), Some(b'/')] {
+            let mut archive = Fixture {
+                name: name.to_vec(),
+                zip64,
+                ..Fixture::default()
+            }
+            .build();
+            if let Some(byte) = change {
+                archive.bytes[30] = byte;
+            } else {
+                set16(&mut archive.bytes, 6, 0);
+            }
+            let mut source = Cursor::new(archive.bytes);
+            let mut index = Index::read(&mut source, Limits::default()).await?;
+            assert!(matches!(
+                index.entry(&mut source, 0).await,
+                Err(FrameError::Invalid { position: 0, .. })
+            ));
+            assert!(index.resolved(0).is_none());
+        }
+    }
+
     Ok(())
 }
 
@@ -1564,6 +1589,30 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         }
     }
 
+    // An inline ZIP64 field must still reject a later duplicate, including
+    // when the first field is empty or another identifier separates the two.
+    for data in [&[][..], &[0; 16][..]] {
+        for local in [false, true] {
+            let mut fixture = Fixture {
+                zip64: true,
+                ..Fixture::default()
+            };
+            let extra = [field(1, data), field(0xbeef, &[])].concat();
+            if local {
+                fixture.local_extra = extra;
+            } else {
+                fixture.central_extra = extra;
+            }
+            assert!(matches!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "duplicate extra-field identifier",
+                    ..
+                })
+            ));
+        }
+    }
+
     let archive = Fixture {
         zip64: true,
         zip64_version: Some(62),
@@ -1782,6 +1831,16 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     // Resolve in reverse order after the directory window has been replaced.
     // The middle member exceeds both local and directory read-ahead windows.
     for ordinal in (0..names.len()).rev() {
+        // A partial read into reused scratch space must not publish stale
+        // bytes or a resolution. Retrying the unchanged source must succeed.
+        source.max_read = 3;
+        source.fail_at = Some(index.entries()[ordinal].directory().position() + 3);
+        assert!(matches!(
+            index.entry(&mut source, ordinal).await,
+            Err(FrameError::Io(_))
+        ));
+        assert!(index.resolved(ordinal).is_none());
+        source.max_read = usize::MAX;
         let entry = index
             .entry(&mut source, ordinal)
             .await?

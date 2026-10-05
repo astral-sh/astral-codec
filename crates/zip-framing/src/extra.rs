@@ -6,7 +6,7 @@ use crate::{
     EntryKind, Error,
     constants::extra,
     invalid,
-    record::{Common, GeneralPurposeFlags, SizeField, array_at, bytes_at, parse_name},
+    record::{Common, SizeField, array_at, bytes_at},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -105,6 +105,8 @@ impl From<ExtraHeaderId> for u16 {
 }
 
 pub(crate) struct Extras<'a> {
+    // ZIP64 sizes are reconciled separately and need no map allocation.
+    zip64: Option<&'a [u8]>,
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
 }
 
@@ -167,6 +169,7 @@ impl UnixData {
 
 impl<'a> Extras<'a> {
     pub(crate) fn parse(mut bytes: &'a [u8], position: u64) -> Result<Self, Error> {
+        let mut zip64 = None;
         let mut fields = BTreeMap::new();
 
         while !bytes.is_empty() {
@@ -199,7 +202,12 @@ impl<'a> Extras<'a> {
                 return Err(Error::Unsupported { position, feature });
             }
 
-            if fields.insert(identifier, data).is_some() {
+            let previous = if identifier == ExtraHeaderId::Zip64 {
+                zip64.replace(data)
+            } else {
+                fields.insert(identifier, data)
+            };
+            if previous.is_some() {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
 
@@ -210,7 +218,12 @@ impl<'a> Extras<'a> {
             bytes = remaining;
         }
 
-        Ok(Self { fields })
+        Ok(Self { zip64, fields })
+    }
+
+    /// Whether any fields need comparison beyond the resolved ZIP64 sizes.
+    pub(crate) fn needs_reconciliation(&self) -> bool {
+        !self.fields.is_empty()
     }
 
     fn unix_data(&self) -> Option<&[u8]> {
@@ -272,7 +285,7 @@ impl<'a> Extras<'a> {
         let expected = usize::from(common.uncompressed == SizeField::Zip64) * 8
             + usize::from(common.compressed == SizeField::Zip64) * 8
             + location_size;
-        let field = self.fields.get(&ExtraHeaderId::Zip64).copied();
+        let field = self.zip64;
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
@@ -304,16 +317,10 @@ impl<'a> Extras<'a> {
         ))
     }
 
-    pub(crate) fn name<'name>(
-        &self,
-        bytes: &'name [u8],
-        flags: GeneralPurposeFlags,
-        position: u64,
-    ) -> Result<&'name str, Error> {
-        let name = parse_name(bytes, flags, position)?;
-
+    /// Checks Unicode metadata against an already validated filename.
+    pub(crate) fn check_name(&self, name: &str, position: u64) -> Result<(), Error> {
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodePath) {
-            let unicode = unicode_field(field, bytes, position)?;
+            let unicode = unicode_field(field, name.as_bytes(), position)?;
             if unicode != name {
                 return Err(invalid(
                     position,
@@ -322,7 +329,7 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(name)
+        Ok(())
     }
 
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
@@ -349,7 +356,6 @@ impl<'a> Extras<'a> {
             // APPNOTE and Info-ZIP define shorter central forms for these
             // fields. ZIP64 values are resolved and compared separately.
             let equal = match *identifier {
-                ExtraHeaderId::Zip64 => true,
                 ExtraHeaderId::Unix | ExtraHeaderId::InfoZipUnix => {
                     local.get(..other.len()) == Some(*other)
                 }
