@@ -136,7 +136,7 @@ impl Index {
     ) -> Result<(), Error> {
         for index in 0..self.entries.len() {
             self.entry(reader, index).await?;
-            tokio::task::yield_now().await;
+            tokio::task::consume_budget().await;
         }
 
         Ok(())
@@ -329,7 +329,7 @@ impl CentralDirectory {
             entries.push(entry);
             position = next;
 
-            tokio::task::yield_now().await;
+            tokio::task::consume_budget().await;
         }
 
         if position != end {
@@ -498,7 +498,7 @@ impl Zip64EndRecord {
             // Parsing buffered records performs no I/O. Periodically yield to give
             // other tasks a chance to run while processing many small extensions.
             if records.is_multiple_of(1024) {
-                tokio::task::yield_now().await;
+                tokio::task::consume_budget().await;
             }
         }
 
