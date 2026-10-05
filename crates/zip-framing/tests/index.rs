@@ -1564,6 +1564,30 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         }
     }
 
+    // An inline ZIP64 field must still reject a later duplicate, including
+    // when the first field is empty or another identifier separates the two.
+    for data in [&[][..], &[0; 16][..]] {
+        for local in [false, true] {
+            let mut fixture = Fixture {
+                zip64: true,
+                ..Fixture::default()
+            };
+            let extra = [field(1, data), field(0xbeef, &[])].concat();
+            if local {
+                fixture.local_extra = extra;
+            } else {
+                fixture.central_extra = extra;
+            }
+            assert!(matches!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "duplicate extra-field identifier",
+                    ..
+                })
+            ));
+        }
+    }
+
     let archive = Fixture {
         zip64: true,
         zip64_version: Some(62),
