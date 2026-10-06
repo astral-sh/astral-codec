@@ -1,6 +1,6 @@
 name: Benchmarks
 
-run-name: ZIP repeat (malloc=${{ inputs.allocator }}, pin=${{ inputs.pin_cpu }}, profile=${{ inputs.profile }}, isolate=${{ inputs.isolate_background }}, batch=${{ inputs.sample_size }})
+run-name: ZIP hardware counters (profile=${{ inputs.profile }})
 
 on:
   workflow_dispatch:
@@ -120,7 +120,7 @@ jobs:
           for unit in units:
               subprocess.run(['sudo', 'systemctl', 'set-property', '--runtime', unit, 'AllowedCPUs=0-1'], check=True, timeout=30)
           PY
-      - name: Repeat original benchmark suite
+      - name: Profile repeated benchmark cases
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         env:
           CODSPEED_PROFILER_ENABLED: ${{ inputs.profile }}
@@ -130,7 +130,7 @@ jobs:
           VERIFY_SAMPLE_SIZE: ${{ inputs.sample_size }}
         with:
           mode: walltime
-          run: uv run --only-dev --locked python scripts/bench-zip-verify.py --profile "$VERIFY_PROFILE" --pin-cpu "$VERIFY_PIN_CPU" --allocator "$VERIFY_ALLOCATOR" --sample-size "$VERIFY_SAMPLE_SIZE"
+          run: uv run --only-dev --locked python scripts/bench-zip-counters.py
       - name: Restore CPU reservations
         if: ${{ always() && inputs.isolate_background }}
         run: |
@@ -143,11 +143,26 @@ jobs:
               for unit, cpus in json.loads(path.read_text()).items():
                   subprocess.run(['sudo', 'systemctl', 'set-property', '--runtime', unit, 'AllowedCPUs=' + cpus], check=True, timeout=30)
           PY
+      - name: Preserve execution profiles
+        if: ${{ always() }}
+        run: |
+          python3 - <<'PYCODE'
+          import json
+          from pathlib import Path
+          import shutil
+          destination = Path('target/zip-counter-study')
+          manifest = destination / 'profile-folders.json'
+          if manifest.exists():
+              for folder in json.loads(manifest.read_text()):
+                  source = Path(folder) / 'samply-profile.json.gz'
+                  if source.exists():
+                      shutil.copy2(source, destination / (Path(folder).name + '.json.gz'))
+          PYCODE
       - name: Upload observations
         if: ${{ always() }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: zip-verify-observations
-          path: target/zip-runtime-verify
+          name: zip-counter-observations
+          path: target/zip-counter-study
           if-no-files-found: error
           retention-days: 14
