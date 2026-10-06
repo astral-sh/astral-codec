@@ -193,6 +193,9 @@ implementation in a fresh process via `scripts/bench-zip.py`. This isolates each
 case from earlier cases' allocation history, including glibc's adaptive mmap
 threshold. Setup and repeated measurements within a case still share a process;
 output allocation, growth, and deallocation remain part of the encoding cases.
+The CI driver also uses `setarch --addr-no-randomize` for benchmark children,
+removing address randomization as a source of variation. This applies equally to
+all three libraries and does not change the runner's system policy.
 Compare repeated CI runs before attributing small changes to the parser.
 
 By default, the workflow runs all framing and ZIP codec cases and only our

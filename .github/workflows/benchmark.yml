@@ -184,9 +184,9 @@ jobs:
           run: |
             if [ "${{ matrix.package }}" = "zip-codec" ]; then
               if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-                uv run --only-dev --locked python scripts/bench-zip.py --compare
+                uv run --only-dev --locked python scripts/bench-zip.py --fixed-layout --compare
               else
-                uv run --only-dev --locked python scripts/bench-zip.py
+                uv run --only-dev --locked python scripts/bench-zip.py --fixed-layout
               fi
             elif [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
               uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime
