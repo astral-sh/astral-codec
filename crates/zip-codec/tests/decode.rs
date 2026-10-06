@@ -393,34 +393,40 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
     for original in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(original)).await?;
         archive.validate_all().await?;
-        let position = archive.resolved(2).ok_or("unresolved entry")?.data_offset() as usize;
+        for entry_index in [1, 2] {
+            let position = archive
+                .resolved(entry_index)
+                .ok_or("unresolved entry")?
+                .data_offset() as usize;
 
-        for operation in ["read", "collect", "skip", "drop", "reader", "validate"] {
-            let mut bytes = original.to_vec();
-            bytes[position] ^= 0x40;
+            for operation in ["read", "collect", "skip", "drop", "reader", "validate"] {
+                let mut bytes = original.to_vec();
+                bytes[position] ^= 0x40;
 
-            let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-            let Some(Member::File { mut payload, .. }) = archive.member(2).await? else {
-                return Err(io::Error::other("expected corrupt file").into());
-            };
+                let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+                let Some(Member::File { mut payload, .. }) = archive.member(entry_index).await?
+                else {
+                    return Err(io::Error::other("expected corrupt file").into());
+                };
 
-            let result = match operation {
-                "read" => contents(payload).await.map(|_| ()),
-                "collect" => payload.read_to_end(&mut Vec::new()).await.map(|_| ()),
-                "skip" => payload.skip().await,
-                "reader" => archive.reader_mut().await.map(|_| ()),
-                "validate" => archive.validate_all().await,
-                _ => archive.next_member().await.map(|_| ()),
-            };
+                let result = match operation {
+                    "read" => contents(payload).await.map(|_| ()),
+                    "collect" => payload.read_to_end(&mut Vec::new()).await.map(|_| ()),
+                    "skip" => payload.skip().await,
+                    "reader" => archive.reader_mut().await.map(|_| ()),
+                    "validate" => archive.validate_all().await,
+                    _ => archive.next_member().await.map(|_| ()),
+                };
 
-            assert!(
-                matches!(result, Err(DecodeError::Integrity { .. })),
-                "{operation}"
-            );
-            assert!(matches!(
-                archive.member(0).await,
-                Err(DecodeError::Poisoned)
-            ));
+                assert!(
+                    matches!(result, Err(DecodeError::Integrity { .. })),
+                    "{operation}"
+                );
+                assert!(matches!(
+                    archive.member(0).await,
+                    Err(DecodeError::Poisoned)
+                ));
+            }
         }
     }
 
