@@ -60,7 +60,7 @@ def main():
             if arguments.test:
                 command += ['--test']
             else:
-                command += ['--sample-size', '32', '--sample-count', str(samples), '--min-time', '0']
+                command += ['--bench', '--sample-size', '32', '--sample-count', str(samples), '--min-time', '0']
                 command = [perf, 'stat', '-x', ';', '-o', str(prefix.with_suffix('.perf')),
                            '-e', 'task-clock,cycles,instructions,cache-references,cache-misses,minor-faults,context-switches,cpu-migrations',
                            '--', *command]
@@ -71,6 +71,8 @@ def main():
             result.check_returncode()
             if case not in result.stdout:
                 raise ValueError(f'No benchmark matched {case}: {result.stdout}')
+            if not arguments.test and '│' not in result.stdout:
+                raise ValueError(f'No timed samples for {case}: {result.stdout}')
             row = {'repetition': repetition, 'case_index': index, 'operation': operation,
                    'case': case, 'samples': samples, 'sample_size': 32,
                    'start_ns': started, 'finish_ns': finished, 'output': result.stdout}
