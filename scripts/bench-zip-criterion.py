@@ -71,7 +71,11 @@ def main():
                     "ZIP_BENCH_OUTPUT": str(output),
                 })
                 if protocol == "c0":
-                    options = ["--noplot", "--test" if arguments.test else "--bench"]
+                    # cargo-codspeed already supplies --bench. Criterion rejects
+                    # a second copy, even though Divan accepts repeated flags.
+                    options = ["--noplot"]
+                    if arguments.test:
+                        options += ["--test"]
                 else:
                     pattern = rf"::{operation}(\[|::){re.escape(case)}/{label}(\]|$)"
                     options = [pattern, "--min-time", "0.25"]
