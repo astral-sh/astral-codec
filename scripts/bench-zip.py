@@ -2,6 +2,7 @@
 
 import argparse
 import math
+import os
 import platform
 import re
 import subprocess
@@ -12,6 +13,10 @@ def main():
     parser.add_argument("--compare", action="store_true")
     parser.add_argument("--mode", choices=["walltime", "simulation"], default="walltime")
     parser.add_argument("--test", action="store_true", help="Smoke-test walltime cases without timing")
+    parser.add_argument(
+        "--pin-cpu", action="store_true",
+        help="Pin Linux walltime cases to the last CPU in the current affinity mask",
+    )
     parser.add_argument(
         "--min-time", type=float, default=0.25,
         help="Minimum walltime sampling window per case in seconds (default: 0.25)",
@@ -25,6 +30,13 @@ def main():
         parser.error("--min-time must be a finite, nonnegative number")
     if arguments.test and arguments.mode == "simulation":
         parser.error("simulation runs each case once; omit --test")
+    if arguments.pin_cpu:
+        if arguments.mode != "walltime" or platform.system() != "Linux":
+            parser.error("--pin-cpu requires Linux walltime benchmarks")
+        # Stay within the CPUs reserved by the runner. Children inherit this
+        # affinity, so the benchmark cannot migrate between CPU caches.
+        os.sched_setaffinity(0, {max(os.sched_getaffinity(0))})
+        print(f"Benchmark CPUs: {sorted(os.sched_getaffinity(0))}", flush=True)
     command = [
         "cargo", "codspeed", "run", "-p", "zip-codec", "--bench", "comparison",
         "-m", arguments.mode, "--",

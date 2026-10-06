@@ -197,6 +197,13 @@ overhead.
 This collects more samples for tiny operations that otherwise stop at the
 default 100 samples. The driver accepts `--min-time` to change this floor,
 including `--min-time 0` to investigate the default sample count.
+CI uses `--pin-cpu` to run ZIP comparisons on the last CPU in the benchmark's
+affinity mask, avoiding migration between CPU caches. ZIP benchmark children use
+fixed glibc mmap and trim thresholds of 32 MiB and 64 MiB, respectively, via
+`GLIBC_TUNABLES`. This prevents adaptive allocator thresholds from changing
+allocation and page-fault costs between samples. Allocation, buffer growth, and
+deallocation remain timed for every implementation. The fixed thresholds define
+the CI comparison environment and apply to all three libraries.
 On Linux, `scripts/bench-zip.py --fixed-layout` uses
 `setarch --addr-no-randomize` for benchmark children when investigating layout
 sensitivity. CI leaves this disabled: repeated runs did not consistently reduce

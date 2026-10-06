@@ -187,10 +187,13 @@ jobs:
           mode: walltime
           run: |
             if [ "${{ matrix.package }}" = "zip-codec" ]; then
+              # Fix glibc's mmap/trim thresholds so allocator adaptation cannot
+              # change a case's allocation strategy between samples.
+              export GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=67108864
               if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-                uv run --only-dev --locked python scripts/bench-zip.py --compare
+                uv run --only-dev --locked python scripts/bench-zip.py --pin-cpu --compare
               else
-                uv run --only-dev --locked python scripts/bench-zip.py
+                uv run --only-dev --locked python scripts/bench-zip.py --pin-cpu
               fi
             elif [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
               uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime
