@@ -83,11 +83,12 @@ impl Payload {
         let start = output.len();
         if self.integrity.decoded_remaining > CHUNK_SIZE as u64
             && (matches!(self.encoding, Encoding::Deflate(_))
-                || self.integrity.decoded_remaining > (output.capacity() - output.len()) as u64)
+                || output.capacity() - output.len() < CHUNK_SIZE)
         {
-            // Keep decoding and checksum work in a reusable chunk while a large
-            // destination grows. DEFLATE also needs initialized output storage;
-            // reuse it rather than zeroing each new part of the destination.
+            // Reuse an existing destination when it can hold the first Stored
+            // chunk. Otherwise keep checksum work in a reusable chunk while it
+            // grows. DEFLATE also reuses initialized storage instead of zeroing
+            // each new part of the destination.
             let mut chunk = Vec::new();
             while self
                 .next::<false, _>(reader, &mut chunk, CHUNK_SIZE)
