@@ -36,10 +36,10 @@ def main():
         (operation, case)
         for operation in ["open", "decode", "decode_stream", "encode", "encode_preallocated"]
         for case in cases
-        if (case.startswith("small-1-entries/") or case.startswith("many-small-1024-entries/Stored/"))
+        if case.startswith("many-small-1024-entries/Stored/")
         and not (operation == "decode_stream" and case.endswith("/astral_async_zip"))
     ]
-    assert len(selected) == 42 and len(set(selected)) == 42, selected
+    assert len(selected) == 14 and len(set(selected)) == 14, selected
     rows = []
     units = {"ns": 1e-9, "µs": 1e-6, "μs": 1e-6, "us": 1e-6, "ms": 1e-3, "s": 1}
     for repetition in range(arguments.rounds):
@@ -48,18 +48,16 @@ def main():
             # first position. Each observation still uses a fresh process.
             for offset in range(3):
                 protocol = (offset + repetition + case_index) % 3
-                label = f"c{protocol}-r{repetition}"
+                label = f"d{protocol}-r{repetition}"
                 pattern = rf"::{operation}(\[|::){re.escape(case)}/{label}(\]|$)"
                 environment = os.environ.copy()
                 environment["ZIP_BENCH_SAMPLE_LABEL"] = label
-                environment["ZIP_BENCH_WARMUP_ITERATIONS"] = "32" if protocol == 2 else "0"
+                environment["ZIP_BENCH_WARMUP_ITERATIONS"] = "0"
                 options = ["--min-time", "0.25"]
                 if protocol:
-                    options += [
-                        "--skip-ext-time", "--sample-size",
-                        "64" if case.startswith("small-1-entries/") else "1",
-                        "--max-time", "1",
-                    ]
+                    options += ["--skip-ext-time"]
+                if protocol == 2:
+                    options += ["--sample-size", "1"]
                 if arguments.test:
                     options = ["--test"]
                 print(f"Sampling observation: {operation}[{case}/{label}]", flush=True)
