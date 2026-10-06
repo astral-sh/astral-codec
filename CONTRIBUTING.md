@@ -193,6 +193,10 @@ implementation in a fresh process via `scripts/bench-zip.py`. This isolates each
 case from earlier cases' allocation history, including glibc's adaptive mmap
 threshold. Setup and repeated measurements within a case still share a process;
 output allocation, growth, and deallocation remain part of the encoding cases.
+On Linux, `scripts/bench-zip.py --fixed-layout` uses
+`setarch --addr-no-randomize` for benchmark children when investigating layout
+sensitivity. CI leaves this disabled: repeated runs did not consistently reduce
+outliers with fixed layouts. The option does not change the runner's system policy.
 Compare repeated CI runs before attributing small changes to the parser.
 
 By default, the workflow runs all framing and ZIP codec cases and only our
