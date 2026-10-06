@@ -1538,7 +1538,10 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
         bytes_read: 0,
     };
 
-    let index = read_validated(&mut source, Limits::default()).await?;
+    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let opening_bytes = source.bytes_read;
+    index.validate_all(&mut source).await?;
+    assert_eq!(source.bytes_read - opening_bytes, source.prefix.len());
     assert_eq!(index.entries()[0].directory().size(), size);
     assert_eq!(index.entries()[0].directory().compressed_size(), size);
     assert!(source.bytes_read < 70_000);
