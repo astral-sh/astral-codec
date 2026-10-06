@@ -1,10 +1,14 @@
 name: Benchmarks
 
-run-name: ZIP hardware counters (profile=${{ inputs.profile }})
+run-name: ZIP cache counters (huge-pages=${{ inputs.huge_pages }}, profile=${{ inputs.profile }})
 
 on:
   workflow_dispatch:
     inputs:
+      huge_pages:
+        description: Use transparent huge pages for benchmark allocations
+        type: boolean
+        default: false
       allocator:
         description: Allocator thresholds
         type: choice
@@ -120,17 +124,35 @@ jobs:
           for unit in units:
               subprocess.run(['sudo', 'systemctl', 'set-property', '--runtime', unit, 'AllowedCPUs=0-1'], check=True, timeout=30)
           PY
+      - name: Enable allocator huge-page experiment
+        if: ${{ inputs.huge_pages }}
+        run: |
+          cat /sys/kernel/mm/transparent_hugepage/enabled > target/original-thp.txt
+          printf madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
       - name: Profile repeated benchmark cases
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         env:
           CODSPEED_PROFILER_ENABLED: ${{ inputs.profile }}
+          VERIFY_HUGE_PAGES: ${{ inputs.huge_pages }}
           VERIFY_PROFILE: ${{ inputs.profile }}
           VERIFY_PIN_CPU: ${{ inputs.pin_cpu }}
           VERIFY_ALLOCATOR: ${{ inputs.allocator }}
           VERIFY_SAMPLE_SIZE: ${{ inputs.sample_size }}
         with:
           mode: walltime
-          run: uv run --only-dev --locked python scripts/bench-zip-counters.py
+          run: uv run --only-dev --locked python scripts/bench-zip-counters.py --huge-pages "$VERIFY_HUGE_PAGES"
+      - name: Restore huge-page policy
+        if: ${{ always() && inputs.huge_pages }}
+        run: |
+          python3 - <<'PYCODE'
+          from pathlib import Path
+          import re
+          import subprocess
+          original = Path('target/original-thp.txt')
+          if original.exists():
+              mode = re.search(r'\[([^]]+)\]', original.read_text()).group(1)
+              subprocess.run(['sudo', 'tee', '/sys/kernel/mm/transparent_hugepage/enabled'], input=mode, text=True, check=True, timeout=10)
+          PYCODE
       - name: Restore CPU reservations
         if: ${{ always() && inputs.isolate_background }}
         run: |
