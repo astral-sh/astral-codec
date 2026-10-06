@@ -5,6 +5,7 @@ on:
     types: [opened, synchronize, reopened, labeled, unlabeled]
     paths:
       - .github/workflows/benchmark.yml
+      - scripts/bench-zip.py
       - Cargo.toml
       - Cargo.lock
       - pyproject.toml
@@ -19,6 +20,7 @@ on:
     branches: [main]
     paths:
       - .github/workflows/benchmark.yml
+      - scripts/bench-zip.py
       - Cargo.toml
       - Cargo.lock
       - pyproject.toml
@@ -180,7 +182,13 @@ jobs:
         with:
           mode: walltime
           run: |
-            if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
+            if [ "${{ matrix.package }}" = "zip-codec" ]; then
+              if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
+                uv run --only-dev --locked python scripts/bench-zip.py --compare
+              else
+                uv run --only-dev --locked python scripts/bench-zip.py
+              fi
+            elif [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
               uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime
             else
               uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime -- '/${{ matrix.package }}(\]|$)'
