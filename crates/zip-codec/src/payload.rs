@@ -8,6 +8,7 @@ use zip_framing::{CompressionMethod, Entry};
 use crate::decode::DecodeError;
 
 pub(crate) const CHUNK_SIZE: usize = 64 * 1024;
+const STORED_READ_SIZE: usize = 16 * 1024;
 
 pub(crate) struct Payload {
     integrity: Integrity,
@@ -142,15 +143,22 @@ impl Payload {
                     output.clear();
                 }
                 output.reserve(length);
-                let mut bounded = (&mut *reader).take(length as u64);
-                while bounded.limit() != 0 {
-                    if bounded.read_buf(output).await? == 0 {
+                while output.len() - offset < length {
+                    let start = output.len();
+                    // Checksum each small copy while its destination is hot,
+                    // without changing the caller's requested chunk length.
+                    let remaining = length - (start - offset);
+                    let read = (&mut *reader)
+                        .take(remaining.min(STORED_READ_SIZE) as u64)
+                        .read_buf(output)
+                        .await?;
+                    if read == 0 {
                         return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
                     }
+                    self.encoded_remaining -= read as u64;
+                    self.integrity.account(&output[start..])?;
                 }
 
-                self.encoded_remaining -= length as u64;
-                self.integrity.account(&output[offset..])?;
                 if self.encoded_remaining == 0 {
                     self.integrity.finish()?;
                 }
