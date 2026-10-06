@@ -60,7 +60,8 @@ def main():
                 protocol = protocols[(offset + repetition + case_index) % len(protocols)]
                 label = f"{protocol}-r{repetition}"
                 identifier = f"{operation}-{case.replace('/', '-')}-{label}"
-                output = destination / identifier
+                # cargo-codspeed runs the binary from the package directory.
+                output = (destination / identifier).resolve()
                 environment = os.environ.copy()
                 environment.update({
                     "ZIP_BENCH_SAMPLE_LABEL": label,
