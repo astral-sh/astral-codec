@@ -25,7 +25,7 @@ pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 pub struct Index {
     /// The indexed members, in central directory order.
     entries: Vec<IndexedEntry>,
-    /// Cached resolutions, with the same length and order as [`Self::entries`].
+    /// Cached resolutions, allocated in directory order on first member access.
     resolved: Vec<Option<ResolvedMember>>,
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
@@ -113,7 +113,7 @@ impl Index {
         };
 
         Ok(Self {
-            resolved: (0..entries.len()).map(|_| None).collect(),
+            resolved: Vec::new(),
             entries,
             budget,
             buffer: Vec::new(),
@@ -132,6 +132,10 @@ impl Index {
         let Some(indexed) = self.entries.get(index) else {
             return Ok(None);
         };
+
+        if self.resolved.is_empty() {
+            self.resolved = (0..self.entries.len()).map(|_| None).collect();
+        }
 
         let resolved = match &mut self.resolved[index] {
             Some(resolved) => resolved,
