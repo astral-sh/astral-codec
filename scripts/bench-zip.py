@@ -10,10 +10,11 @@ import subprocess
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--compare", action="store_true")
-    parser.add_argument("--test", action="store_true", help="Smoke-test without timing")
+    parser.add_argument("--mode", choices=["walltime", "simulation"], default="walltime")
+    parser.add_argument("--test", action="store_true", help="Smoke-test walltime cases without timing")
     parser.add_argument(
         "--min-time", type=float, default=0.25,
-        help="Minimum sampling time per case in seconds (default: 0.25)",
+        help="Minimum walltime sampling window per case in seconds (default: 0.25)",
     )
     parser.add_argument(
         "--fixed-layout", action="store_true",
@@ -22,9 +23,11 @@ def main():
     arguments = parser.parse_args()
     if not math.isfinite(arguments.min_time) or arguments.min_time < 0:
         parser.error("--min-time must be a finite, nonnegative number")
+    if arguments.test and arguments.mode == "simulation":
+        parser.error("simulation runs each case once; omit --test")
     command = [
         "cargo", "codspeed", "run", "-p", "zip-codec", "--bench", "comparison",
-        "-m", "walltime", "--",
+        "-m", arguments.mode, "--",
     ]
     if arguments.fixed_layout:
         # The personality flag is inherited by benchmark children. This changes
@@ -50,11 +53,13 @@ def main():
             # bracketed argument names. Anchor both ends to select just one case.
             pattern = rf"::{operation}(\[|::){re.escape(case)}(\]|$)"
             print(f"Isolated comparison: {operation}[{case}]", flush=True)
+            options = []
+            if arguments.test:
+                options = ["--test"]
+            elif arguments.mode == "walltime":
+                options = ["--min-time", str(arguments.min_time)]
             subprocess.run(
-                [
-                    *command, pattern,
-                    *(["--test"] if arguments.test else ["--min-time", str(arguments.min_time)]),
-                ],
+                [*command, pattern, *options],
                 check=True,
                 timeout=300,
             )

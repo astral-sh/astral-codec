@@ -188,12 +188,14 @@ and pushes to `main`, and supports manual runs:
   comparison target runs in its own job. ZIP comparisons run in both modes;
   compare results within the same mode and runner architecture.
 
-ZIP walltime comparisons run each operation, workload, compression method, and
-implementation in a fresh process via `scripts/bench-zip.py`. This isolates each
-case from earlier cases' allocation history, including glibc's adaptive mmap
+ZIP comparisons run each operation, workload, compression method, and
+implementation in a fresh process via `scripts/bench-zip.py`. The driver defaults
+to walltime; `--mode simulation` selects CPU simulation. This isolates each case
+from earlier cases' allocation history, including glibc's adaptive mmap
 threshold. Setup and repeated measurements within a case still share a process;
 output allocation, growth, and deallocation remain part of the encoding cases.
-Each case has a minimum 250 ms sampling window, including harness overhead.
+Each walltime case has a minimum 250 ms sampling window, including harness
+overhead.
 This collects more samples for tiny operations that otherwise stop at the
 default 100 samples. The driver accepts `--min-time` to change this floor,
 including `--min-time 0` to investigate the default sample count.

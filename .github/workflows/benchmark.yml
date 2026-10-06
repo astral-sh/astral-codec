@@ -95,10 +95,14 @@ jobs:
         with:
           mode: simulation
           run: |
-            if [ "${{ matrix.target }}" != "comparison" ] || [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
-              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation
+            if [ "${{ matrix.target }}" = "comparison" ]; then
+              if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
+                uv run --only-dev --locked python scripts/bench-zip.py --mode simulation --compare
+              else
+                uv run --only-dev --locked python scripts/bench-zip.py --mode simulation
+              fi
             else
-              uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m simulation -- '/zip-codec(\]|$)'
+              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation
             fi
 
   benchmark-comparison-build:
