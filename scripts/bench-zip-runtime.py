@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import time
 
@@ -65,6 +66,22 @@ def main():
     arguments = parser.parse_args()
     if not 0 <= arguments.start < arguments.end <= 6:
         parser.error("require 0 <= start < end <= 6")
+    if not arguments.test and os.environ.get("CODSPEED_PROFILER_ENABLED") != arguments.profile:
+        parser.error("--profile must match CODSPEED_PROFILER_ENABLED")
+    if arguments.profile == "false" and not arguments.test:
+        # Runner 5.2.1 leaves its FIFOs behind after a profiled action. Without
+        # a reader, instrument-hooks waits for acknowledgements before falling
+        # back to unprofiled timing. There is no live profiler in this block.
+        for name in ["ctl", "ack"]:
+            path = Path(f"/tmp/runner.{name}.fifo")
+            try:
+                metadata = path.lstat()
+            except FileNotFoundError:
+                continue
+            if not stat.S_ISFIFO(metadata.st_mode) or metadata.st_uid != os.getuid():
+                raise ValueError(f"Refusing to remove a non-FIFO or another user's FIFO: {path}")
+            path.unlink()
+            print(f"Removed stale profiling FIFO: {path}", flush=True)
     destination = Path("target/zip-runtime")
     destination.mkdir(parents=True, exist_ok=True)
     environment_snapshot = snapshot()
