@@ -1,10 +1,14 @@
 name: Benchmarks
 
-run-name: ZIP cache counters (huge-pages=${{ inputs.huge_pages }}, profile=${{ inputs.profile }})
+run-name: ZIP cache verification (full=${{ inputs.full_suite }}, huge-pages=${{ inputs.huge_pages }}, profile=${{ inputs.profile }})
 
 on:
   workflow_dispatch:
     inputs:
+      full_suite:
+        description: Run all 140 comparisons with the original sampling settings
+        type: boolean
+        default: false
       huge_pages:
         description: Use transparent huge pages for benchmark allocations
         type: boolean
@@ -133,6 +137,7 @@ jobs:
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         env:
           CODSPEED_PROFILER_ENABLED: ${{ inputs.profile }}
+          VERIFY_FULL_SUITE: ${{ inputs.full_suite }}
           VERIFY_HUGE_PAGES: ${{ inputs.huge_pages }}
           VERIFY_PROFILE: ${{ inputs.profile }}
           VERIFY_PIN_CPU: ${{ inputs.pin_cpu }}
@@ -140,7 +145,12 @@ jobs:
           VERIFY_SAMPLE_SIZE: ${{ inputs.sample_size }}
         with:
           mode: walltime
-          run: uv run --only-dev --locked python scripts/bench-zip-counters.py --huge-pages "$VERIFY_HUGE_PAGES"
+          run: |
+            if [ "$VERIFY_FULL_SUITE" = true ]; then
+              uv run --only-dev --locked python scripts/bench-zip-verify.py --profile "$VERIFY_PROFILE" --pin-cpu "$VERIFY_PIN_CPU" --allocator "$VERIFY_ALLOCATOR" --huge-pages "$VERIFY_HUGE_PAGES"
+            else
+              uv run --only-dev --locked python scripts/bench-zip-counters.py --huge-pages "$VERIFY_HUGE_PAGES"
+            fi
       - name: Restore huge-page policy
         if: ${{ always() && inputs.huge_pages }}
         run: |
@@ -185,6 +195,6 @@ jobs:
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: zip-counter-observations
-          path: target/zip-counter-study
+          path: ${{ inputs.full_suite && 'target/zip-runtime-verify' || 'target/zip-counter-study' }}
           if-no-files-found: error
           retention-days: 14
