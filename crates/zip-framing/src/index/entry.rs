@@ -8,7 +8,9 @@ use crate::{
     extra::Extras,
     invalid,
     kind::ExternalAttributes,
-    record::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at},
+    record::{
+        Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at, parse_name,
+    },
 };
 
 /// Central directory metadata for a ZIP member.
@@ -108,7 +110,8 @@ pub(super) struct ResolvedMember {
 pub struct CentralDirectoryEntry {
     /// Central directory entry metadata.
     metadata: Metadata,
-    /// Raw extra data for the central directory entry.
+    /// Extra data retained for local/central reconciliation. ZIP64-only extras
+    /// need no copy: their resolved values are already part of the metadata.
     extra: Vec<u8>,
 }
 
@@ -192,7 +195,8 @@ impl CentralDirectoryEntry {
             position,
         )?;
 
-        let path = extras.name(&variable[..name_length], common.flags, position)?;
+        let path = parse_name(&variable[..name_length], common.flags, position)?;
+        extras.check_name(path, position)?;
         extras.comment(&variable[name_length + extra_length..], position)?;
 
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
@@ -214,7 +218,11 @@ impl CentralDirectoryEntry {
                 made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
                 attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
-            extra: variable[name_length..name_length + extra_length].to_vec(),
+            extra: if extras.needs_reconciliation() {
+                variable[name_length..name_length + extra_length].to_vec()
+            } else {
+                Vec::new()
+            },
         };
 
         Ok((
@@ -316,9 +324,12 @@ impl IndexedEntry {
 
         let extras = Extras::parse(&variable[name_length..], position)?;
         let sizes = extras.local_sizes(common, position)?;
-        if extras.name(&variable[..name_length], common.flags, position)? != metadata.path {
+        // Equal bytes inherit the directory's UTF-8 and filename validation.
+        // Header agreement below also requires identical encoding flags.
+        if &variable[..name_length] != metadata.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
+        extras.check_name(&metadata.path, position)?;
 
         let unix_data =
             extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;

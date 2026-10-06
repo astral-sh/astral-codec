@@ -775,6 +775,31 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         ));
     }
 
+    // Valid directory names do not excuse malformed local names or a local
+    // encoding flag disagreement, even when both filename byte strings match.
+    for zip64 in [false, true] {
+        for change in [None, Some(0), Some(0xff), Some(b'/')] {
+            let mut archive = Fixture {
+                name: name.to_vec(),
+                zip64,
+                ..Fixture::default()
+            }
+            .build();
+            if let Some(byte) = change {
+                archive.bytes[30] = byte;
+            } else {
+                set16(&mut archive.bytes, 6, 0);
+            }
+            let mut source = Cursor::new(archive.bytes);
+            let mut index = Index::read(&mut source, Limits::default()).await?;
+            assert!(matches!(
+                index.entry(&mut source, 0).await,
+                Err(FrameError::Invalid { position: 0, .. })
+            ));
+            assert!(index.resolved(0).is_none());
+        }
+    }
+
     Ok(())
 }
 
@@ -1154,6 +1179,49 @@ async fn rejects_prefixed_and_concatenated_archives_with_consistent_offsets() ->
 }
 
 #[tokio::test]
+async fn finds_end_records_across_scan_groups() -> TestResult {
+    for zip64 in [false, true] {
+        for length in 0..64 {
+            // With a full search window, changing the comment length moves the
+            // EOCD through every alignment, including split signatures/headers.
+            let archive = Fixture {
+                zip64,
+                payload: Some(vec![b'P'; 70_000]),
+                archive_comment: vec![b'P'; length],
+                ..Fixture::default()
+            }
+            .build();
+            assert_eq!(
+                Index::read(&mut Cursor::new(&archive.bytes), Limits::default())
+                    .await?
+                    .entries()
+                    .len(),
+                1
+            );
+
+            // Both end records reach EOF. Neither the earlier match nor one in
+            // the final partial scan group may hide the other candidate.
+            let mut comment = vec![b'P'; length];
+            comment.extend(end_record(0, 0, 0, &[]));
+            let archive = Fixture {
+                zip64,
+                archive_comment: comment,
+                ..Fixture::default()
+            }
+            .build();
+            assert!(matches!(
+                Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "ambiguous end records",
+                    ..
+                })
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn bounds_end_record_search_with_short_reads() -> TestResult {
     for byte in [0, b'a'] {
         let mut comment = vec![byte; usize::from(u16::MAX)];
@@ -1521,6 +1589,30 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         }
     }
 
+    // An inline ZIP64 field must still reject a later duplicate, including
+    // when the first field is empty or another identifier separates the two.
+    for data in [&[][..], &[0; 16][..]] {
+        for local in [false, true] {
+            let mut fixture = Fixture {
+                zip64: true,
+                ..Fixture::default()
+            };
+            let extra = [field(1, data), field(0xbeef, &[])].concat();
+            if local {
+                fixture.local_extra = extra;
+            } else {
+                fixture.central_extra = extra;
+            }
+            assert!(matches!(
+                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                Err(FrameError::Invalid {
+                    reason: "duplicate extra-field identifier",
+                    ..
+                })
+            ));
+        }
+    }
+
     let archive = Fixture {
         zip64: true,
         zip64_version: Some(62),
@@ -1739,6 +1831,16 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     // Resolve in reverse order after the directory window has been replaced.
     // The middle member exceeds both local and directory read-ahead windows.
     for ordinal in (0..names.len()).rev() {
+        // A partial read into reused scratch space must not publish stale
+        // bytes or a resolution. Retrying the unchanged source must succeed.
+        source.max_read = 3;
+        source.fail_at = Some(index.entries()[ordinal].directory().position() + 3);
+        assert!(matches!(
+            index.entry(&mut source, ordinal).await,
+            Err(FrameError::Io(_))
+        ));
+        assert!(index.resolved(ordinal).is_none());
+        source.max_read = usize::MAX;
         let entry = index
             .entry(&mut source, ordinal)
             .await?

@@ -232,6 +232,7 @@ struct FailingWriter {
     inner: Cursor<Vec<u8>>,
     remaining: usize,
     fail_flush: bool,
+    pause_write: bool,
     fail_seek: Option<usize>,
     pause_seek: Option<usize>,
     seeks: Rc<Cell<usize>>,
@@ -243,6 +244,10 @@ impl AsyncWrite for FailingWriter {
         context: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
+        if self.pause_write && !self.inner.get_ref().is_empty() {
+            return Poll::Pending;
+        }
+
         if self.remaining == 0 {
             return Poll::Ready(Err(io::Error::other("injected write error")));
         }
@@ -352,6 +357,7 @@ async fn cancellation_after_output_starts_poisoning_the_builder() -> TestResult 
     for pause_seek in [None, Some(1), Some(2)] {
         let mut writer = FailingWriter {
             remaining: usize::MAX,
+            pause_write: pause_seek.is_none(),
             pause_seek,
             ..FailingWriter::default()
         };
