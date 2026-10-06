@@ -81,7 +81,21 @@ impl Payload {
         output: &mut Vec<u8>,
     ) -> Result<usize, DecodeError> {
         let start = output.len();
-        while self.next::<true, _>(reader, output, CHUNK_SIZE).await? {}
+        if matches!(self.encoding, Encoding::Deflate(_))
+            && self.integrity.decoded_remaining > CHUNK_SIZE as u64
+        {
+            // Reuse initialized storage across decoder calls instead of zeroing
+            // every new part of a large collection buffer before overwriting it.
+            let mut chunk = Vec::new();
+            while self
+                .next::<false, _>(reader, &mut chunk, CHUNK_SIZE)
+                .await?
+            {
+                output.extend_from_slice(&chunk);
+            }
+        } else {
+            while self.next::<true, _>(reader, output, CHUNK_SIZE).await? {}
+        }
         Ok(output.len() - start)
     }
 
