@@ -112,11 +112,14 @@ impl Index {
                 .collect::<Result<Vec<_>, _>>()?
         };
 
+        // Local-record reads can reuse the opening window's allocation. Discard
+        // its bytes; each operation still fills its own bounded window.
+        buffer.clear();
         Ok(Self {
             resolved: (0..entries.len()).map(|_| None).collect(),
             entries,
             budget,
-            buffer: Vec::new(),
+            buffer,
         })
     }
 
