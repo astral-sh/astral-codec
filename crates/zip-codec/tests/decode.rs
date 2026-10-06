@@ -283,39 +283,44 @@ async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
 #[tokio::test]
 async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
     for bytes in [STORED, DEFLATE] {
-        let mut archive = ZipArchive::open(Interruptible {
-            source: Cursor::new(bytes.to_vec()),
-            interrupt: Rc::new(Cell::new(false)),
-            read_bytes: Rc::new(Cell::new(0)),
-            max_read: 3,
-            yield_reads: true,
-            pending: false,
-        })
-        .await?;
-        let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
-            return Err(io::Error::other("expected file").into());
-        };
-        let expected = b"hello ZIP\n".repeat(14000);
-        let mut first = Vec::new();
-        assert!(payload.next_chunk(&mut first, 7).await?);
-        assert_eq!(first, expected[..first.len()]);
+        for reserve in [false, true] {
+            let mut archive = ZipArchive::open(Interruptible {
+                source: Cursor::new(bytes.to_vec()),
+                interrupt: Rc::new(Cell::new(false)),
+                read_bytes: Rc::new(Cell::new(0)),
+                max_read: 3,
+                yield_reads: true,
+                pending: false,
+            })
+            .await?;
+            let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
+                return Err(io::Error::other("expected file").into());
+            };
+            let expected = b"hello ZIP\n".repeat(14000);
+            let mut first = Vec::new();
+            assert!(payload.next_chunk(&mut first, 7).await?);
+            assert_eq!(first, expected[..first.len()]);
 
-        let mut output = b"prefix".to_vec();
-        assert_eq!(
-            payload.read_to_end(&mut output).await?,
-            expected.len() - first.len()
-        );
-        assert_eq!(&output[..6], b"prefix");
-        assert_eq!(&output[6..], &expected[first.len()..]);
-        let previous = output.clone();
-        assert_eq!(payload.read_to_end(&mut output).await?, 0);
-        assert_eq!(output, previous);
+            let mut output = b"prefix".to_vec();
+            if reserve {
+                output.reserve(expected.len());
+            }
+            assert_eq!(
+                payload.read_to_end(&mut output).await?,
+                expected.len() - first.len()
+            );
+            assert_eq!(&output[..6], b"prefix");
+            assert_eq!(&output[6..], &expected[first.len()..]);
+            let previous = output.clone();
+            assert_eq!(payload.read_to_end(&mut output).await?, 0);
+            assert_eq!(output, previous);
 
-        let Some(Member::File { mut payload, .. }) = archive.member(3).await? else {
-            return Err(io::Error::other("expected empty file").into());
-        };
-        assert_eq!(payload.read_to_end(&mut output).await?, 0);
-        assert_eq!(output, previous);
+            let Some(Member::File { mut payload, .. }) = archive.member(3).await? else {
+                return Err(io::Error::other("expected empty file").into());
+            };
+            assert_eq!(payload.read_to_end(&mut output).await?, 0);
+            assert_eq!(output, previous);
+        }
     }
 
     // A compressed empty stream still invokes the decoder, which must not
