@@ -4,12 +4,15 @@ use std::{
     env, fmt,
     hint::black_box,
     io::{Cursor, Read, Write},
+    path::Path,
+    time::{Duration, Instant},
 };
 
 use async_zip::{
     Compression, ZipEntryBuilder,
     base::{read::seek::ZipFileReader, write::ZipFileWriter},
 };
+use criterion::Criterion;
 use divan::{
     Bencher,
     counter::{BytesCount, ItemsCount},
@@ -48,7 +51,11 @@ struct Case {
 
 impl fmt::Display for Case {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.workload, self.implementation)
+        write!(formatter, "{}/{}", self.workload, self.implementation)?;
+        if let Ok(label) = env::var("ZIP_BENCH_SAMPLE_LABEL") {
+            write!(formatter, "/{label}")?;
+        }
+        Ok(())
     }
 }
 
@@ -261,6 +268,10 @@ fn streaming_cases() -> impl Iterator<Item = Case> {
 
 #[divan::bench(args = streaming_cases())]
 fn decode_stream(bencher: Bencher, case: &Case) {
+    run_decode_stream(Measurement::Divan(bencher), case);
+}
+
+fn run_decode_stream(bencher: Measurement<'_, '_>, case: &Case) {
     assert!(!matches!(case.implementation, Implementation::AsyncZip));
     let runtime = runtime();
     let fixture = fixture(&case.workload, &runtime);
@@ -288,8 +299,8 @@ fn decode_stream(bencher: Bencher, case: &Case) {
         black_box((path, chunk));
     };
     let bencher = bencher
-        .counter(ItemsCount::new(fixture.entries.len()))
-        .counter(BytesCount::new(fixture.payload_bytes));
+        .items(fixture.entries.len())
+        .bytes(fixture.payload_bytes);
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
             black_box(runtime.block_on(stream_zip_codec(black_box(&fixture.archive), consume)));
@@ -303,6 +314,10 @@ fn decode_stream(bencher: Bencher, case: &Case) {
 
 #[divan::bench(args = cases())]
 fn open(bencher: Bencher, case: &Case) {
+    run_open(Measurement::Divan(bencher), case);
+}
+
+fn run_open(bencher: Measurement<'_, '_>, case: &Case) {
     let runtime = runtime();
     let fixture = fixture(&case.workload, &runtime);
     // All readers receive the same ZIP64 bytes, including the compressed data.
@@ -327,7 +342,7 @@ fn open(bencher: Bencher, case: &Case) {
             .len(),
     };
     assert_eq!(entry_count, fixture.entries.len());
-    let bencher = bencher.counter(ItemsCount::new(fixture.entries.len()));
+    let bencher = bencher.items(fixture.entries.len());
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
             black_box(
@@ -358,12 +373,20 @@ fn open(bencher: Bencher, case: &Case) {
 
 #[divan::bench(args = cases())]
 fn encode(bencher: Bencher, case: &Case) {
+    run_encode(Measurement::Divan(bencher), case);
+}
+
+fn run_encode(bencher: Measurement<'_, '_>, case: &Case) {
     let entries = entries(&case.workload);
     bench_encode(bencher, case, &entries, 0);
 }
 
 #[divan::bench(args = cases())]
 fn encode_preallocated(bencher: Bencher, case: &Case) {
+    run_encode_preallocated(Measurement::Divan(bencher), case);
+}
+
+fn run_encode_preallocated(bencher: Measurement<'_, '_>, case: &Case) {
     let entries = entries(&case.workload);
     // Use the same allowance for all three encoders, independent of their
     // output layouts or compression ratios. Post-measurement checks ensure
@@ -376,14 +399,17 @@ fn encode_preallocated(bencher: Bencher, case: &Case) {
     bench_encode(bencher, case, &entries, output_capacity);
 }
 
-fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacity: usize) {
+fn bench_encode(
+    bencher: Measurement<'_, '_>,
+    case: &Case,
+    entries: &[Entry],
+    output_capacity: usize,
+) {
     let runtime = runtime();
     let method = case.workload.method;
     let bencher = bencher
-        .counter(ItemsCount::new(entries.len()))
-        .counter(BytesCount::new(
-            entries.iter().map(|entry| entry.data.len()).sum::<usize>(),
-        ));
+        .items(entries.len())
+        .bytes(entries.iter().map(|entry| entry.data.len() as u64).sum());
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
             black_box(runtime.block_on(encode_archive(
@@ -427,6 +453,10 @@ fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacit
 
 #[divan::bench(args = cases())]
 fn decode(bencher: Bencher, case: &Case) {
+    run_decode(Measurement::Divan(bencher), case);
+}
+
+fn run_decode(bencher: Measurement<'_, '_>, case: &Case) {
     let runtime = runtime();
     let fixture = fixture(&case.workload, &runtime);
     let mut index = 0;
@@ -447,8 +477,8 @@ fn decode(bencher: Bencher, case: &Case) {
         black_box((path, data));
     };
     let bencher = bencher
-        .counter(ItemsCount::new(fixture.entries.len()))
-        .counter(BytesCount::new(fixture.payload_bytes));
+        .items(fixture.entries.len())
+        .bytes(fixture.payload_bytes);
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
             black_box(runtime.block_on(decode_zip_codec(black_box(&fixture.archive), consume)));
@@ -462,6 +492,75 @@ fn decode(bencher: Bencher, case: &Case) {
     }
 }
 
+// Both harnesses invoke the same setup and timed closure from one binary.
+// Outputs are dropped inside that closure, including for Criterion's iter loop.
+enum Measurement<'a, 'b> {
+    Divan(Bencher<'a, 'b>),
+    Criterion(&'a mut Criterion, &'b str),
+}
+
+impl Measurement<'_, '_> {
+    fn items(self, count: usize) -> Self {
+        match self {
+            Self::Divan(bencher) => Self::Divan(bencher.counter(ItemsCount::new(count))),
+            criterion => criterion,
+        }
+    }
+
+    fn bytes(self, count: u64) -> Self {
+        match self {
+            Self::Divan(bencher) => Self::Divan(bencher.counter(BytesCount::new(count))),
+            criterion => criterion,
+        }
+    }
+
+    fn bench_local(self, mut operation: impl FnMut()) {
+        match self {
+            Self::Divan(bencher) => {
+                let seconds = env::var("ZIP_BENCH_WARMUP_SECONDS").map_or(0, |value| {
+                    value.parse::<u64>().expect("integer warmup seconds")
+                });
+                if seconds != 0 {
+                    let start = Instant::now();
+                    let mut iterations = 1u64;
+                    while start.elapsed() < Duration::from_secs(seconds) {
+                        for _ in 0..iterations {
+                            operation();
+                        }
+                        iterations = iterations.saturating_mul(2);
+                    }
+                }
+                bencher.bench_local(operation);
+            }
+            Self::Criterion(criterion, name) => {
+                criterion.bench_function(name, |bencher| bencher.iter(&mut operation));
+            }
+        }
+    }
+}
+
+fn criterion_main() {
+    let selected = env::var("ZIP_BENCH_CASE").expect("one selected case");
+    let operation = env::var("ZIP_BENCH_OPERATION").expect("one selected operation");
+    let case = cases()
+        .find(|case| case.to_string() == selected)
+        .expect("known case");
+    let name = format!("{operation}/{case}");
+    let output = env::var("ZIP_BENCH_OUTPUT").expect("output directory");
+    let mut criterion = Criterion::default()
+        .output_directory(Path::new(&output))
+        .configure_from_args();
+    criterion.set_current_file(criterion::abs_file!());
+    criterion.set_macro_group("criterion");
+    let bencher = Measurement::Criterion(&mut criterion, &name);
+    match operation.as_str() {
+        "open" => run_open(bencher, &case),
+        "decode" => run_decode(bencher, &case),
+        "encode" => run_encode(bencher, &case),
+        _ => eprintln!("unsupported experiment operation: {operation}"),
+    }
+}
+
 fn main() {
     // The CI driver uses this list to run each case in a fresh process, so
     // earlier workloads cannot change the allocator's behavior for later ones.
@@ -471,5 +570,9 @@ fn main() {
         }
         return;
     }
-    divan::main();
+    if env::var("ZIP_BENCH_HARNESS").as_deref() == Ok("criterion") {
+        criterion_main();
+    } else {
+        divan::main();
+    }
 }

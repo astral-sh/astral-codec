@@ -29,6 +29,7 @@ astral_async_zip = { version = "0.0.21", default-features = false, features = ["
 astral-tokio-tar = "0.7"
 cap-std = "4.0.2"
 clap = "4.6"
+criterion = { package = "codspeed-criterion-compat", version = "=5.0.2", default-features = false, features = ["cargo_bench_support"] }
 divan = { package = "codspeed-divan-compat", version = "5.0.2" }
 flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 junction = "2.0.0"
