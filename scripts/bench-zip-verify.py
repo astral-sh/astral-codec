@@ -10,6 +10,26 @@ import subprocess
 import time
 
 
+def snapshot():
+    processes = []
+    for status_path in Path('/proc').glob('[0-9]*/status'):
+        try:
+            status = dict(line.split(':', 1) for line in status_path.read_text().splitlines())
+            processes.append({
+                'pid': int(status_path.parent.name),
+                'name': status['Name'].strip(),
+                'cpus': status['Cpus_allowed_list'].strip(),
+                'cgroup': (status_path.parent / 'cgroup').read_text().strip(),
+            })
+        except (FileNotFoundError, PermissionError, ProcessLookupError):
+            continue
+    return {
+        'processes': processes,
+        'cgroups': {str(path): path.read_text().strip()
+                    for path in Path('/sys/fs/cgroup').glob('*/cpuset.cpus.effective')},
+    }
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--pin-cpu', choices=['true', 'false'], required=True)
@@ -24,6 +44,8 @@ def main():
     affinity = sorted(os.sched_getaffinity(0)) if hasattr(os, 'sched_getaffinity') else []
     if arguments.pin_cpu == 'true':
         if affinity:
+            if max(affinity) < 2:
+                raise ValueError(f'Benchmark did not reach reserved CPUs: {affinity}')
             os.sched_setaffinity(0, {max(affinity)})
         elif not arguments.test:
             raise ValueError('Linux CPU affinity is required')
@@ -45,6 +67,7 @@ def main():
         'artifacts': {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
                       for path in Path('target/codspeed').rglob('*')
                       if path.is_file() and os.access(path, os.X_OK)},
+        'before': snapshot(),
     }
     (destination / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print(json.dumps(metadata), flush=True)
@@ -54,6 +77,8 @@ def main():
     started = time.monotonic()
     result = subprocess.run(command, env=environment, capture_output=True, text=True, timeout=1200)
     elapsed = time.monotonic() - started
+    metadata['after'] = snapshot()
+    (destination / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
     (destination / 'suite.log').write_text(result.stdout + result.stderr)
     print(result.stdout, end='', flush=True)
     print(result.stderr, end='', flush=True)
