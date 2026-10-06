@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    env, fmt,
+    env, fmt, fs,
     hint::black_box,
     io::{Cursor, Read, Write},
 };
@@ -48,7 +48,11 @@ struct Case {
 
 impl fmt::Display for Case {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.workload, self.implementation)
+        write!(formatter, "{}/{}", self.workload, self.implementation)?;
+        if let Ok(label) = env::var("ZIP_BENCH_SAMPLE_LABEL") {
+            write!(formatter, "/{label}")?;
+        }
+        Ok(())
     }
 }
 
@@ -462,6 +466,37 @@ fn decode(bencher: Bencher, case: &Case) {
     }
 }
 
+// Diagnostic snapshots are outside the timed operations and identical for all
+// experiment treatments. Read from the benchmark process, after CPU pinning.
+fn report_process_state(stage: &str) {
+    if env::var_os("ZIP_BENCH_DIAGNOSTICS").is_none() {
+        return;
+    }
+    for name in ["status", "stat", "cgroup"] {
+        if let Ok(contents) = fs::read_to_string(format!("/proc/self/{name}")) {
+            for line in contents.lines() {
+                if name != "status"
+                    || [
+                        "Cpus_allowed_list:",
+                        "Mems_allowed_list:",
+                        "Threads:",
+                        "VmRSS:",
+                        "VmData:",
+                        "VmPeak:",
+                        "RssAnon:",
+                        "voluntary_ctxt_switches:",
+                        "nonvoluntary_ctxt_switches:",
+                    ]
+                    .iter()
+                    .any(|prefix| line.starts_with(prefix))
+                {
+                    eprintln!("ZIP_DIAGNOSTIC {stage} {name} {line}");
+                }
+            }
+        }
+    }
+}
+
 fn main() {
     // The CI driver uses this list to run each case in a fresh process, so
     // earlier workloads cannot change the allocator's behavior for later ones.
@@ -471,5 +506,7 @@ fn main() {
         }
         return;
     }
+    report_process_state("before");
     divan::main();
+    report_process_state("after");
 }
