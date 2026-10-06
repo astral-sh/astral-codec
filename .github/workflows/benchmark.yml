@@ -82,6 +82,22 @@ jobs:
           name: zip-verify-binary
       - name: Extract benchmarks
         run: tar -xf benchmarks-walltime.tar
+      - name: Inspect runner hooks
+        run: |
+          mkdir -p target/zip-runtime-hooks
+          for hook in /usr/local/bin/codspeed-{pre,wrap,post}-bench; do
+            if test -f "$hook"; then
+              cp "$hook" target/zip-runtime-hooks/
+            fi
+          done
+          systemctl show init.scope system.slice user.slice codspeed.slice --property=Id,AllowedCPUs,EffectiveCPUs > target/zip-runtime-hooks/cgroups.txt
+      - name: Upload runner hooks
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: zip-runtime-hooks
+          path: target/zip-runtime-hooks
+          if-no-files-found: error
+          retention-days: 14
       - name: Repeat original benchmark suite
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         env:
