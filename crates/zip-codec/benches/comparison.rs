@@ -48,7 +48,11 @@ struct Case {
 
 impl fmt::Display for Case {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(formatter, "{}/{}", self.workload, self.implementation)
+        write!(formatter, "{}/{}", self.workload, self.implementation)?;
+        if let Ok(label) = env::var("ZIP_BENCH_SAMPLE_LABEL") {
+            write!(formatter, "/{label}")?;
+        }
+        Ok(())
     }
 }
 
@@ -291,10 +295,10 @@ fn decode_stream(bencher: Bencher, case: &Case) {
         .counter(ItemsCount::new(fixture.entries.len()))
         .counter(BytesCount::new(fixture.payload_bytes));
     match case.implementation {
-        Implementation::ZipCodec => bencher.bench_local(|| {
+        Implementation::ZipCodec => bench_with_warmup(bencher, || {
             black_box(runtime.block_on(stream_zip_codec(black_box(&fixture.archive), consume)));
         }),
-        Implementation::Zip => bencher.bench_local(|| {
+        Implementation::Zip => bench_with_warmup(bencher, || {
             black_box(stream_zip(black_box(&fixture.archive), consume));
         }),
         Implementation::AsyncZip => {}
@@ -329,7 +333,7 @@ fn open(bencher: Bencher, case: &Case) {
     assert_eq!(entry_count, fixture.entries.len());
     let bencher = bencher.counter(ItemsCount::new(fixture.entries.len()));
     match case.implementation {
-        Implementation::ZipCodec => bencher.bench_local(|| {
+        Implementation::ZipCodec => bench_with_warmup(bencher, || {
             black_box(
                 runtime
                     .block_on(ZipArchive::open(Cursor::new(black_box(
@@ -338,13 +342,13 @@ fn open(bencher: Bencher, case: &Case) {
                     .expect("zip-codec archive should open"),
             );
         }),
-        Implementation::Zip => bencher.bench_local(|| {
+        Implementation::Zip => bench_with_warmup(bencher, || {
             black_box(
                 SyncZipArchive::new(Cursor::new(black_box(fixture.archive.as_slice())))
                     .expect("zip archive should open"),
             );
         }),
-        Implementation::AsyncZip => bencher.bench_local(|| {
+        Implementation::AsyncZip => bench_with_warmup(bencher, || {
             black_box(
                 runtime
                     .block_on(ZipFileReader::with_tokio(Cursor::new(black_box(
@@ -385,17 +389,17 @@ fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacit
             entries.iter().map(|entry| entry.data.len()).sum::<usize>(),
         ));
     match case.implementation {
-        Implementation::ZipCodec => bencher.bench_local(|| {
+        Implementation::ZipCodec => bench_with_warmup(bencher, || {
             black_box(runtime.block_on(encode_archive(
                 black_box(entries),
                 method,
                 output_capacity,
             )));
         }),
-        Implementation::Zip => bencher.bench_local(|| {
+        Implementation::Zip => bench_with_warmup(bencher, || {
             black_box(encode_zip(black_box(entries), method, output_capacity));
         }),
-        Implementation::AsyncZip => bencher.bench_local(|| {
+        Implementation::AsyncZip => bench_with_warmup(bencher, || {
             black_box(runtime.block_on(encode_async_zip(
                 black_box(entries),
                 method,
@@ -450,16 +454,28 @@ fn decode(bencher: Bencher, case: &Case) {
         .counter(ItemsCount::new(fixture.entries.len()))
         .counter(BytesCount::new(fixture.payload_bytes));
     match case.implementation {
-        Implementation::ZipCodec => bencher.bench_local(|| {
+        Implementation::ZipCodec => bench_with_warmup(bencher, || {
             black_box(runtime.block_on(decode_zip_codec(black_box(&fixture.archive), consume)));
         }),
-        Implementation::Zip => bencher.bench_local(|| {
+        Implementation::Zip => bench_with_warmup(bencher, || {
             black_box(decode_zip(black_box(&fixture.archive), consume));
         }),
-        Implementation::AsyncZip => bencher.bench_local(|| {
+        Implementation::AsyncZip => bench_with_warmup(bencher, || {
             black_box(runtime.block_on(decode_async_zip(black_box(&fixture.archive), consume)));
         }),
     }
+}
+
+fn bench_with_warmup(bencher: Bencher, mut operation: impl FnMut()) {
+    let iterations = env::var("ZIP_BENCH_WARMUP_ITERATIONS").map_or(0, |value| {
+        value
+            .parse::<usize>()
+            .expect("warmup count should be an integer")
+    });
+    for _ in 0..iterations {
+        operation();
+    }
+    bencher.bench_local(operation);
 }
 
 fn main() {
