@@ -136,17 +136,15 @@ impl Payload {
                     return Err(self.integrity.invalid("stored payload ended early"));
                 }
 
-                if APPEND {
-                    output.reserve(length);
-                    let mut bounded = (&mut *reader).take(length as u64);
-                    while bounded.limit() != 0 {
-                        if bounded.read_buf(output).await? == 0 {
-                            return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
-                        }
+                if !APPEND {
+                    output.clear();
+                }
+                output.reserve(length);
+                let mut bounded = (&mut *reader).take(length as u64);
+                while bounded.limit() != 0 {
+                    if bounded.read_buf(output).await? == 0 {
+                        return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
                     }
-                } else {
-                    output.resize(length, 0);
-                    reader.read_exact(output).await?;
                 }
 
                 self.encoded_remaining -= length as u64;
