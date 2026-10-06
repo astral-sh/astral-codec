@@ -1,6 +1,6 @@
 name: Benchmarks
 
-run-name: ZIP repeat (malloc=${{ inputs.allocator }}, pin=${{ inputs.pin_cpu }}, profile=${{ inputs.profile }}, isolate=${{ inputs.isolate_background }})
+run-name: ZIP repeat (malloc=${{ inputs.allocator }}, pin=${{ inputs.pin_cpu }}, profile=${{ inputs.profile }}, isolate=${{ inputs.isolate_background }}, batch=${{ inputs.sample_size }})
 
 on:
   workflow_dispatch:
@@ -22,6 +22,11 @@ on:
         description: Restrict background processes to CPUs 0-1
         type: boolean
         default: false
+      sample_size:
+        description: Operations per walltime sample
+        type: choice
+        options: [adaptive, '8', '32']
+        default: adaptive
 
 permissions: {}
 
@@ -122,9 +127,10 @@ jobs:
           VERIFY_PROFILE: ${{ inputs.profile }}
           VERIFY_PIN_CPU: ${{ inputs.pin_cpu }}
           VERIFY_ALLOCATOR: ${{ inputs.allocator }}
+          VERIFY_SAMPLE_SIZE: ${{ inputs.sample_size }}
         with:
           mode: walltime
-          run: uv run --only-dev --locked python scripts/bench-zip-verify.py --profile "$VERIFY_PROFILE" --pin-cpu "$VERIFY_PIN_CPU" --allocator "$VERIFY_ALLOCATOR"
+          run: uv run --only-dev --locked python scripts/bench-zip-verify.py --profile "$VERIFY_PROFILE" --pin-cpu "$VERIFY_PIN_CPU" --allocator "$VERIFY_ALLOCATOR" --sample-size "$VERIFY_SAMPLE_SIZE"
       - name: Restore CPU reservations
         if: ${{ always() && inputs.isolate_background }}
         run: |

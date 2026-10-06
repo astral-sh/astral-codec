@@ -35,6 +35,7 @@ def main():
     parser.add_argument('--pin-cpu', choices=['true', 'false'], required=True)
     parser.add_argument('--allocator', choices=['adaptive', 'fixed'], required=True)
     parser.add_argument('--profile', choices=['true', 'false'], required=True)
+    parser.add_argument('--sample-size', choices=['adaptive', '8', '32'], default='adaptive')
     parser.add_argument('--test', action='store_true')
     arguments = parser.parse_args()
     if not arguments.test and os.environ.get('CODSPEED_PROFILER_ENABLED') != arguments.profile:
@@ -72,6 +73,9 @@ def main():
     (destination / 'environment.json').write_text(json.dumps(metadata, indent=2) + '\n')
     print(json.dumps(metadata), flush=True)
     command = ['python', 'scripts/bench-zip.py', '--compare']
+    if arguments.sample_size != 'adaptive':
+        sample_size = int(arguments.sample_size)
+        command += ['--sample-size', str(sample_size), '--sample-count', str(128 // sample_size)]
     if arguments.test:
         command.append('--test')
     started = time.monotonic()

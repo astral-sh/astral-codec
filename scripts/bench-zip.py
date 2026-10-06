@@ -12,6 +12,8 @@ def main():
     parser.add_argument("--compare", action="store_true")
     parser.add_argument("--mode", choices=["walltime", "simulation"], default="walltime")
     parser.add_argument("--test", action="store_true", help="Smoke-test walltime cases without timing")
+    parser.add_argument("--sample-size", type=int)
+    parser.add_argument("--sample-count", type=int)
     parser.add_argument(
         "--min-time", type=float, default=0.25,
         help="Minimum walltime sampling window per case in seconds (default: 0.25)",
@@ -25,6 +27,10 @@ def main():
         parser.error("--min-time must be a finite, nonnegative number")
     if arguments.test and arguments.mode == "simulation":
         parser.error("simulation runs each case once; omit --test")
+    if any(value is not None and value < 1 for value in [arguments.sample_size, arguments.sample_count]):
+        parser.error("sample size and count must be positive")
+    if arguments.mode == "simulation" and (arguments.sample_size or arguments.sample_count):
+        parser.error("sample size and count require walltime")
     command = [
         "cargo", "codspeed", "run", "-p", "zip-codec", "--bench", "comparison",
         "-m", arguments.mode, "--",
@@ -58,6 +64,10 @@ def main():
                 options = ["--test"]
             elif arguments.mode == "walltime":
                 options = ["--min-time", str(arguments.min_time)]
+                if arguments.sample_size is not None:
+                    options += ["--sample-size", str(arguments.sample_size)]
+                if arguments.sample_count is not None:
+                    options += ["--sample-count", str(arguments.sample_count)]
             subprocess.run(
                 [*command, pattern, *options],
                 check=True,
