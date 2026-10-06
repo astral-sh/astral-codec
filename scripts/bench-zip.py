@@ -1,6 +1,7 @@
 """Run each ZIP comparison in a fresh process, retaining its normal CodSpeed URI."""
 
 import argparse
+import math
 import platform
 import re
 import subprocess
@@ -11,10 +12,16 @@ def main():
     parser.add_argument("--compare", action="store_true")
     parser.add_argument("--test", action="store_true", help="Smoke-test without timing")
     parser.add_argument(
+        "--min-time", type=float, default=0.25,
+        help="Minimum sampling time per case in seconds (default: 0.25)",
+    )
+    parser.add_argument(
         "--fixed-layout", action="store_true",
         help="Disable Linux address randomization for benchmark child processes",
     )
     arguments = parser.parse_args()
+    if not math.isfinite(arguments.min_time) or arguments.min_time < 0:
+        parser.error("--min-time must be a finite, nonnegative number")
     command = [
         "cargo", "codspeed", "run", "-p", "zip-codec", "--bench", "comparison",
         "-m", "walltime", "--",
@@ -44,7 +51,10 @@ def main():
             pattern = rf"::{operation}(\[|::){re.escape(case)}(\]|$)"
             print(f"Isolated comparison: {operation}[{case}]", flush=True)
             subprocess.run(
-                [*command, pattern, *(["--test"] if arguments.test else [])],
+                [
+                    *command, pattern,
+                    *(["--test"] if arguments.test else ["--min-time", str(arguments.min_time)]),
+                ],
                 check=True,
                 timeout=300,
             )

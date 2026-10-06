@@ -193,6 +193,10 @@ implementation in a fresh process via `scripts/bench-zip.py`. This isolates each
 case from earlier cases' allocation history, including glibc's adaptive mmap
 threshold. Setup and repeated measurements within a case still share a process;
 output allocation, growth, and deallocation remain part of the encoding cases.
+Each case has a minimum 250 ms sampling window, including harness overhead.
+This collects more samples for tiny operations that otherwise stop at the
+default 100 samples. The driver accepts `--min-time` to change this floor,
+including `--min-time 0` to investigate the default sample count.
 On Linux, `scripts/bench-zip.py --fixed-layout` uses
 `setarch --addr-no-randomize` for benchmark children when investigating layout
 sensitivity. CI leaves this disabled: repeated runs did not consistently reduce
