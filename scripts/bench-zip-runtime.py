@@ -12,10 +12,10 @@ import time
 
 
 PROTOCOLS = {
-    "c0": {"pinned": False, "malloc": False},
-    "c1": {"pinned": True, "malloc": False},
-    "c2": {"pinned": False, "malloc": True},
-    "c3": {"pinned": True, "malloc": True},
+    "d0": {"pinned": False, "malloc": False},
+    "d1": {"pinned": True, "malloc": False},
+    "d2": {"pinned": False, "malloc": True},
+    "d3": {"pinned": True, "malloc": True},
 }
 
 
@@ -41,6 +41,7 @@ def snapshot():
              Path("/sys/kernel/mm/transparent_hugepage/defrag")]
     files.extend(Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_governor"))
     files.extend(Path("/sys/devices/system/cpu").glob("cpu*/cpufreq/scaling_cur_freq"))
+    files.extend(Path("/sys/devices/system/cpu").glob("cpu*/cache/index*/shared_cpu_list"))
     files.extend(Path("/sys/fs/cgroup").glob("**/cpuset.cpus.effective"))
     result["files"] = {}
     for path in files:
@@ -53,6 +54,17 @@ def snapshot():
         path = Path(f"/usr/local/bin/codspeed-{name}-bench")
         if path.is_file():
             result["hooks"][str(path)] = hashlib.sha256(path.read_bytes()).hexdigest()
+    result["processes"] = []
+    for directory in Path("/proc").glob("[0-9]*"):
+        try:
+            result["processes"].append({
+                "pid": int(directory.name),
+                "status": [line for line in (directory / "status").read_text().splitlines()
+                           if line.startswith(("Name:", "PPid:", "Cpus_allowed_list:"))],
+                "cgroup": (directory / "cgroup").read_text(),
+            })
+        except (OSError, UnicodeError):
+            pass
     return result
 
 
@@ -132,12 +144,16 @@ def main():
                         if key.startswith("MALLOC_"):
                             del environment[key]
                     tunables = [value for value in environment.get("GLIBC_TUNABLES", "").split(":") if value and not value.startswith("glibc.malloc.")]
-                    tunables.extend(["glibc.malloc.arena_max=1", "glibc.malloc.mmap_threshold=131072", "glibc.malloc.trim_threshold=131072"])
+                    # Freeze glibc at its 64-bit maximum adaptive mmap threshold and
+                    # corresponding trim threshold, retaining these fixture buffers.
+                    tunables.extend(["glibc.malloc.mmap_threshold=33554432", "glibc.malloc.trim_threshold=67108864"])
                     environment["GLIBC_TUNABLES"] = ":".join(tunables)
                 invocation = command
                 if treatment["pinned"] and selected_cpu is not None:
                     invocation = ["taskset", "--cpu-list", str(selected_cpu), *command]
-                pattern = rf"::{operation}(\[|::){re.escape(case)}/{label}(\]|$)"
+                # Keep regex compilation and its allocations identical across treatments.
+                # Only the emitted benchmark name carries the observation label.
+                pattern = rf"::{operation}(\[|::){re.escape(case)}/p[01]-d[0-3]-r[0-5](\]|$)"
                 options = ["--test"] if arguments.test else ["--min-time", "0.25"]
                 print(f"Runtime observation: {operation}[{case}/{label}]", flush=True)
                 started = time.monotonic()
