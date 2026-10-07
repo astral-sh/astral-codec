@@ -123,7 +123,6 @@ async fn decode_zip_codec(bytes: &[u8], mut consume: impl FnMut(&str, &[u8])) ->
         .await
         .expect("zip-codec archive should open");
     let mut data = Vec::new();
-    let mut chunk = Vec::new();
     let mut entries = 0;
     let mut payload_bytes = 0;
     while let Some(member) = archive
@@ -139,13 +138,10 @@ async fn decode_zip_codec(bytes: &[u8], mut consume: impl FnMut(&str, &[u8])) ->
         } = member
         {
             data.clear();
-            while payload
-                .next_chunk(&mut chunk, PAYLOAD_CHUNK_BYTES)
+            payload
+                .read_to_end(&mut data)
                 .await
-                .expect("zip-codec payload should decode")
-            {
-                data.extend_from_slice(&chunk);
-            }
+                .expect("zip-codec payload should decode");
             consume(&metadata.path, &data);
             entries += 1;
             payload_bytes += data.len() as u64;
