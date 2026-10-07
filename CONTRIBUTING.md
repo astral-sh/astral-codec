@@ -113,14 +113,11 @@ should be used primarily for small, pure private helpers.
 ## Benchmarking
 
 The benchmarks use [CodSpeed's Divan adapter](https://codspeed.io/docs/reference/codspeed-rust/divan).
-Run local wall-clock benchmarks with:
+Run local tar wall-clock benchmarks with:
 
 ```shell
 cargo bench -p tar-codec --bench comparison --locked
 cargo bench -p tar-framing --bench framing --locked
-cargo bench -p zip-framing --bench framing --locked
-cargo bench -p zip-codec --bench codec --locked
-cargo bench -p zip-codec --bench comparison --locked
 ```
 
 The `tar-codec` comparison target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
@@ -181,39 +178,14 @@ and pushes to `main`, and supports manual runs:
 
 - `tar-framing`, `zip-framing`, and both `zip-codec` targets: CPU simulation on
   GitHub-hosted Linux runners.
-- `tar-codec` and `zip-codec` comparisons: walltime on CodSpeed Graviton macro runners,
-  including time spent in filesystem operations and other system calls. Each
-  comparison target runs in its own job. ZIP comparisons run in both modes;
-  compare results within the same mode and runner architecture.
+- `tar-codec` comparisons: walltime on CodSpeed Graviton macro runners, including
+  time spent in filesystem operations and other system calls.
 
-ZIP comparisons run each operation, workload, compression method, and
-implementation in a fresh process via `scripts/bench-zip.py`. The driver defaults
-to walltime; `--mode simulation` selects CPU simulation. This isolates each case
-from earlier cases' allocation history, including glibc's adaptive mmap
-threshold. Setup and repeated measurements within a case still share a process;
-output allocation, growth, and deallocation remain part of the encoding cases.
-Each walltime case has a minimum 250 ms sampling window, including harness
-overhead.
-This collects more samples for tiny operations that otherwise stop at the
-default 100 samples. The driver accepts `--min-time` to change this floor,
-including `--min-time 0` to investigate the default sample count.
-CI uses `--pin-cpu` to run ZIP comparisons on the last CPU in the benchmark's
-affinity mask, avoiding migration between CPU caches. ZIP benchmark children use
-fixed glibc mmap and trim thresholds of 32 MiB and 64 MiB, respectively, via
-`GLIBC_TUNABLES`. This prevents adaptive allocator thresholds from changing
-allocation and page-fault costs between samples. Allocation, buffer growth, and
-deallocation remain timed for every implementation. The fixed thresholds define
-the CI comparison environment and apply to all three libraries.
-The ZIP job also enables `madvise` transparent huge pages and opts benchmark
-allocations in with `glibc.malloc.hugetlb=1`. Repeated CI measurements found less
-cache-related variation with this setting. The job restores the runner's previous
-huge-page policy afterward. These settings define a new walltime baseline;
-compare parser changes only under the same allocation policy.
-On Linux, `scripts/bench-zip.py --fixed-layout` uses
-`setarch --addr-no-randomize` for benchmark children when investigating layout
-sensitivity. CI leaves this disabled: repeated runs did not consistently reduce
-outliers with fixed layouts. The option does not change the runner's system policy.
-Compare repeated CI runs before attributing small changes to the parser.
+ZIP benchmarks use CPU simulation only. Each target runs directly through
+`cargo codspeed run -m simulation` with the default harness and allocator settings.
+Allocation, buffer growth, deallocation, and integrity checks remain part of the
+comparison workloads. Simulation estimates CPU cost; its results are not elapsed
+times and should be compared within the same mode.
 
 By default, the workflow runs all framing and ZIP codec cases and only our
 implementation in each comparison target. Add the `benchmarks:compare` PR label or
@@ -228,13 +200,11 @@ uv run --only-dev --locked cargo codspeed build -p zip-framing --bench framing -
 uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
-uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-framing --bench framing -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench codec -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m simulation
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime
-uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m walltime
 ```
 
 To select only our implementation in either comparison target, use:
@@ -242,5 +212,4 @@ To select only our implementation in either comparison target, use:
 ```shell
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
 uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m simulation -- '/zip-codec(\]|$)'
-uv run --only-dev --locked cargo codspeed run -p zip-codec --bench comparison -m walltime -- '/zip-codec(\]|$)'
 ```

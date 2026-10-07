@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    env, fmt,
+    fmt,
     hint::black_box,
     io::{Cursor, Read, Write},
 };
@@ -463,13 +463,5 @@ fn decode(bencher: Bencher, case: &Case) {
 }
 
 fn main() {
-    // The CI driver uses this list to run each case in a fresh process, so
-    // earlier workloads cannot change the allocator's behavior for later ones.
-    if env::args().any(|argument| argument == "--list-cases") {
-        for case in cases() {
-            println!("{case}");
-        }
-        return;
-    }
     divan::main();
 }
