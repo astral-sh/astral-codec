@@ -1499,6 +1499,7 @@ dependencies = [
  "archive-trait",
  "astral_async_zip",
  "codspeed-divan-compat",
+ "crc32fast",
  "flate2",
  "tempfile",
  "thiserror",
