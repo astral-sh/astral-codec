@@ -9,6 +9,9 @@ repository = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
 
+[features]
+bench-allocator = []
+
 [dependencies]
 archive-trait = { workspace = true }
 zip-framing = { workspace = true }

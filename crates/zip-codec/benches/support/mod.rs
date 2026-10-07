@@ -1,3 +1,6 @@
+#[cfg(feature = "bench-allocator")]
+mod allocator;
+
 use std::{fmt, io::Cursor};
 
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
@@ -16,8 +19,15 @@ pub(super) struct Case {
     id: &'static str,
     pub(super) method: CompressionMethod,
     entry_count: usize,
-    file_bytes: usize,
-    incompressible: bool,
+    file_sizes: &'static [usize],
+    content: Content,
+}
+
+#[derive(Clone, Copy)]
+enum Content {
+    Repeating,
+    Random,
+    Package,
 }
 
 impl fmt::Display for Case {
@@ -53,17 +63,39 @@ pub(super) fn cases() -> impl Iterator<Item = Case> {
         .into_iter()
         .flat_map(|method| {
             [
-                ("large-compressible", 1, LARGE_FILE_BYTES, false),
-                ("large-incompressible", 1, LARGE_FILE_BYTES, true),
-                ("many-small", SMALL_FILE_COUNT, SMALL_FILE_BYTES, false),
+                (
+                    "large-compressible",
+                    1,
+                    &[LARGE_FILE_BYTES][..],
+                    Content::Repeating,
+                ),
+                (
+                    "large-incompressible",
+                    1,
+                    &[LARGE_FILE_BYTES][..],
+                    Content::Random,
+                ),
+                (
+                    "many-small",
+                    SMALL_FILE_COUNT,
+                    &[SMALL_FILE_BYTES][..],
+                    Content::Repeating,
+                ),
+                ("small", 1, &[128][..], Content::Repeating),
+                (
+                    "mixed-package",
+                    64,
+                    &[64, 128, 512, 1024, 4096, 16384, 65536, 262144][..],
+                    Content::Package,
+                ),
             ]
             .into_iter()
-            .map(move |(id, entry_count, file_bytes, incompressible)| Case {
+            .map(move |(id, entry_count, file_sizes, content)| Case {
                 id,
                 method,
                 entry_count,
-                file_bytes,
-                incompressible,
+                file_sizes,
+                content,
             })
         })
 }
@@ -87,9 +119,29 @@ fn payload(length: usize, salt: usize, incompressible: bool) -> Vec<u8> {
 
 pub(super) fn entries(case: &Case) -> Vec<Entry> {
     (0..case.entry_count)
-        .map(|index| Entry {
-            path: format!("package/file-{index:04}.bin"),
-            data: payload(case.file_bytes, index, case.incompressible),
+        .map(|index| {
+            let length = case.file_sizes[index % case.file_sizes.len()];
+            let (path, data) = match case.content {
+                Content::Package if index % 8 != 7 => {
+                    let source = format!(
+                        "# package/module_{index}.py\n\
+                         def describe(value):\n    return {{\"module\": {index}, \"value\": value}}\n"
+                    );
+                    (
+                        format!("package/subpackage_{}/module_{index}.py", index / 8),
+                        source.bytes().cycle().take(length).collect(),
+                    )
+                }
+                Content::Package | Content::Random => (
+                    format!("package/file-{index:04}.bin"),
+                    payload(length, index, true),
+                ),
+                Content::Repeating => (
+                    format!("package/file-{index:04}.bin"),
+                    payload(length, index, false),
+                ),
+            };
+            Entry { path, data }
         })
         .collect()
 }
@@ -99,10 +151,11 @@ pub(super) fn fixture(case: &Case, runtime: &Runtime) -> Fixture {
     let archive = runtime.block_on(encode_archive(&entries, case.method, 0));
     // Check paths, methods, and every decoded byte outside the measurement.
     runtime.block_on(validate_fixture(&archive, &entries, case.method));
+    let payload_bytes = entries.iter().map(|entry| entry.data.len() as u64).sum();
     Fixture {
         entries,
         archive,
-        payload_bytes: (case.entry_count * case.file_bytes) as u64,
+        payload_bytes,
     }
 }
 
