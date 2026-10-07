@@ -15,6 +15,7 @@ bench-allocator = []
 [dependencies]
 archive-trait = { workspace = true }
 zip-framing = { workspace = true }
+crc32fast = { workspace = true }
 flate2 = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt"] }
