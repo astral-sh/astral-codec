@@ -1471,6 +1471,24 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         None
     );
 
+    // The ordered path must derive the same physical spans without sorting.
+    let mut ordered = bytes[..central].to_vec();
+    ordered.extend_from_slice(&first.bytes[first.central..first.end]);
+    ordered.extend_from_slice(&second.bytes[second.central..second.end]);
+    ordered.extend_from_slice(&bytes[end..]);
+    let mut source = Cursor::new(ordered);
+    let mut ordered = Index::read(&mut source, Limits::default()).await?;
+    assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
+    assert_eq!(
+        ordered.entries()[1].record_range(),
+        first.central as u64..central as u64
+    );
+    ordered.validate_all(&mut source).await?;
+    assert_eq!(
+        ordered.resolved(1).ok_or("unresolved entry")?.unix_data(),
+        Some(&UnixData::LinkTarget("target".to_owned()))
+    );
+
     let mut shared = bytes.clone();
     set32(&mut shared, central + 42, 0);
 
