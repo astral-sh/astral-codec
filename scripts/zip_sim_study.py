@@ -59,16 +59,14 @@ def main():
     manifest = []
     for version, revision in VERSIONS.items():
         run(["git", "worktree", "add", "--detach", SOURCE, revision], cwd=WORKSPACE)
-        # Install the exact proposed feature in both revisions. Build each with
-        # and without it so compiler, runtime and selectors are matched.
+        # Follow-up to the original study: test both GlobalAlloc defaults.
         package = SOURCE / "crates/zip-codec/Cargo.toml"
         package.write_text(package.read_text().replace("[dependencies]", "[features]\nbench-allocator = []\n\n[dependencies]", 1))
         support = SOURCE / "crates/zip-codec/benches/support"
         module = support / "mod.rs"
         module.write_text('#[cfg(feature = "bench-allocator")]\nmod allocator;\n\n' + module.read_text())
         shutil.copyfile(WORKSPACE / "scripts/allocator-study/allocator.rs", support / "allocator.rs")
-        for allocator in ("system", "fixed"):
-            measure(version, revision, allocator, env, manifest)
+        measure(version, revision, "fixed", env, manifest)
         run(["git", "worktree", "remove", "--force", SOURCE], cwd=WORKSPACE)
 
 
