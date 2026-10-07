@@ -10,9 +10,9 @@ permissions:
   contents: read
 jobs:
   study:
-    name: ZIP baseline on fixed Graviton (${{ matrix.copy }})
+    name: ZIP allocator variance (${{ matrix.copy }})
     runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
-    timeout-minutes: 45
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
@@ -44,7 +44,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: zip-baseline-${{ matrix.copy }}
+          name: zip-allocator-${{ matrix.copy }}
           path: ${{ runner.temp }}/zip-simulation-study/results
           if-no-files-found: warn
           retention-days: 7

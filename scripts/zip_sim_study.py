@@ -3,6 +3,7 @@ import json
 import os
 from pathlib import Path
 import platform
+import shutil
 import subprocess
 import time
 
@@ -17,8 +18,8 @@ VERSIONS = {
     "pr160": "01fd28fa4e850cbf5cc32cb9ab09e133fd1bfe92",
 }
 SUITES = {
-    "full": ([], 140),
-    "ours": ([r"/zip-codec(\]|$)"], 50),
+    "full": ([r"/Stored/(zip-codec|zip|astral_async_zip)\]$"], 70),
+    "ours": ([r"/Stored/zip-codec\]$"], 25),
 }
 
 
@@ -58,55 +59,69 @@ def main():
     manifest = []
     for version, revision in VERSIONS.items():
         run(["git", "worktree", "add", "--detach", SOURCE, revision], cwd=WORKSPACE)
-        run(
-            ["uv", "run", "--only-dev", "--locked", "cargo", "codspeed", "build",
-             "-p", "zip-codec", "--bench", "comparison", "--locked", "-m", "simulation"],
-            env=env,
-            timeout=1800,
-        )
-        binaries = list((TARGET / "codspeed").glob("*/zip-codec/comparison"))
-        if len(binaries) != 1:
-            raise RuntimeError(f"expected one simulation binary, got {binaries}")
-        binary = binaries[0]
-        digest = hashlib.sha256(binary.read_bytes()).hexdigest()
-        (RESULTS / f"{version}.sha256").write_text(f"{digest}  {binary}\n")
-        for repeat in range(1, 3):
-            suites = list(SUITES.items())
-            if repeat == 2:
-                suites.reverse()
-            for mode, (selector, count) in suites:
-                name = f"{version}-{mode}-r{repeat}"
-                profiles = RESULTS / name
-                profiles.mkdir()
-                measured = run(
-                    [
-                        "setarch", platform.machine(), "--addr-no-randomize",
-                        "valgrind", "-q", "--trace-children=yes",
-                        "--cache-sim=yes", "--I1=32768,8,64", "--D1=32768,8,64",
-                        "--LL=8388608,16,64", "--collect-systime=nsec",
-                        "--read-inline-info=yes", "--instr-atstart=no",
-                        "--separate-threads=no", "--cycle-estimation=yes",
-                        "--tool=callgrind", "--compress-strings=no", "--combine-dumps=yes",
-                        "--dump-line=no", f"--callgrind-out-file={profiles}/%p.out",
-                        f"--log-file={profiles}/valgrind.%p.log", binary, *selector,
-                    ],
-                    cwd=SOURCE / "crates/zip-codec",
-                    env=env,
-                    timeout=1800,
-                    output=profiles / "benchmark.log",
-                )
-                matches = [line for line in measured.stdout.splitlines() if line.startswith("Measured:")]
-                if len(matches) != count:
-                    raise RuntimeError(f"{name}: expected {count} measurements, got {len(matches)}: {matches}")
-                if not list(profiles.glob("*.out")):
-                    raise RuntimeError(f"{name}: no Callgrind profiles")
-                manifest.append({
-                    "version": version, "revision": revision, "mode": mode, "repeat": repeat,
-                    "binary_sha256": digest, "measurements": matches, "directory": name,
-                })
-                (RESULTS / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
+        # Install the exact proposed feature in both revisions. Build each with
+        # and without it so compiler, runtime and selectors are matched.
+        package = SOURCE / "crates/zip-codec/Cargo.toml"
+        package.write_text(package.read_text().replace("[dependencies]", "[features]\nbench-allocator = []\n\n[dependencies]", 1))
+        support = SOURCE / "crates/zip-codec/benches/support"
+        module = support / "mod.rs"
+        module.write_text('#[cfg(feature = "bench-allocator")]\nmod allocator;\n\n' + module.read_text())
+        shutil.copyfile(WORKSPACE / "scripts/allocator-study/allocator.rs", support / "allocator.rs")
+        for allocator in ("system", "fixed"):
+            measure(version, revision, allocator, env, manifest)
         run(["git", "worktree", "remove", "--force", SOURCE], cwd=WORKSPACE)
 
+
+def measure(version, revision, allocator, env, manifest):
+    options = ["--features", "bench-allocator"] if allocator == "fixed" else []
+    run(
+        ["uv", "run", "--only-dev", "--locked", "cargo", "codspeed", "build",
+         "-p", "zip-codec", "--bench", "comparison", "--locked", "-m", "simulation", *options],
+        env=env,
+        timeout=600,
+    )
+    binaries = list((TARGET / "codspeed").glob("*/zip-codec/comparison"))
+    if len(binaries) != 1:
+        raise RuntimeError(f"expected one simulation binary, got {binaries}")
+    binary = binaries[0]
+    digest = hashlib.sha256(binary.read_bytes()).hexdigest()
+    (RESULTS / f"{version}-{allocator}.sha256").write_text(f"{digest}  {binary}\n")
+    for repeat in range(1, 3):
+        suites = list(SUITES.items())
+        if repeat == 2:
+            suites.reverse()
+        for mode, (selector, count) in suites:
+            name = f"{version}-{allocator}-{mode}-r{repeat}"
+            profiles = RESULTS / name
+            profiles.mkdir()
+            measured = run(
+                [
+                    "setarch", platform.machine(), "--addr-no-randomize",
+                    "valgrind", "-q", "--trace-children=yes",
+                    "--cache-sim=yes", "--I1=32768,8,64", "--D1=32768,8,64",
+                    "--LL=8388608,16,64", "--collect-systime=nsec",
+                    "--read-inline-info=yes", "--instr-atstart=no",
+                    "--separate-threads=no", "--cycle-estimation=yes",
+                    "--tool=callgrind", "--compress-strings=no", "--combine-dumps=yes",
+                    "--dump-line=no", f"--callgrind-out-file={profiles}/%p.out",
+                    f"--log-file={profiles}/valgrind.%p.log", binary, *selector,
+                ],
+                cwd=SOURCE / "crates/zip-codec",
+                env=env,
+                timeout=360,
+                output=profiles / "benchmark.log",
+            )
+            matches = [line for line in measured.stdout.splitlines() if line.startswith("Measured:")]
+            if len(matches) != count:
+                raise RuntimeError(f"{name}: expected {count} measurements, got {len(matches)}: {matches}")
+            if not list(profiles.glob("*.out")):
+                raise RuntimeError(f"{name}: no Callgrind profiles")
+            manifest.append({
+                "version": version, "revision": revision, "mode": mode, "repeat": repeat,
+                "allocator": allocator,
+                "binary_sha256": digest, "measurements": matches, "directory": name,
+            })
+            (RESULTS / "manifest.json").write_text(json.dumps(manifest, indent=2) + "\n")
 
 if __name__ == "__main__":
     main()
