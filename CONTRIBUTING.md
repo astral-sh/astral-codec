@@ -204,6 +204,11 @@ fixed glibc mmap and trim thresholds of 32 MiB and 64 MiB, respectively, via
 allocation and page-fault costs between samples. Allocation, buffer growth, and
 deallocation remain timed for every implementation. The fixed thresholds define
 the CI comparison environment and apply to all three libraries.
+The ZIP job also enables `madvise` transparent huge pages and opts benchmark
+allocations in with `glibc.malloc.hugetlb=1`. Repeated CI measurements found less
+cache-related variation with this setting. The job restores the runner's previous
+huge-page policy afterward. These settings define a new walltime baseline;
+compare parser changes only under the same allocation policy.
 On Linux, `scripts/bench-zip.py --fixed-layout` uses
 `setarch --addr-no-randomize` for benchmark children when investigating layout
 sensitivity. CI leaves this disabled: repeated runs did not consistently reduce

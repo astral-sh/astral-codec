@@ -181,15 +181,23 @@ jobs:
       - name: Extract benchmarks
         run: tar -xf benchmarks-walltime.tar
 
+      - name: Configure ZIP allocation pages
+        if: matrix.package == 'zip-codec'
+        run: |
+          # Only opted-in allocations use huge pages. Restore the runner policy below.
+          sed -n 's/.*\[\([^]]*\)\].*/\1/p' /sys/kernel/mm/transparent_hugepage/enabled > "$RUNNER_TEMP/zip-thp-mode"
+          test -s "$RUNNER_TEMP/zip-thp-mode"
+          printf madvise | sudo tee /sys/kernel/mm/transparent_hugepage/enabled
+
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
           mode: walltime
           run: |
             if [ "${{ matrix.package }}" = "zip-codec" ]; then
-              # Fix glibc's mmap/trim thresholds so allocator adaptation cannot
-              # change a case's allocation strategy between samples.
-              export GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=67108864
+              # Avoid adaptive allocation thresholds and reduce cache variation
+              # from the physical pages backing benchmark allocations.
+              export GLIBC_TUNABLES=glibc.malloc.mmap_threshold=33554432:glibc.malloc.trim_threshold=67108864:glibc.malloc.hugetlb=1
               if [ "$COMPARE_IMPLEMENTATIONS" = "true" ]; then
                 uv run --only-dev --locked python scripts/bench-zip.py --pin-cpu --compare
               else
@@ -200,3 +208,10 @@ jobs:
             else
               uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench comparison -m walltime -- '/${{ matrix.package }}(\]|$)'
             fi
+
+      - name: Restore ZIP allocation page policy
+        if: ${{ always() && matrix.package == 'zip-codec' }}
+        run: |
+          if [ -s "$RUNNER_TEMP/zip-thp-mode" ]; then
+            sudo tee /sys/kernel/mm/transparent_hugepage/enabled < "$RUNNER_TEMP/zip-thp-mode"
+          fi
