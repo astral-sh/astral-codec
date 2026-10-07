@@ -3,23 +3,25 @@ on:
   workflow_dispatch:
     inputs:
       compare:
-        description: Unused in the simulation diagnostic
+        description: Unused in this diagnostic
         type: boolean
         default: false
-
 permissions:
   contents: read
-
 jobs:
   study:
-    name: ZIP simulation batch study (same runner)
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
+    name: ZIP baseline on fixed Graviton (${{ matrix.copy }})
+    runs-on: codspeed-macro-arm64-graviton-ubuntu-22-04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        copy: [one, two, three]
     env:
       CARGO_INCREMENTAL: 0
       CARGO_NET_RETRY: 5
       CARGO_TERM_COLOR: never
-      RUSTUP_TOOLCHAIN: stable
+      RUSTUP_TOOLCHAIN: "1.99.0"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
         with:
@@ -28,21 +30,21 @@ jobs:
       - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7
         with:
           enable-cache: false
-      - name: Install pinned CodSpeed Valgrind
+      - name: Install pinned CodSpeed Valgrind and Rust
         run: |
-          curl -fLsS --retry 3 -o "$RUNNER_TEMP/valgrind.deb" https://github.com/CodSpeedHQ/valgrind-codspeed/releases/download/3.26.0-0codspeed7/valgrind_3.26.0-0codspeed7_ubuntu-24.04_amd64.deb
+          curl -fLsS --retry 3 -o "$RUNNER_TEMP/valgrind.deb" https://github.com/CodSpeedHQ/valgrind-codspeed/releases/download/3.26.0-0codspeed7/valgrind_3.26.0-0codspeed7_ubuntu-22.04_arm64.deb
           cd "$RUNNER_TEMP"
-          echo 'ea1788e43cfd75b8af84dd496eb265307c6ab6d048cb7bc8ba4bc564dbbd5aba  valgrind.deb' | sha256sum -c -
+          echo '6db07f15ce23e3cfda00bda85aac0ea3b8a2261c00d529ed856ceb7f3ba207f6  valgrind.deb' | sha256sum -c -
           sudo apt-get update -qq
           sudo apt-get install -y ./valgrind.deb
-          rustup toolchain install stable --profile minimal
-      - name: Build and measure originals and batches
+          rustup toolchain install 1.99.0 --profile minimal
+      - name: Build and measure ZIP suites
         run: python3 scripts/zip_sim_study.py
-      - name: Upload raw profiles and manifest
+      - name: Upload profiles and manifest
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: zip-simulation-study
+          name: zip-baseline-${{ matrix.copy }}
           path: ${{ runner.temp }}/zip-simulation-study/results
           if-no-files-found: warn
           retention-days: 7
