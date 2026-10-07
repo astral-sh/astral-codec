@@ -266,7 +266,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             return Ok(false);
         };
 
-        active.next(&mut self.reader, buffer, target_len).await
+        active
+            .next::<false, _>(&mut self.reader, buffer, target_len)
+            .await
     }
 
     async fn drain(&mut self) -> Result<(), DecodeError> {
@@ -294,6 +296,28 @@ impl<R: AsyncRead + AsyncSeek + Unpin> Archive for ZipArchive<R> {
 /// A lending cursor over one member's decoded, integrity-checked bytes.
 pub struct ZipMemberPayload<'a, R> {
     archive: &'a mut ZipArchive<R>,
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipMemberPayload<'_, R> {
+    /// Appends the remaining decoded payload to `buffer`, returning the number
+    /// of bytes appended after validating the payload's size and CRC.
+    ///
+    /// Existing bytes in `buffer` are preserved. Reads and decompression still
+    /// proceed in bounded chunks, but the buffer grows to hold the whole payload.
+    /// An error or cancellation poisons the archive and may leave partially
+    /// appended data in `buffer`.
+    pub async fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> Result<usize, DecodeError> {
+        let operation = self.archive.begin_operation()?;
+        let length = if let Some(active) = &mut operation.state.active {
+            active
+                .read_to_end(&mut operation.state.reader, buffer)
+                .await?
+        } else {
+            0
+        };
+        operation.commit();
+        Ok(length)
+    }
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R> {

@@ -58,6 +58,9 @@ reads check CRC-32, exact decoded size, and exact DEFLATE stream consumption.
 Advancing or selecting another member drains and validates an unfinished payload.
 Errors or cancellation poison the reader.
 
+`ZipMemberPayload::read_to_end` appends the remaining payload to a `Vec`.
+Use `next_chunk` for bounded streaming.
+
 `Limits` bounds archive size, entry count, metadata, per-member output, and total
 output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited to
 65,535 bytes. The source must remain unchanged while reading the archive.
