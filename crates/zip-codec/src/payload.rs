@@ -1,6 +1,7 @@
 use std::mem;
 
-use flate2::{Crc, Decompress, FlushDecompress, Status};
+use crc32fast::Hasher;
+use flate2::{Decompress, FlushDecompress, Status};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zip_framing::{CompressionMethod, Entry};
 
@@ -42,7 +43,7 @@ impl DeflateState {
 struct Integrity {
     position: u64,
     expected_crc: u32,
-    crc: Crc,
+    crc: Hasher,
     decoded_remaining: u64,
     done: bool,
 }
@@ -67,7 +68,7 @@ impl Payload {
             integrity: Integrity {
                 position: directory.position(),
                 expected_crc: directory.crc32(),
-                crc: Crc::new(),
+                crc: Hasher::new(),
                 decoded_remaining: directory.size(),
                 done: false,
             },
@@ -203,7 +204,7 @@ impl Integrity {
             return Err(self.invalid("decoded payload is shorter than declared size"));
         }
 
-        if self.crc.sum() != self.expected_crc {
+        if self.crc.clone().finalize() != self.expected_crc {
             return Err(self.invalid("payload CRC mismatch"));
         }
 
