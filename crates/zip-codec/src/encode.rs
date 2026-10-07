@@ -5,7 +5,8 @@ use std::io::{self, SeekFrom};
 use archive_trait::{
     ArchiveBuilder, BuildError, EntryMetadata, FilePayload, builder::BuildFailure,
 };
-use flate2::{Compress, Compression, Crc, FlushCompress, Status};
+use crc32fast::Hasher;
+use flate2::{Compress, Compression, FlushCompress, Status};
 use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
@@ -190,7 +191,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .await?;
 
         let start = self.position;
-        let mut crc = Crc::new();
+        let mut crc = Hasher::new();
         let mut compressor = match header.method() {
             CompressionMethod::Stored => None,
             CompressionMethod::Deflate => Some(Compress::new(Compression::default(), false)),
@@ -234,7 +235,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         }
 
         let member = header
-            .finish(crc.sum(), self.position - start, size, offset)
+            .finish(crc.finalize(), self.position - start, size, offset)
             .map_err(EncodeError::Framing)?;
 
         // Rewriting the reserved header does not advance the archive's end.
