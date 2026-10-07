@@ -1,5 +1,6 @@
 use std::str;
 
+use memchr::memchr_iter;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
@@ -183,31 +184,18 @@ impl CentralDirectory {
         let tail = reader.read_slice(tail_start, tail_size, length).await?;
 
         let mut candidate = None;
-        // Skip groups without a possible signature before checking individual
-        // offsets. Scan the whole tail: a second valid EOCD is ambiguous even
+        // Scan the whole tail: a second valid EOCD is ambiguous even
         // when the last 22 bytes already look like an end record.
-        let (groups, remainder) = tail[..=tail.len() - size::END].as_chunks::<8>();
-        let mut last = [0; 8];
-        last[..remainder.len()].copy_from_slice(remainder);
-        for (group, bytes) in groups.iter().chain([&last]).enumerate() {
-            let word = u64::from_le_bytes(*bytes) ^ u64::from_le_bytes([b'P'; 8]);
-            // Mark zero bytes after XORing with 'P'. Borrow propagation can
-            // also mark an adjacent byte; the full signature check rejects it.
-            let mut matches =
-                word.wrapping_sub(0x0101_0101_0101_0101) & !word & 0x8080_8080_8080_8080;
-            while matches != 0 {
-                let offset = group * 8 + matches.trailing_zeros() as usize / 8;
-                matches &= matches - 1;
-                if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
-                    && header.starts_with(&signature::END.to_le_bytes())
-                    && offset
-                        + size::END
-                        + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
-                        == tail.len()
-                    && candidate.replace((offset, *header)).is_some()
-                {
-                    return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
-                }
+        for offset in memchr_iter(b'P', &tail[..=tail.len() - size::END]) {
+            if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
+                && header.starts_with(&signature::END.to_le_bytes())
+                && offset
+                    + size::END
+                    + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+                    == tail.len()
+                && candidate.replace((offset, *header)).is_some()
+            {
+                return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
             }
         }
 
