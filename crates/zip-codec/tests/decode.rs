@@ -246,35 +246,95 @@ async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
             0,
         ),
     ] {
-        let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-        let Some(Member::File {
-            size, mut payload, ..
-        }) = archive.member(index).await?
-        else {
-            return Err(io::Error::other("expected file").into());
-        };
+        for initial_length in [0, 16] {
+            let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+            let Some(Member::File {
+                size, mut payload, ..
+            }) = archive.member(index).await?
+            else {
+                return Err(io::Error::other("expected file").into());
+            };
 
-        let mut buffer = vec![0xa5; 16];
-        let mut total = 0;
-        loop {
-            let previous = buffer.clone();
-            if !payload.next_chunk(&mut buffer, usize::MAX).await? {
-                assert_eq!(buffer, previous, "first EOF: {label}");
-                break;
+            let mut buffer = vec![0xa5; initial_length];
+            let mut total = 0;
+            loop {
+                let previous = buffer.clone();
+                if !payload.next_chunk(&mut buffer, usize::MAX).await? {
+                    assert_eq!(buffer, previous, "first EOF: {label}");
+                    break;
+                }
+
+                assert!(!buffer.is_empty(), "{label}");
+                assert!(buffer.len() <= 64 * 1024, "{label}");
+                total += buffer.len() as u64;
+                assert!(total <= size, "{label}");
             }
 
-            assert!(!buffer.is_empty(), "{label}");
-            assert!(buffer.len() <= 64 * 1024, "{label}");
-            total += buffer.len() as u64;
-            assert!(total <= size, "{label}");
+            assert_eq!(total, size, "{label}");
+            let previous = buffer.clone();
+            assert!(!payload.next_chunk(&mut buffer, usize::MAX).await?);
+            assert_eq!(buffer, previous, "repeated EOF: {label}");
         }
-
-        assert_eq!(total, size, "{label}");
-        let previous = buffer.clone();
-        assert!(!payload.next_chunk(&mut buffer, usize::MAX).await?);
-        assert_eq!(buffer, previous, "repeated EOF: {label}");
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
+    for bytes in [STORED, DEFLATE] {
+        for reserve in [false, true] {
+            let mut archive = ZipArchive::open(Interruptible {
+                source: Cursor::new(bytes.to_vec()),
+                interrupt: Rc::new(Cell::new(false)),
+                read_bytes: Rc::new(Cell::new(0)),
+                max_read: 3,
+                yield_reads: true,
+                pending: false,
+            })
+            .await?;
+            let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
+                return Err(io::Error::other("expected file").into());
+            };
+            let expected = b"hello ZIP\n".repeat(14000);
+            let mut first = Vec::new();
+            assert!(payload.next_chunk(&mut first, 7).await?);
+            assert_eq!(first, expected[..first.len()]);
+
+            let mut output = b"prefix".to_vec();
+            if reserve {
+                output.reserve(expected.len());
+            }
+            assert_eq!(
+                payload.read_to_end(&mut output).await?,
+                expected.len() - first.len()
+            );
+            assert_eq!(&output[..6], b"prefix");
+            assert_eq!(&output[6..], &expected[first.len()..]);
+            let previous = output.clone();
+            assert_eq!(payload.read_to_end(&mut output).await?, 0);
+            assert_eq!(output, previous);
+
+            let Some(Member::File { mut payload, .. }) = archive.member(3).await? else {
+                return Err(io::Error::other("expected empty file").into());
+            };
+            assert_eq!(payload.read_to_end(&mut output).await?, 0);
+            assert_eq!(output, previous);
+        }
+    }
+
+    // A compressed empty stream still invokes the decoder, which must not
+    // expose scratch bytes appended while looking for output.
+    let mut archive = ZipArchive::open(Cursor::new(
+        include_bytes!("fixtures/empty-deflate.zip").as_slice(),
+    ))
+    .await?;
+    let Some(Member::File { mut payload, .. }) = archive.member(0).await? else {
+        return Err(io::Error::other("expected empty DEFLATE file").into());
+    };
+    let mut output = b"prefix".to_vec();
+    assert_eq!(payload.read_to_end(&mut output).await?, 0);
+    assert_eq!(output, b"prefix");
     Ok(())
 }
 
@@ -338,33 +398,40 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
     for original in [STORED, DEFLATE] {
         let mut archive = ZipArchive::open(Cursor::new(original)).await?;
         archive.validate_all().await?;
-        let position = archive.resolved(2).ok_or("unresolved entry")?.data_offset() as usize;
+        for entry_index in [1, 2] {
+            let position = archive
+                .resolved(entry_index)
+                .ok_or("unresolved entry")?
+                .data_offset() as usize;
 
-        for operation in ["read", "skip", "drop", "reader", "validate"] {
-            let mut bytes = original.to_vec();
-            bytes[position] ^= 0x40;
+            for operation in ["read", "collect", "skip", "drop", "reader", "validate"] {
+                let mut bytes = original.to_vec();
+                bytes[position] ^= 0x40;
 
-            let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-            let Some(Member::File { payload, .. }) = archive.member(2).await? else {
-                return Err(io::Error::other("expected corrupt file").into());
-            };
+                let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+                let Some(Member::File { mut payload, .. }) = archive.member(entry_index).await?
+                else {
+                    return Err(io::Error::other("expected corrupt file").into());
+                };
 
-            let result = match operation {
-                "read" => contents(payload).await.map(|_| ()),
-                "skip" => payload.skip().await,
-                "reader" => archive.reader_mut().await.map(|_| ()),
-                "validate" => archive.validate_all().await,
-                _ => archive.next_member().await.map(|_| ()),
-            };
+                let result = match operation {
+                    "read" => contents(payload).await.map(|_| ()),
+                    "collect" => payload.read_to_end(&mut Vec::new()).await.map(|_| ()),
+                    "skip" => payload.skip().await,
+                    "reader" => archive.reader_mut().await.map(|_| ()),
+                    "validate" => archive.validate_all().await,
+                    _ => archive.next_member().await.map(|_| ()),
+                };
 
-            assert!(
-                matches!(result, Err(DecodeError::Integrity { .. })),
-                "{operation}"
-            );
-            assert!(matches!(
-                archive.member(0).await,
-                Err(DecodeError::Poisoned)
-            ));
+                assert!(
+                    matches!(result, Err(DecodeError::Integrity { .. })),
+                    "{operation}"
+                );
+                assert!(matches!(
+                    archive.member(0).await,
+                    Err(DecodeError::Poisoned)
+                ));
+            }
         }
     }
 
@@ -406,15 +473,22 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
         let central_size = central.len() as u64;
         bytes.extend(central);
         bytes.extend(end_records(1, central_offset, central_size)?);
-        let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-        let Some(Member::File { payload, .. }) = archive.member(0).await? else {
-            return Err(io::Error::other("expected file").into());
-        };
+        for collect in [false, true] {
+            let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+            let Some(Member::File { mut payload, .. }) = archive.member(0).await? else {
+                return Err(io::Error::other("expected file").into());
+            };
 
-        assert!(
-            matches!(payload.skip().await, Err(DecodeError::Integrity { .. })),
-            "{label}"
-        );
+            let result = if collect {
+                payload.read_to_end(&mut Vec::new()).await.map(|_| ())
+            } else {
+                payload.skip().await
+            };
+            assert!(
+                matches!(result, Err(DecodeError::Integrity { .. })),
+                "{label}"
+            );
+        }
     }
 
     Ok(())
@@ -493,7 +567,7 @@ impl AsyncSeek for Interruptible {
 
 #[tokio::test]
 async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult {
-    for operation in ["payload", "skip", "member", "validate", "reader"] {
+    for operation in ["payload", "collect", "skip", "member", "validate", "reader"] {
         let interrupt = Rc::new(Cell::new(false));
         let read_bytes = Rc::new(Cell::new(0));
         let source = Interruptible {
@@ -514,16 +588,16 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
         }
 
         let mut future = Box::pin(async {
-            if matches!(operation, "payload" | "skip") {
+            if matches!(operation, "payload" | "collect" | "skip") {
                 let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
                     return Err(DecodeError::Io(io::Error::other("expected file")));
                 };
 
                 interrupt.set(true);
-                if operation == "skip" {
-                    payload.skip().await
-                } else {
-                    payload.next_chunk(&mut Vec::new(), 100).await.map(|_| ())
+                match operation {
+                    "skip" => payload.skip().await,
+                    "collect" => payload.read_to_end(&mut Vec::new()).await.map(|_| ()),
+                    _ => payload.next_chunk(&mut Vec::new(), 100).await.map(|_| ()),
                 }
             } else {
                 interrupt.set(true);
