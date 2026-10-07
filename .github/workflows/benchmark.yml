@@ -63,8 +63,10 @@ jobs:
             target: framing
           - package: zip-codec
             target: codec
+            build-args: --features bench-allocator
           - package: zip-codec
             target: comparison
+            build-args: --features bench-allocator
     permissions:
       contents: read
       id-token: write # Authenticate uploads to CodSpeed with OIDC.
@@ -86,7 +88,7 @@ jobs:
         run: rustup toolchain install stable --profile minimal
 
       - name: Build benchmarks
-        run: uv run --only-dev --locked cargo codspeed build -p ${{ matrix.package }} --bench ${{ matrix.target }} --locked -m simulation
+        run: uv run --only-dev --locked cargo codspeed build -p ${{ matrix.package }} --bench ${{ matrix.target }} --locked -m simulation ${{ matrix.build-args }}
 
       - name: Run benchmarks
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1

@@ -148,6 +148,9 @@ Encoding includes allocation and finalization. `encode` measures output buffer
 growth; `encode_preallocated` allocates the same capacity for each encoder and
 checks that the buffer does not grow. All three use the default DEFLATE level and
 the shared `zlib-rs` backend. Fixture and output checks run outside measurements.
+ZIP codec simulation builds use `--features bench-allocator`: reallocations
+always move, so buffer growth has a consistent cost. Local benchmarks use the
+system allocator.
 
 Smoke-test the ZIP benchmarks in the test profile with:
 
@@ -180,8 +183,8 @@ Build and check all instrumented benchmarks locally with:
 ```shell
 uv run --only-dev --locked cargo codspeed build -p tar-framing --bench framing --locked -m simulation
 uv run --only-dev --locked cargo codspeed build -p zip-framing --bench framing --locked -m simulation
-uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation
-uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m simulation
+uv run --only-dev --locked cargo codspeed build -p zip-codec --bench codec --locked -m simulation --features bench-allocator
+uv run --only-dev --locked cargo codspeed build -p zip-codec --bench comparison --locked -m simulation --features bench-allocator
 uv run --only-dev --locked cargo codspeed build -p tar-codec --bench comparison --locked -m walltime
 uv run --only-dev --locked cargo codspeed run -p tar-framing --bench framing -m simulation
 uv run --only-dev --locked cargo codspeed run -p zip-framing --bench framing -m simulation

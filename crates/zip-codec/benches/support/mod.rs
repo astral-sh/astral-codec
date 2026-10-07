@@ -1,3 +1,6 @@
+#[cfg(feature = "bench-allocator")]
+mod allocator;
+
 use std::{fmt, io::Cursor};
 
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
