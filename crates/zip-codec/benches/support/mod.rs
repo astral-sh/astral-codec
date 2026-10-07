@@ -120,8 +120,6 @@ pub(super) fn entries(case: &Case) -> Vec<Entry> {
             let length = case.file_sizes[index % case.file_sizes.len()];
             let (path, data) = match case.content {
                 Content::Package if index % 8 != 7 => {
-                    // Synthetic source and metadata files, with varying lengths
-                    // and contents. Every eighth member is a larger binary file.
                     let source = format!(
                         "# package/module_{index}.py\n\
                          def describe(value):\n    return {{\"module\": {index}, \"value\": value}}\n"
