@@ -1,7 +1,7 @@
 mod support;
 
 use std::{
-    fmt,
+    env, fmt,
     hint::black_box,
     io::{Cursor, Read, Write},
 };
@@ -327,6 +327,9 @@ fn open(bencher: Bencher, case: &Case) {
             .len(),
     };
     assert_eq!(entry_count, fixture.entries.len());
+    let batch = env::var("ZIP_STUDY_BATCH").map_or(1, |value| {
+        value.parse().expect("ZIP_STUDY_BATCH is a count")
+    });
     let bencher = bencher.counter(ItemsCount::new(fixture.entries.len()));
     match case.implementation {
         Implementation::ZipCodec => bencher.bench_local(|| {
@@ -339,10 +342,12 @@ fn open(bencher: Bencher, case: &Case) {
             );
         }),
         Implementation::Zip => bencher.bench_local(|| {
-            black_box(
-                SyncZipArchive::new(Cursor::new(black_box(fixture.archive.as_slice())))
-                    .expect("zip archive should open"),
-            );
+            for _ in 0..black_box(batch) {
+                black_box(
+                    SyncZipArchive::new(Cursor::new(black_box(fixture.archive.as_slice())))
+                        .expect("zip archive should open"),
+                );
+            }
         }),
         Implementation::AsyncZip => bencher.bench_local(|| {
             black_box(
@@ -379,6 +384,9 @@ fn encode_preallocated(bencher: Bencher, case: &Case) {
 fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacity: usize) {
     let runtime = runtime();
     let method = case.workload.method;
+    let batch = env::var("ZIP_STUDY_BATCH").map_or(1, |value| {
+        value.parse().expect("ZIP_STUDY_BATCH is a count")
+    });
     let bencher = bencher
         .counter(ItemsCount::new(entries.len()))
         .counter(BytesCount::new(
@@ -393,7 +401,9 @@ fn bench_encode(bencher: Bencher, case: &Case, entries: &[Entry], output_capacit
             )));
         }),
         Implementation::Zip => bencher.bench_local(|| {
-            black_box(encode_zip(black_box(entries), method, output_capacity));
+            for _ in 0..black_box(batch) {
+                black_box(encode_zip(black_box(entries), method, output_capacity));
+            }
         }),
         Implementation::AsyncZip => bencher.bench_local(|| {
             black_box(runtime.block_on(encode_async_zip(
@@ -443,6 +453,9 @@ fn decode(bencher: Bencher, case: &Case) {
     };
     assert_eq!(index, fixture.entries.len());
     assert_eq!(decoded, (fixture.entries.len(), fixture.payload_bytes));
+    let batch = env::var("ZIP_STUDY_BATCH").map_or(1, |value| {
+        value.parse().expect("ZIP_STUDY_BATCH is a count")
+    });
     let consume = |path: &str, data: &[u8]| {
         black_box((path, data));
     };
@@ -454,7 +467,9 @@ fn decode(bencher: Bencher, case: &Case) {
             black_box(runtime.block_on(decode_zip_codec(black_box(&fixture.archive), consume)));
         }),
         Implementation::Zip => bencher.bench_local(|| {
-            black_box(decode_zip(black_box(&fixture.archive), consume));
+            for _ in 0..black_box(batch) {
+                black_box(decode_zip(black_box(&fixture.archive), consume));
+            }
         }),
         Implementation::AsyncZip => bencher.bench_local(|| {
             black_box(runtime.block_on(decode_async_zip(black_box(&fixture.archive), consume)));
