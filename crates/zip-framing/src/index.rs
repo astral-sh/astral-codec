@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
     Budget, Error, ExtraHeaderId, Limits, add,
-    constants::{signature, size, version},
+    constants::{extra, signature, size, version},
     extra::Extras,
     invalid,
     record::{RecordReader, array_at},
@@ -137,7 +137,14 @@ impl Index {
         let resolved = match &mut self.resolved[index] {
             Some(resolved) => resolved,
             slot => {
-                let mut buffered = RecordReader::new(reader, 4096, &mut self.buffer);
+                // Cover the fixed header, matching filename, and ZIP64 sizes
+                // without speculatively copying a large prefix of the payload.
+                let capacity = (size::LOCAL
+                    + indexed.directory().path().len()
+                    + extra::HEADER_SIZE
+                    + extra::ZIP64_LOCAL_SIZE)
+                    .min(4096);
+                let mut buffered = RecordReader::new(reader, capacity, &mut self.buffer);
                 // Failed or cancelled resolution must not charge the same metadata
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
