@@ -11,6 +11,7 @@ license = { workspace = true }
 
 [dependencies]
 flate2 = { workspace = true }
+memchr = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt"] }
 

@@ -32,6 +32,7 @@ clap = "4.6"
 divan = { package = "codspeed-divan-compat", version = "5.0.2" }
 flate2 = { version = "1.1.9", default-features = false, features = ["zlib-rs"] }
 junction = "2.0.0"
+memchr = "2.8.0"
 tar = "0.4.46"
 tempfile = "3"
 thiserror = "2"

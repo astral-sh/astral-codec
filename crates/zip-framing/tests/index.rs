@@ -1228,6 +1228,9 @@ async fn bounds_end_record_search_with_short_reads() -> TestResult {
         // A signature whose declared comment does not reach EOF is not another
         // end record. Place it across a short-read boundary near the real EOCD.
         comment[1..5].copy_from_slice(b"PK\x05\x06");
+        // Searching complete signatures can also find one too close to EOF
+        // to hold an end record. It is comment data, not a second candidate.
+        comment[usize::from(u16::MAX) - 4..].copy_from_slice(b"PK\x05\x06");
         let mut source = Observed::new(end_record(0, 0, 0, &comment));
         source.max_read = 3;
         assert!(
