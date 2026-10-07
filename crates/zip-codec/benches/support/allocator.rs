@@ -1,7 +1,7 @@
 use std::alloc::{GlobalAlloc, Layout, System};
 
-// Use GlobalAlloc's default realloc: always allocate, copy, and free.
-// This keeps buffer growth visible without depending on the heap's free space.
+// GlobalAlloc's defaults always move a reallocation and explicitly zero a
+// zeroed allocation. Keep both costs visible without relying on free heap space.
 #[global_allocator]
 static ALLOCATOR: BenchAllocator = BenchAllocator;
 
@@ -12,16 +12,11 @@ struct BenchAllocator;
     reason = "GlobalAlloc requires unsafe delegation to System"
 )]
 // SAFETY: System handles all allocations. Every Layout and pointer is passed
-// through unchanged; the default realloc also uses these alloc/dealloc methods.
+// through unchanged; realloc and alloc_zeroed also use these methods.
 unsafe impl GlobalAlloc for BenchAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         // SAFETY: GlobalAlloc callers provide a valid, non-zero-sized layout.
         unsafe { System.alloc(layout) }
-    }
-
-    unsafe fn alloc_zeroed(&self, layout: Layout) -> *mut u8 {
-        // SAFETY: GlobalAlloc callers provide a valid, non-zero-sized layout.
-        unsafe { System.alloc_zeroed(layout) }
     }
 
     unsafe fn dealloc(&self, pointer: *mut u8, layout: Layout) {
