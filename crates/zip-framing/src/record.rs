@@ -49,6 +49,7 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     }
 
     /// Borrows a checked span, filling the read-ahead window when necessary.
+    #[inline]
     pub(crate) async fn read_slice(
         &mut self,
         position: u64,
@@ -76,6 +77,7 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
     }
 
     // Every read, including read-ahead, is bounded by its containing record span.
+    #[inline]
     pub(crate) async fn read_at(
         &mut self,
         position: u64,
@@ -147,6 +149,7 @@ pub(crate) fn bytes_at<const N: usize>(
         .ok_or_else(|| invalid(position, "truncated integer field"))
 }
 
+#[inline]
 pub(crate) fn parse_name(
     bytes: &[u8],
     flags: GeneralPurposeFlags,
@@ -161,11 +164,11 @@ pub(crate) fn parse_name(
     Ok(name)
 }
 
+#[inline]
 pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
     let bytes = name.as_bytes();
     if name.starts_with('\u{feff}')
-        || bytes.contains(&0)
-        || bytes.contains(&b'\\')
+        || memchr::memchr2(0, b'\\', bytes).is_some()
         || name.starts_with('/')
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
     {
@@ -316,6 +319,7 @@ impl Common {
     pub(crate) const SIZE: usize = 22;
 
     /// Parse a local file or central directory [`Common`] from the given bytes.
+    #[inline]
     pub(crate) fn parse(bytes: &[u8; Self::SIZE], position: u64) -> Result<Self, Error> {
         let method =
             CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;

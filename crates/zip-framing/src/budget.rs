@@ -97,6 +97,7 @@ impl Budget {
 
     /// Charges one member's uncompressed size against [`Limits::member_size`]
     /// and [`Limits::total_size`].
+    #[inline]
     pub fn charge_member(&mut self, size: u64) -> Result<(), BudgetError> {
         if size > self.limits.member_size {
             return Err(BudgetError::MemberSize(self.limits.member_size));
