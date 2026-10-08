@@ -1,4 +1,4 @@
-use std::str;
+use std::{str, sync::LazyLock};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -15,6 +15,9 @@ mod entry;
 
 use entry::ResolvedMember;
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
+
+static END_FINDER: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(&signature::END.to_le_bytes()).into_owned());
 
 /// A ZIP member index.
 ///
@@ -202,7 +205,7 @@ impl CentralDirectory {
         let mut candidate = None;
         // Scan the whole tail: a second valid EOCD is ambiguous even
         // when the last 22 bytes already look like an end record.
-        for offset in memmem::find_iter(tail, &signature::END.to_le_bytes()) {
+        for offset in END_FINDER.find_iter(tail) {
             if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
                 && offset
                     + size::END
@@ -347,13 +350,17 @@ impl CentralDirectory {
             }
         }
 
-        for _ in 0..self.count {
+        for index in 0..self.count {
             let (entry, next) =
                 CentralDirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
             entries.push(IndexedEntry::new(entry, self.offset)?);
             position = next;
 
-            tokio::task::consume_budget().await;
+            // Directory entries are normally parsed from the read-ahead
+            // window. Charge cooperative work per group, not per tiny record.
+            if (index + 1).is_multiple_of(32) {
+                tokio::task::consume_budget().await;
+            }
         }
 
         if position != end {
