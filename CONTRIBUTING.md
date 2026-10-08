@@ -148,7 +148,6 @@ Run the local ZIP comparisons (index, decode, extract) with:
 ```shell
 uv run --locked crates/zip-codec/benches/wheels/fetch.py
 cargo bench -p zip-codec --bench wheel_corpus --locked
-cargo bench -p zip-codec --bench wheel_extract --locked
 ```
 
 Set `WHEEL_CORPUS_DIR` to override the default cache in `target/wheel-corpus`.
