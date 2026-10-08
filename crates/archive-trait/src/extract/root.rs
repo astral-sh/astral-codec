@@ -31,7 +31,7 @@ use {
     windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
-use self::buffered::{BufferedFile, BufferedFileReplacement, write_buffered_files};
+use self::buffered::{BufferedEntry, BufferedFile, BufferedFileReplacement, write_buffered_files};
 use super::{
     LinkPolicy,
     path::{ExtractMember, NormalizedPath, resolve_link_target, validate_symlink_target},
@@ -84,6 +84,7 @@ const STREAMING_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ExtractedEntry {
     File,
+    PendingDirectory,
     CreatedDirectory,
     AmbientDirectory,
     Symlink { index: usize },
@@ -91,7 +92,10 @@ enum ExtractedEntry {
 
 impl ExtractedEntry {
     fn is_directory(self) -> bool {
-        matches!(self, Self::CreatedDirectory | Self::AmbientDirectory)
+        matches!(
+            self,
+            Self::PendingDirectory | Self::CreatedDirectory | Self::AmbientDirectory
+        )
     }
 }
 
@@ -202,17 +206,15 @@ impl FileOpenMode {
 pub(super) struct ExtractionRoot<E> {
     /// The capability anchoring all extraction filesystem operations.
     directory: Arc<Dir>,
-    /// The most recently opened directory capability, used to keep nearby leaf
-    /// operations cheap without retaining one descriptor per directory.
-    directory_handle: Option<(EntryId, Arc<Dir>)>,
+    directories: DirectoryCache,
     /// Whether overwrites are allowed during extraction.
     allow_overwrites: bool,
     /// The latest state recorded for every path encountered by the extraction.
     entries: EntryTree,
     /// Append-only storage; duplicate paths invalidate earlier indices.
     symlinks: Vec<PendingSymlink>,
-    /// Fully validated files awaiting ordered creation in one blocking task.
-    buffered_files: Vec<BufferedFile>,
+    /// Validated files and their implicit parents, awaiting ordered creation.
+    buffered_files: Vec<BufferedEntry>,
     /// Total payload size retained by [`Self::buffered_files`].
     buffered_file_bytes: usize,
     /// Initialized payload allocations recycled after each completed batch.
@@ -317,7 +319,7 @@ impl<E> ExtractionRoot<E> {
 
         Ok(Self {
             directory,
-            directory_handle: None,
+            directories: DirectoryCache::default(),
             allow_overwrites,
             entries: EntryTree::new(),
             symlinks: Vec::new(),
@@ -576,7 +578,7 @@ impl<E> ExtractionRoot<E> {
                 if !metadata_is_link(&metadata) {
                     continue;
                 }
-                self.remove_leaf(&path, entry, parent, &metadata).await?;
+                self.remove_leaf(&path, parent, &metadata).await?;
             }
             self.try_create_symlink(&path, parent, contents)
                 .await?
@@ -599,8 +601,36 @@ impl<E> ExtractionRoot<E> {
         let parent = if let Some(parent) = self.known_parent(path) {
             parent
         } else {
-            self.flush_buffered_files().await?;
-            self.ensure_parents(path).await?
+            let mut current = NormalizedPath::default();
+            let mut parent = ROOT_ENTRY;
+            for component in path.parent_components() {
+                current.push(component);
+                let entry = self.entries.ensure_child(parent, component);
+                match self.entries.state(entry) {
+                    Some(state) if state.is_directory() => {}
+                    Some(_) => {
+                        // Earlier filesystem failures still take precedence.
+                        self.flush_buffered_files().await?;
+                        return Err(ExtractError::PathCollision {
+                            path: current.to_path_buf(),
+                        });
+                    }
+                    None => {
+                        self.buffered_files.push(BufferedEntry::Directory {
+                            entry,
+                            parent,
+                            path: current.clone(),
+                        });
+                        self.entries
+                            .set_state(entry, ExtractedEntry::PendingDirectory);
+                        if self.buffered_files.len() >= BUFFERED_FILE_BATCH_MAX_ENTRIES {
+                            self.flush_buffered_files().await?;
+                        }
+                    }
+                }
+                parent = entry;
+            }
+            parent
         };
         let entry = self.entries.ensure_child(parent, leaf_name(path));
         if matches!(
@@ -623,23 +653,14 @@ impl<E> ExtractionRoot<E> {
         } else {
             BufferedFileReplacement::Allowed
         };
-        if self
-            .directory_handle
-            .as_ref()
-            .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-        {
-            self.directory_handle = None;
-        }
-        let (directory, relative_path) = self.entry_capability(path, parent);
         self.buffered_file_bytes = self.buffered_file_bytes.saturating_add(contents.len());
-        self.buffered_files.push(BufferedFile {
-            directory,
-            relative_path,
-            error_path: path.to_path_buf(),
+        self.buffered_files.push(BufferedEntry::File(BufferedFile {
+            parent,
+            path: path.clone(),
             executable,
             contents,
             replacement,
-        });
+        }));
         self.entries.set_state(entry, ExtractedEntry::File);
         if self.buffered_files.len() >= BUFFERED_FILE_BATCH_MAX_ENTRIES
             || self.buffered_file_bytes >= BUFFERED_FILE_BATCH_MAX_BYTES
@@ -660,10 +681,20 @@ impl<E> ExtractionRoot<E> {
         self.buffered_file_bytes = 0;
         let files = mem::take(&mut self.buffered_files);
         let cancellation = Arc::clone(&self.buffered_file_cancellation);
-        let result =
-            tokio::task::spawn_blocking(move || write_buffered_files(files, &cancellation))
-                .await
-                .map_err(ExtractError::<E>::BlockingTask)?;
+        let directory = Arc::clone(&self.directory);
+        let directories = mem::take(&mut self.directories);
+        let result = tokio::task::spawn_blocking(move || {
+            write_buffered_files(files, &directory, directories, &cancellation)
+        })
+        .await
+        .map_err(ExtractError::<E>::BlockingTask)?;
+        self.directories = result.directory_cache;
+        for (entry, state) in result.directories {
+            // A later queued file may already have superseded this directory.
+            if self.entries.state(entry) == Some(ExtractedEntry::PendingDirectory) {
+                self.entries.set_state(entry, state);
+            }
+        }
         for mut buffer in result.buffers {
             buffer.clear();
             self.buffered_file_buffers.push(buffer);
@@ -761,7 +792,7 @@ impl<E> ExtractionRoot<E> {
         // Missing parents are common, so inspect and replace only after a collision.
         let create_error = match self.try_create_directory(path, parent).await? {
             Ok(directory) => {
-                self.directory_handle = Some((entry, Arc::new(directory)));
+                self.directories.insert(entry, directory);
                 self.entries
                     .set_state(entry, ExtractedEntry::CreatedDirectory);
                 return Ok(());
@@ -778,7 +809,7 @@ impl<E> ExtractionRoot<E> {
                     directory.open_dir(path)
                 })
                 .await?;
-            self.directory_handle = Some((entry, Arc::new(directory)));
+            self.directories.insert(entry, directory);
             self.entries
                 .set_state(entry, ExtractedEntry::AmbientDirectory);
             return Ok(());
@@ -797,7 +828,7 @@ impl<E> ExtractionRoot<E> {
         }
         self.replace_leaf(path, entry, parent).await?;
         let directory = self.create_directory(path, parent).await?;
-        self.directory_handle = Some((entry, Arc::new(directory)));
+        self.directories.insert(entry, directory);
         self.entries
             .set_state(entry, ExtractedEntry::CreatedDirectory);
         Ok(())
@@ -815,7 +846,7 @@ impl<E> ExtractionRoot<E> {
         }
         self.check_replacement(path, entry)?;
         if let Some(metadata) = metadata {
-            self.remove_leaf(path, entry, parent, &metadata).await?;
+            self.remove_leaf(path, parent, &metadata).await?;
         }
         self.entries.clear_state(entry);
         Ok(true)
@@ -887,9 +918,8 @@ impl<E> ExtractionRoot<E> {
                     }
                     Some(ExtractedEntry::File) => ResolvedTarget::Known(TerminalKind::NonDirectory),
                     Some(ExtractedEntry::Symlink { .. }) => continue,
-                    Some(ExtractedEntry::AmbientDirectory) | None => {
-                        ResolvedTarget::Unowned(path.into_owned())
-                    }
+                    Some(ExtractedEntry::AmbientDirectory | ExtractedEntry::PendingDirectory)
+                    | None => ResolvedTarget::Unowned(path.into_owned()),
                 });
             }
         }
@@ -932,7 +962,7 @@ impl<E> ExtractionRoot<E> {
     // Capability-relative filesystem access.
 
     async fn metadata(
-        &self,
+        &mut self,
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<Option<Metadata>, ExtractError<E>> {
@@ -949,7 +979,6 @@ impl<E> ExtractionRoot<E> {
     async fn remove_leaf(
         &mut self,
         path: &NormalizedPath,
-        entry: EntryId,
         parent: EntryId,
         metadata: &Metadata,
     ) -> Result<(), ExtractError<E>> {
@@ -962,14 +991,9 @@ impl<E> ExtractionRoot<E> {
                     path: path.to_path_buf(),
                 });
             }
-            // Windows directory handles do not share delete access.
-            if self
-                .directory_handle
-                .as_ref()
-                .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-            {
-                self.directory_handle = None;
-            }
+            // A filesystem alias can have a different entry ID. Drop all
+            // cached handles before removal, including on Windows.
+            self.directories.0.clear();
             self.with_entry_parent("remove directory", path, parent, |directory, path| {
                 directory.remove_dir(path)
             })
@@ -984,7 +1008,7 @@ impl<E> ExtractionRoot<E> {
     }
 
     async fn open_file(
-        &self,
+        &mut self,
         operation: &'static str,
         path: &NormalizedPath,
         parent: EntryId,
@@ -1005,7 +1029,7 @@ impl<E> ExtractionRoot<E> {
     }
 
     async fn create_directory(
-        &self,
+        &mut self,
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<Dir, ExtractError<E>> {
@@ -1019,12 +1043,14 @@ impl<E> ExtractionRoot<E> {
     /// Attempts symbolic-link creation without attaching a path to an expected
     /// physical-filesystem collision.
     async fn try_create_symlink(
-        &self,
+        &mut self,
         path: &NormalizedPath,
         parent: EntryId,
         contents: String,
     ) -> Result<io::Result<()>, ExtractError<E>> {
-        let (directory, relative_path) = self.entry_capability(path, parent);
+        let (directory, relative_path) =
+            self.directories
+                .entry_capability(&self.directory, path, parent);
         run_blocking_io(directory, relative_path, move |directory, path| {
             create_symlink(directory, &contents, path)
         })
@@ -1036,11 +1062,13 @@ impl<E> ExtractionRoot<E> {
     /// An `AlreadyExists` result is expected while discovering ambient parents. Keeping
     /// that error pathless avoids copying every growing prefix before it is discarded.
     async fn try_create_directory(
-        &self,
+        &mut self,
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<io::Result<Dir>, ExtractError<E>> {
-        let (directory, relative_path) = self.entry_capability(path, parent);
+        let (directory, relative_path) =
+            self.directories
+                .entry_capability(&self.directory, path, parent);
         run_blocking_io(directory, relative_path, |directory, path| {
             directory.create_dir(path)?;
             directory.open_dir(path)
@@ -1074,7 +1102,7 @@ impl<E> ExtractionRoot<E> {
     /// `action` receives only the leaf when its parent is cached; diagnostics
     /// retain the complete root-relative path.
     async fn with_entry_parent<T, F>(
-        &self,
+        &mut self,
         operation: &'static str,
         path: &NormalizedPath,
         parent: EntryId,
@@ -1084,22 +1112,46 @@ impl<E> ExtractionRoot<E> {
         T: Send + 'static,
         F: FnOnce(&Dir, &Path) -> io::Result<T> + Send + 'static,
     {
-        let (directory, relative_path) = self.entry_capability(path, parent);
+        let (directory, relative_path) =
+            self.directories
+                .entry_capability(&self.directory, path, parent);
         run_blocking(directory, operation, path, relative_path, action).await
     }
+}
 
-    fn entry_capability(&self, path: &NormalizedPath, parent: EntryId) -> (Arc<Dir>, PathBuf) {
+/// A bounded set of recent directory capabilities. Sibling trees often return
+/// to the same parent; keep it while processing nearby descendants.
+#[derive(Default)]
+struct DirectoryCache(Vec<(EntryId, Arc<Dir>)>);
+
+impl DirectoryCache {
+    const CAPACITY: usize = 8;
+
+    fn insert(&mut self, entry: EntryId, directory: Dir) {
+        if self.0.len() == Self::CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push((entry, Arc::new(directory)));
+    }
+
+    fn entry_capability(
+        &mut self,
+        directory: &Arc<Dir>,
+        path: &NormalizedPath,
+        parent: EntryId,
+    ) -> (Arc<Dir>, PathBuf) {
         if let Some(file_name) = path.file_name() {
             if parent == ROOT_ENTRY {
-                return (Arc::clone(&self.directory), file_name.into());
-            }
-            if let Some((cached_entry, directory)) = &self.directory_handle
-                && *cached_entry == parent
-            {
                 return (Arc::clone(directory), file_name.into());
             }
+            if let Some(index) = self.0.iter().rposition(|(entry, _)| *entry == parent) {
+                let cached = self.0.remove(index);
+                let directory = Arc::clone(&cached.1);
+                self.0.push(cached);
+                return (directory, file_name.into());
+            }
         }
-        (Arc::clone(&self.directory), path.to_path_buf())
+        (Arc::clone(directory), path.to_path_buf())
     }
 }
 

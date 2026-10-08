@@ -1,6 +1,6 @@
-use std::str;
+use std::{str, sync::LazyLock};
 
-use memchr::memchr_iter;
+use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
@@ -15,6 +15,9 @@ mod entry;
 
 use entry::ResolvedMember;
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
+
+static END_FINDER: LazyLock<memmem::Finder<'static>> =
+    LazyLock::new(|| memmem::Finder::new(&signature::END.to_le_bytes()).into_owned());
 
 /// A ZIP member index.
 ///
@@ -64,54 +67,40 @@ impl Index {
         let mut buffer = Vec::new();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer);
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
-        let entries = end.read_entries(&mut buffered, &mut budget).await?;
+        let mut entries = end.read_entries(&mut buffered, &mut budget).await?;
 
-        let entries = if entries.is_sorted_by_key(CentralDirectoryEntry::position) {
+        if entries.is_sorted_by_key(|entry| entry.directory().position()) {
             if entries
                 .first()
-                .map_or(end.offset, CentralDirectoryEntry::position)
+                .map_or(end.offset, |entry| entry.directory().position())
                 != 0
             {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            // Most directories follow physical order. Derive their boundaries
-            // directly, without allocating a permutation and a boundary table.
-            let mut directory = entries.into_iter().peekable();
-            let mut entries = Vec::with_capacity(directory.len());
-            while let Some(entry) = directory.next() {
-                let boundary = directory
-                    .peek()
-                    .map_or(end.offset, CentralDirectoryEntry::position);
-                entries.push(IndexedEntry::new(entry, boundary)?);
+            for index in 0..entries.len().saturating_sub(1) {
+                let boundary = entries[index + 1].directory().position();
+                entries[index].set_boundary(boundary)?;
             }
-            entries
         } else {
             // APPNOTE 4.4.1.3 permits central entries out of physical order.
             // Preserve directory order while assigning boundaries in physical order.
             // Only local reads can establish exact coverage inside these spans.
             let mut order: Vec<_> = (0..entries.len()).collect();
-            order.sort_unstable_by_key(|&index| entries[index].position());
+            order.sort_unstable_by_key(|&index| entries[index].directory().position());
             if order
                 .first()
-                .map_or(end.offset, |&index| entries[index].position())
+                .map_or(end.offset, |&index| entries[index].directory().position())
                 != 0
             {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            let mut boundaries = vec![end.offset; entries.len()];
-            for (ordinal, &index) in order.iter().enumerate() {
-                boundaries[index] = order
-                    .get(ordinal + 1)
-                    .map_or(end.offset, |&next| entries[next].position());
+            for pair in order.windows(2) {
+                let boundary = entries[pair[1]].directory().position();
+                entries[pair[0]].set_boundary(boundary)?;
             }
-            entries
-                .into_iter()
-                .zip(boundaries)
-                .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
-                .collect::<Result<Vec<_>, _>>()?
-        };
+        }
 
         Ok(Self {
             resolved: (0..entries.len()).map(|_| None).collect(),
@@ -216,9 +205,8 @@ impl CentralDirectory {
         let mut candidate = None;
         // Scan the whole tail: a second valid EOCD is ambiguous even
         // when the last 22 bytes already look like an end record.
-        for offset in memchr_iter(b'P', &tail[..=tail.len() - size::END]) {
+        for offset in END_FINDER.find_iter(tail) {
             if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
-                && header.starts_with(&signature::END.to_le_bytes())
                 && offset
                     + size::END
                     + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
@@ -336,11 +324,13 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-    ) -> Result<Vec<CentralDirectoryEntry>, Error> {
+    ) -> Result<Vec<IndexedEntry>, Error> {
         let mut pending_budget = *budget;
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
-        let mut entries = Vec::new();
+        // read() checked both the platform-sized entry limit and the actual
+        // directory capacity before any count-dependent allocation.
+        let mut entries = Vec::with_capacity(self.count as usize);
 
         // The archive extra record is part of the directory's declared size.
         if self.size >= size::ARCHIVE_EXTRA as u64 {
@@ -360,13 +350,17 @@ impl CentralDirectory {
             }
         }
 
-        for _ in 0..self.count {
+        for index in 0..self.count {
             let (entry, next) =
                 CentralDirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
-            entries.push(entry);
+            entries.push(IndexedEntry::new(entry, self.offset)?);
             position = next;
 
-            tokio::task::consume_budget().await;
+            // Directory entries are normally parsed from the read-ahead
+            // window. Charge cooperative work per group, not per tiny record.
+            if (index + 1).is_multiple_of(32) {
+                tokio::task::consume_budget().await;
+            }
         }
 
         if position != end {

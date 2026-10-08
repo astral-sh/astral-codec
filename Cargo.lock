@@ -1501,6 +1501,8 @@ dependencies = [
  "codspeed-divan-compat",
  "crc32fast",
  "flate2",
+ "serde",
+ "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
