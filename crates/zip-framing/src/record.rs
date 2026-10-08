@@ -1,4 +1,7 @@
-use std::{io::SeekFrom, str};
+use std::{
+    io::{self, SeekFrom},
+    str,
+};
 
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
@@ -64,8 +67,7 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         if position < self.start || requested_end > self.start + self.buffer.len() as u64 {
             self.inner.seek(SeekFrom::Start(position)).await?;
             let read_length = (end - position).min(self.capacity.max(length) as u64) as usize;
-            self.buffer.resize(read_length, 0);
-            self.inner.read_exact(self.buffer).await?;
+            self.fill(read_length).await?;
             self.start = position;
         }
 
@@ -102,11 +104,24 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         }
 
         let length = (end - position).min(self.capacity as u64) as usize;
-        self.buffer.resize(length, 0);
-        self.inner.read_exact(self.buffer).await?;
+        self.fill(length).await?;
         self.start = position;
         bytes.copy_from_slice(&self.buffer[..bytes.len()]);
 
+        Ok(())
+    }
+
+    async fn fill(&mut self, length: usize) -> Result<(), Error> {
+        self.buffer.clear();
+        self.buffer.reserve(length);
+        // Let AsyncRead initialize spare capacity as it fills the window. Take
+        // bounds every read even when reused allocation exceeds this span.
+        let mut reader = (&mut *self.inner).take(length as u64);
+        while reader.limit() != 0 {
+            if reader.read_buf(self.buffer).await? == 0 {
+                return Err(io::Error::from(io::ErrorKind::UnexpectedEof).into());
+            }
+        }
         Ok(())
     }
 }
@@ -373,7 +388,7 @@ mod tests {
     #[tokio::test]
     async fn bounds_reads_before_allocation() -> Result<(), Error> {
         let mut source = Cursor::new([1, 2, 3, 4]);
-        let mut buffer = Vec::new();
+        let mut buffer = Vec::with_capacity(64);
         let mut reader = RecordReader::new(&mut source, 4, &mut buffer);
 
         // An allocation of this size would fail before any I/O could occur.
@@ -394,6 +409,11 @@ mod tests {
             })
         ));
         assert_eq!(reader.read_slice(1, 2, 4).await?, [2, 3]);
+
+        // Spare capacity from a larger window must not cause read-ahead beyond
+        // the current container, even though the source has more bytes.
+        assert_eq!(reader.read_slice(0, 2, 2).await?, [1, 2]);
+        assert_eq!(reader.inner.position(), 2);
 
         Ok(())
     }

@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
     Budget, Error, ExtraHeaderId, Limits, add,
-    constants::{signature, size, version},
+    constants::{extra, signature, size, version},
     extra::Extras,
     invalid,
     record::{RecordReader, array_at},
@@ -66,29 +66,52 @@ impl Index {
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
         let entries = end.read_entries(&mut buffered, &mut budget).await?;
 
-        // Preserve directory order while assigning boundaries in physical order.
-        // Only local reads can establish exact coverage inside these spans.
-        let mut order: Vec<_> = (0..entries.len()).collect();
-        order.sort_unstable_by_key(|&index| entries[index].position());
-        if order
-            .first()
-            .map_or(end.offset, |&index| entries[index].position())
-            != 0
-        {
-            return Err(invalid(0, "unaccounted bytes before the first member"));
-        }
+        let entries = if entries.is_sorted_by_key(CentralDirectoryEntry::position) {
+            if entries
+                .first()
+                .map_or(end.offset, CentralDirectoryEntry::position)
+                != 0
+            {
+                return Err(invalid(0, "unaccounted bytes before the first member"));
+            }
 
-        let mut boundaries = vec![end.offset; entries.len()];
-        for (ordinal, &index) in order.iter().enumerate() {
-            boundaries[index] = order
-                .get(ordinal + 1)
-                .map_or(end.offset, |&next| entries[next].position());
-        }
-        let entries = entries
-            .into_iter()
-            .zip(boundaries)
-            .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
-            .collect::<Result<Vec<_>, _>>()?;
+            // Most directories follow physical order. Derive their boundaries
+            // directly, without allocating a permutation and a boundary table.
+            let mut directory = entries.into_iter().peekable();
+            let mut entries = Vec::with_capacity(directory.len());
+            while let Some(entry) = directory.next() {
+                let boundary = directory
+                    .peek()
+                    .map_or(end.offset, CentralDirectoryEntry::position);
+                entries.push(IndexedEntry::new(entry, boundary)?);
+            }
+            entries
+        } else {
+            // APPNOTE 4.4.1.3 permits central entries out of physical order.
+            // Preserve directory order while assigning boundaries in physical order.
+            // Only local reads can establish exact coverage inside these spans.
+            let mut order: Vec<_> = (0..entries.len()).collect();
+            order.sort_unstable_by_key(|&index| entries[index].position());
+            if order
+                .first()
+                .map_or(end.offset, |&index| entries[index].position())
+                != 0
+            {
+                return Err(invalid(0, "unaccounted bytes before the first member"));
+            }
+
+            let mut boundaries = vec![end.offset; entries.len()];
+            for (ordinal, &index) in order.iter().enumerate() {
+                boundaries[index] = order
+                    .get(ordinal + 1)
+                    .map_or(end.offset, |&next| entries[next].position());
+            }
+            entries
+                .into_iter()
+                .zip(boundaries)
+                .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
+                .collect::<Result<Vec<_>, _>>()?
+        };
 
         Ok(Self {
             resolved: (0..entries.len()).map(|_| None).collect(),
@@ -114,7 +137,14 @@ impl Index {
         let resolved = match &mut self.resolved[index] {
             Some(resolved) => resolved,
             slot => {
-                let mut buffered = RecordReader::new(reader, 4096, &mut self.buffer);
+                // Cover the fixed header, matching filename, and ZIP64 sizes
+                // without speculatively copying a large prefix of the payload.
+                let capacity = (size::LOCAL
+                    + indexed.directory().path().len()
+                    + extra::HEADER_SIZE
+                    + extra::ZIP64_LOCAL_SIZE)
+                    .min(4096);
+                let mut buffered = RecordReader::new(reader, capacity, &mut self.buffer);
                 // Failed or cancelled resolution must not charge the same metadata
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
