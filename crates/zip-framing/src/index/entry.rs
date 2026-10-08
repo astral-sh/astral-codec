@@ -261,6 +261,16 @@ impl IndexedEntry {
     }
 
     pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
+        let mut entry = Self {
+            directory,
+            boundary,
+        };
+        entry.set_boundary(boundary)?;
+        Ok(entry)
+    }
+
+    pub(super) fn set_boundary(&mut self, boundary: u64) -> Result<(), Error> {
+        let directory = &self.directory;
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(
@@ -287,10 +297,8 @@ impl IndexedEntry {
             ));
         }
 
-        Ok(Self {
-            directory,
-            boundary,
-        })
+        self.boundary = boundary;
+        Ok(())
     }
 
     /// Read and validate an indexed entry's local header, filename, extras, and optional descriptor
