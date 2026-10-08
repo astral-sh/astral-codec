@@ -46,3 +46,9 @@ jobs:
         run: |
           cargo test -p tar-codec --bench comparison --locked -- --test
           cargo test -p zip-codec --bench comparison --locked -- --test
+      - name: Smoke-test wheel corpus benchmarks
+        if: runner.os == 'Linux'
+        run: |
+          python3 crates/zip-codec/benches/wheels/fetch.py
+          cargo test -p zip-codec --bench wheel_corpus --locked -- --test
+          cargo test -p zip-codec --bench wheel_extract --locked -- --test
