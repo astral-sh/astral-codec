@@ -1,0 +1,224 @@
+{
+  "additional_batch": {
+    "declared_uncompressed_bytes": 5106728231,
+    "downloaded_bytes": 2518390137,
+    "members": 16687,
+    "outcomes": {
+      "pass": 6
+    },
+    "wheels": 6
+  },
+  "archives_with_comments": 0,
+  "audited_at": "2026-10-01T19:25:30.890185+00:00",
+  "checks": {
+    "all_download_sizes_match_manifest": true,
+    "all_members_drained": true,
+    "all_selected_hashes_have_one_result": true,
+    "codec_and_lockfile_unchanged": true,
+    "independent_directory_counts_and_sizes_agree": true,
+    "initial_harness_source_preserved": true,
+    "parser_binary_and_source_hashes_match": true
+  },
+  "declared_uncompressed_bytes": 11606083115,
+  "descriptor_entries": 0,
+  "directory_entries": 2333,
+  "downloaded_bytes": 4726616015,
+  "file_and_hardlink_payload_bytes": 11606083115,
+  "hosts": {
+    "0": 13075,
+    "3": 255962
+  },
+  "largest_download": {
+    "download_bytes": 743068852,
+    "elapsed_seconds": 355.039,
+    "filename": "nvidia_cudnn_cu12-9.27.0.42-py3-none-win_amd64.whl",
+    "project": "nvidia-cudnn-cu12",
+    "rank": 921,
+    "returncode": 0,
+    "sha256": "06e9b0026f3bad97d2b58666330fabec04fe1672f776661ecb0ce0029c27f142",
+    "stages": [
+      {
+        "declared_bytes": 1149159283,
+        "entries": 24,
+        "stage": "open"
+      },
+      {
+        "stage": "metadata"
+      },
+      {
+        "members": 24,
+        "payload_bytes": 1149159283,
+        "stage": "complete"
+      }
+    ],
+    "status": "pass",
+    "stderr": "",
+    "stdout": "{\"stage\":\"open\",\"entries\":24,\"declared_bytes\":1149159283}\n{\"stage\":\"metadata\"}\n{\"stage\":\"complete\",\"members\":24,\"payload_bytes\":1149159283}\n",
+    "version": "9.27.0.42",
+    "zip_metadata": {
+      "archive_comment_bytes": 0,
+      "declared_bytes": 1149159283,
+      "descriptor_entries": 0,
+      "directory_entries": 0,
+      "entries": 24,
+      "hosts": {
+        "3": 24
+      },
+      "methods": {
+        "8": 24
+      },
+      "utf8_entries": 0
+    }
+  },
+  "largest_uncompressed": {
+    "download_bytes": 457984995,
+    "elapsed_seconds": 35.214,
+    "filename": "flashinfer_cubin-0.6.13-py3-none-any.whl",
+    "project": "flashinfer-cubin",
+    "rank": 3319,
+    "returncode": 0,
+    "sha256": "41e4848c2d09d220e8394489b2fb6cfec6b6ad09f897b5ab8b39fc23055f6c24",
+    "stages": [
+      {
+        "declared_bytes": 1912029530,
+        "entries": 16017,
+        "stage": "open"
+      },
+      {
+        "stage": "metadata"
+      },
+      {
+        "members": 16017,
+        "payload_bytes": 1912029530,
+        "stage": "complete"
+      }
+    ],
+    "status": "pass",
+    "stderr": "",
+    "stdout": "{\"stage\":\"open\",\"entries\":16017,\"declared_bytes\":1912029530}\n{\"stage\":\"metadata\"}\n{\"stage\":\"complete\",\"members\":16017,\"payload_bytes\":1912029530}\n",
+    "version": "0.6.13",
+    "zip_metadata": {
+      "archive_comment_bytes": 0,
+      "declared_bytes": 1912029530,
+      "descriptor_entries": 0,
+      "directory_entries": 0,
+      "entries": 16017,
+      "hosts": {
+        "3": 16017
+      },
+      "methods": {
+        "8": 16017
+      },
+      "utf8_entries": 0
+    }
+  },
+  "members": 269037,
+  "methods": {
+    "0": 2423,
+    "8": 266614
+  },
+  "most_members": {
+    "download_bytes": 61559157,
+    "elapsed_seconds": 39.714,
+    "filename": "homeassistant-2026.9.4-py3-none-any.whl",
+    "project": "homeassistant",
+    "rank": 4771,
+    "returncode": 0,
+    "sha256": "2a0ab1910af7b701cf1c8e5ed1d4b7caaa010f89e807c25d824a5805c91abb2c",
+    "stages": [
+      {
+        "declared_bytes": 231486699,
+        "entries": 54165,
+        "stage": "open"
+      },
+      {
+        "stage": "metadata"
+      },
+      {
+        "members": 54165,
+        "payload_bytes": 231486699,
+        "stage": "complete"
+      }
+    ],
+    "status": "pass",
+    "stderr": "",
+    "stdout": "{\"stage\":\"open\",\"entries\":54165,\"declared_bytes\":231486699}\n{\"stage\":\"metadata\"}\n{\"stage\":\"complete\",\"members\":54165,\"payload_bytes\":231486699}\n",
+    "version": "2026.9.4",
+    "zip_metadata": {
+      "archive_comment_bytes": 0,
+      "declared_bytes": 231486699,
+      "descriptor_entries": 0,
+      "directory_entries": 0,
+      "entries": 54165,
+      "hosts": {
+        "3": 54165
+      },
+      "methods": {
+        "8": 54165
+      },
+      "utf8_entries": 0
+    }
+  },
+  "outcomes": {
+    "pass": 962
+  },
+  "platforms": {
+    "Linux": 55,
+    "any": 816,
+    "macOS": 45,
+    "pyemscripten_2025_0_wasm32": 1,
+    "windows": 45
+  },
+  "rank_bands": [
+    {
+      "ranks": "1-1000",
+      "sampled": 200,
+      "selection": {
+        "no_wheel": 2,
+        "selected": 198
+      }
+    },
+    {
+      "ranks": "1001-2000",
+      "sampled": 200,
+      "selection": {
+        "no_wheel": 3,
+        "selected": 197
+      }
+    },
+    {
+      "ranks": "2001-3000",
+      "sampled": 200,
+      "selection": {
+        "no_wheel": 9,
+        "selected": 191
+      }
+    },
+    {
+      "ranks": "3001-4000",
+      "sampled": 200,
+      "selection": {
+        "metadata_error": 1,
+        "no_wheel": 11,
+        "selected": 188
+      }
+    },
+    {
+      "ranks": "4001-5000",
+      "sampled": 200,
+      "selection": {
+        "no_wheel": 12,
+        "selected": 188
+      }
+    }
+  ],
+  "recorded_results": 962,
+  "sampled_projects": 1000,
+  "selected_wheels": 962,
+  "selection": {
+    "metadata_error": 1,
+    "no_wheel": 37,
+    "selected": 962
+  },
+  "utf8_entries": 407
+}
