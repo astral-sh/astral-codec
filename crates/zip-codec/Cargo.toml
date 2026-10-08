@@ -32,10 +32,6 @@ name = "codec"
 harness = false
 
 [[bench]]
-name = "comparison"
-harness = false
-
-[[bench]]
 name = "wheel_corpus"
 harness = false
 

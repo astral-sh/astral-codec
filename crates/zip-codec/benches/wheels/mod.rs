@@ -3,10 +3,6 @@ use std::{fmt, fs, io::Cursor, path::PathBuf};
 use tokio::runtime::{Builder, Runtime};
 use zip::ZipArchive;
 
-#[cfg(feature = "bench-allocator")]
-#[path = "../support/allocator.rs"]
-mod allocator;
-
 #[derive(Clone, Copy)]
 pub(super) enum Implementation {
     ZipCodec,
@@ -61,11 +57,6 @@ pub(super) fn runtime() -> Runtime {
         .expect("benchmark runtime should build")
 }
 
-pub(super) fn is_metadata(path: &str) -> bool {
-    path.rsplit_once(".dist-info/")
-        .is_some_and(|(_, file)| matches!(file, "WHEEL" | "METADATA" | "RECORD"))
-}
-
 pub(super) struct Entry {
     pub(super) path: String,
     pub(super) directory: bool,
@@ -104,14 +95,6 @@ impl Fixture {
             })
             .collect();
         let payload_bytes = entries.iter().map(|entry| entry.size).sum();
-        assert_eq!(
-            entries
-                .iter()
-                .filter(|entry| is_metadata(&entry.path))
-                .count(),
-            3,
-            "wheel must contain WHEEL, METADATA and RECORD"
-        );
         Self {
             bytes,
             entries,
