@@ -1,5 +1,6 @@
 use std::{fmt, fs, io::Cursor, path::PathBuf};
 
+use serde::Deserialize;
 use tokio::runtime::{Builder, Runtime};
 use zip::ZipArchive;
 
@@ -31,12 +32,16 @@ impl fmt::Display for Case {
     }
 }
 
+#[derive(Deserialize)]
+struct Wheel<'a> {
+    name: &'a str,
+}
+
 pub(super) fn cases() -> impl Iterator<Item = Case> {
-    include_str!("corpus.txt")
-        .lines()
-        .filter(|line| !line.is_empty() && !line.starts_with('#'))
-        .flat_map(|line| {
-            let name = line.split_whitespace().next().expect("corpus ID");
+    serde_json::from_str::<Vec<Wheel<'static>>>(include_str!("corpus.json"))
+        .expect("valid wheel corpus")
+        .into_iter()
+        .flat_map(|wheel| {
             [
                 Implementation::ZipCodec,
                 Implementation::Zip,
@@ -44,7 +49,7 @@ pub(super) fn cases() -> impl Iterator<Item = Case> {
             ]
             .into_iter()
             .map(move |implementation| Case {
-                name,
+                name: wheel.name,
                 implementation,
             })
         })
@@ -78,7 +83,7 @@ impl Fixture {
                 PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../target/wheel-corpus")
             });
         let bytes = fs::read(root.join(format!("{}.whl", case.name)))
-            .expect("wheel missing; run: python3 crates/zip-codec/benches/wheels/fetch.py");
+            .expect("wheel missing; run: uv run --locked crates/zip-codec/benches/wheels/fetch.py");
         let mut archive = ZipArchive::new(Cursor::new(&bytes)).expect("pinned wheel should open");
         let entries: Vec<_> = (0..archive.len())
             .map(|index| {

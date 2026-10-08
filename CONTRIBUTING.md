@@ -141,52 +141,17 @@ cargo test -p zip-framing --bench framing --locked -- --test
 cargo test -p zip-codec --bench codec --locked -- --test
 ```
 
-### Local ZIP comparisons
+### Comparative benchmarks
 
-The wheel corpus pins six PyPI artifacts in
-`crates/zip-codec/benches/wheels/corpus.txt`: requests, urllib3, Django,
-botocore, NumPy, and cryptography. It covers small pure-Python packages,
-large file trees, bundled data, and native libraries. These are fixed examples,
-not a sample weighted by PyPI downloads.
-
-The comparisons run locally only, with the system allocator. Fetch and SHA-256
-verify the corpus before running them:
+Run the local ZIP comparisons (index, decode, extract) with:
 
 ```shell
-python3 crates/zip-codec/benches/wheels/fetch.py
+uv run --locked crates/zip-codec/benches/wheels/fetch.py
 cargo bench -p zip-codec --bench wheel_corpus --locked
 cargo bench -p zip-codec --bench wheel_extract --locked
 ```
 
-Files are cached under `target/wheel-corpus`; `WHEEL_CORPUS_DIR` overrides
-that path. The script verifies cached files and replaces missing or corrupt
-ones. No downloads occur during benchmarks.
-
-`wheel_corpus` compares `zip-codec`, `zip`, and `astral_async_zip` in memory:
-
-- `index` opens the wheel and enumerates every entry's declared path, size, and
-  CRC. `zip` exposes sizes and CRCs via `by_index_raw`, which also locates each
-  local header; neither it nor the other implementations decompress payloads.
-- `decode` opens the wheel and reads every entry into a reusable buffer,
-  including CRC checks. It also visits explicit directories.
-
-Both check reference paths, sizes, and CRCs before timing.
-
-`wheel_extract` opens the same bytes and writes files to a fresh destination.
-Destination creation and cleanup are excluded; archive opening and writes are
-timed. `zip-codec` and `zip` use their extraction APIs.
-`astral_async_zip` has no extraction API, so its benchmark reads checked
-entries into a reused buffer and writes Tokio files. Paths and bytes are checked
-before timing. The extractors' containment and permission policies differ.
-Neither target performs wheel installation, RECORD hash verification, or script
-rewriting.
-
-After fetching the corpus, smoke-test the comparisons in the test profile with:
-
-```shell
-cargo test -p zip-codec --bench wheel_corpus --locked -- --test
-cargo test -p zip-codec --bench wheel_extract --locked -- --test
-```
+Set `WHEEL_CORPUS_DIR` to override the default cache in `target/wheel-corpus`.
 
 ### CodSpeed
 
