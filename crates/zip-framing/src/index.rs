@@ -1,6 +1,6 @@
 use std::str;
 
-use memchr::memchr_iter;
+use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
@@ -216,9 +216,8 @@ impl CentralDirectory {
         let mut candidate = None;
         // Scan the whole tail: a second valid EOCD is ambiguous even
         // when the last 22 bytes already look like an end record.
-        for offset in memchr_iter(b'P', &tail[..=tail.len() - size::END]) {
+        for offset in memmem::find_iter(tail, &signature::END.to_le_bytes()) {
             if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
-                && header.starts_with(&signature::END.to_le_bytes())
                 && offset
                     + size::END
                     + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
