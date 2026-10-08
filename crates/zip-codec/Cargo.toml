@@ -37,9 +37,5 @@ harness = false
 name = "wheel_corpus"
 harness = false
 
-[[bench]]
-name = "wheel_extract"
-harness = false
-
 [lints]
 workspace = true
