@@ -12,7 +12,7 @@ use std::{
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
 use super::{
-    EntryId, ExtractedEntry, FileOpenMode, NormalizedPath, directory_is_empty, entry_capability,
+    DirectoryCache, EntryId, ExtractedEntry, FileOpenMode, NormalizedPath, directory_is_empty,
     metadata_is_link, remove_file_or_symlink,
 };
 use crate::ExtractError;
@@ -39,7 +39,6 @@ pub(super) enum BufferedFileError {
 
 /// One fully validated small file prepared for ordered batch creation.
 pub(super) struct BufferedFile {
-    pub(super) entry: EntryId,
     pub(super) parent: EntryId,
     pub(super) path: NormalizedPath,
     pub(super) executable: bool,
@@ -61,7 +60,7 @@ pub(super) enum BufferedEntry {
 pub(super) struct BufferedFileBatchResult {
     pub(super) buffers: Vec<Vec<u8>>,
     pub(super) directories: Vec<(EntryId, ExtractedEntry)>,
-    pub(super) directory_handle: Option<(EntryId, Arc<Dir>)>,
+    pub(super) directory_cache: DirectoryCache,
     pub(super) error: Option<(PathBuf, BufferedFileError)>,
 }
 
@@ -86,7 +85,7 @@ impl BufferedFileError {
 pub(super) fn write_buffered_files(
     files: Vec<BufferedEntry>,
     root: &Arc<Dir>,
-    mut directory_handle: Option<(EntryId, Arc<Dir>)>,
+    mut directory_cache: DirectoryCache,
     cancellation: &AtomicBool,
 ) -> BufferedFileBatchResult {
     let mut buffers = Vec::with_capacity(files.len());
@@ -101,11 +100,11 @@ pub(super) fn write_buffered_files(
             } => {
                 if error.is_none() && !cancellation.load(Ordering::Acquire) {
                     let (directory, relative) =
-                        entry_capability(root, directory_handle.as_ref(), &path, parent);
+                        directory_cache.entry_capability(root, &path, parent);
                     match create_parent(&directory, &relative) {
                         Ok((directory, state)) => {
                             directories.push((entry, state));
-                            directory_handle = Some((entry, Arc::new(directory)));
+                            directory_cache.insert(entry, directory);
                         }
                         Err(source) => error = Some((path.to_path_buf(), source)),
                     }
@@ -113,21 +112,15 @@ pub(super) fn write_buffered_files(
             }
             BufferedEntry::File(file) => {
                 if error.is_none() && !cancellation.load(Ordering::Acquire) {
-                    // Drop an old handle before replacement (required on Windows).
-                    if directory_handle
-                        .as_ref()
-                        .is_some_and(|(entry, _)| *entry == file.entry)
-                    {
-                        directory_handle = None;
-                    }
                     let (directory, relative) =
-                        entry_capability(root, directory_handle.as_ref(), &file.path, file.parent);
+                        directory_cache.entry_capability(root, &file.path, file.parent);
                     if let Err(source) = write_buffered_file(
                         &directory,
                         &relative,
                         file.executable,
                         &file.contents,
                         file.replacement,
+                        &mut directory_cache,
                     ) {
                         error = Some((file.path.to_path_buf(), source));
                     }
@@ -139,7 +132,7 @@ pub(super) fn write_buffered_files(
     BufferedFileBatchResult {
         buffers,
         directories,
-        directory_handle,
+        directory_cache,
         error,
     }
 }
@@ -172,6 +165,7 @@ pub(super) fn write_buffered_file(
     executable: bool,
     contents: &[u8],
     replacement: BufferedFileReplacement,
+    directory_cache: &mut DirectoryCache,
 ) -> Result<(), BufferedFileError> {
     // Unique destination access makes this the common duplicate-member path.
     // If the leaf changed unexpectedly, fall through to no-follow inspection.
@@ -194,6 +188,10 @@ pub(super) fn write_buffered_file(
     };
     if replacement == BufferedFileReplacement::Disallowed {
         return Err(BufferedFileError::Collision);
+    }
+    if metadata.is_dir() && !metadata_is_link(&metadata) {
+        // Drop cached aliases as well as the exact entry before removing a directory.
+        directory_cache.0.clear();
     }
     remove_buffered_leaf(directory, path, &metadata)?;
     let file = open_new_file(directory, path, executable)
