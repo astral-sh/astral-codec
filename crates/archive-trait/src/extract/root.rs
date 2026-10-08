@@ -279,8 +279,9 @@ async fn write_payload<P: MemberPayload>(
     Ok(())
 }
 
-// Member operations invoked by the extraction loop.
 impl<E> ExtractionRoot<E> {
+    // Member operations invoked by the extraction loop.
+
     /// Opens or creates a real directory and anchors extraction to its capability.
     pub(super) async fn open(
         destination: &Path,
@@ -585,10 +586,9 @@ impl<E> ExtractionRoot<E> {
         }
         Ok(())
     }
-}
 
-// Destination state transitions and replacement policy.
-impl<E> ExtractionRoot<E> {
+    // Destination state transitions and replacement policy.
+
     /// Queues a fully validated payload for ordered creation in a bounded batch.
     async fn queue_buffered_file(
         &mut self,
@@ -837,10 +837,9 @@ impl<E> ExtractionRoot<E> {
     fn can_replace(&self, entry: EntryId) -> bool {
         self.allow_overwrites && !self.entries.has_active_children(entry)
     }
-}
 
-// Symbolic-link graph resolution.
-impl<E> ExtractionRoot<E> {
+    // Symbolic-link graph resolution.
+
     fn resolve_terminal(
         &self,
         path: &NormalizedPath,
@@ -929,10 +928,9 @@ impl<E> ExtractionRoot<E> {
         })
         .await
     }
-}
 
-// Capability-relative filesystem access.
-impl<E> ExtractionRoot<E> {
+    // Capability-relative filesystem access.
+
     async fn metadata(
         &self,
         path: &NormalizedPath,

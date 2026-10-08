@@ -43,4 +43,6 @@ jobs:
       - name: Smoke-test framing benchmarks
         run: cargo test -p tar-framing --bench framing --locked -- --test
       - name: Smoke-test codec benchmarks
-        run: cargo test -p tar-codec --bench comparison --locked -- --test
+        run: |
+          cargo test -p tar-codec --bench comparison --locked -- --test
+          cargo test -p zip-codec --bench comparison --locked -- --test

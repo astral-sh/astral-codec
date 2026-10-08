@@ -81,6 +81,7 @@ impl<W: AsyncWrite + Unpin> TarEncoder<W> {
 
 impl<W: AsyncWrite + Unpin> ArchiveBuilder for TarEncoder<W> {
     type Error = EncodeError;
+    type FileOptions = ();
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         self.write_bytes(end_marker_bytes()).await
@@ -91,6 +92,7 @@ impl<W: AsyncWrite + Unpin> ArchiveBuilder for TarEncoder<W> {
         path: &str,
         payload: &mut FilePayload<'_>,
         metadata: EntryMetadata,
+        _options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         self.write_member(PaxMember {
             path,
