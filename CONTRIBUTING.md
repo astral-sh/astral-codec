@@ -152,12 +152,46 @@ ZIP codec simulation builds use `--features bench-allocator`: reallocations
 always move, so buffer growth has a consistent cost. Local benchmarks use the
 system allocator.
 
+The wheel corpus pins six PyPI artifacts in
+`crates/zip-codec/benches/wheels/corpus.txt`: requests, urllib3, Django,
+botocore, NumPy, and cryptography. It covers small pure-Python packages,
+large file trees, bundled data, and native libraries. These are fixed examples,
+not a sample weighted by PyPI downloads.
+
+Fetch and SHA-256 verify the corpus before running it:
+
+```shell
+python3 crates/zip-codec/benches/wheels/fetch.py
+cargo bench -p zip-codec --bench wheel_corpus --locked
+cargo bench -p zip-codec --bench wheel_extract --locked
+```
+
+Files are cached under `target/wheel-corpus`; `WHEEL_CORPUS_DIR` overrides
+that path. The script verifies cached files and replaces missing or corrupt
+ones. No downloads occur during benchmarks.
+
+`wheel_corpus` compares the three readers on opening, locating and reading
+`WHEEL`, `METADATA`, and `RECORD`, and decoding all entries. Explicit
+directories are included. All payload reads check ZIP CRCs. Reference paths,
+sizes, and CRCs are checked before timing. These are in-memory CPU benchmarks.
+
+`wheel_extract` opens the same bytes and writes files to a fresh destination.
+Destination creation and cleanup are excluded; archive opening and writes are
+timed. `zip-codec` and `zip` use their extraction APIs.
+`astral_async_zip` has no extraction API, so its benchmark reads checked
+entries into a reused buffer and writes Tokio files. Paths and bytes are checked
+before timing. The extractors' containment and permission policies differ.
+Neither target performs wheel installation, RECORD hash verification, or script
+rewriting.
+
 Smoke-test the ZIP benchmarks in the test profile with:
 
 ```shell
 cargo test -p zip-framing --bench framing --locked -- --test
 cargo test -p zip-codec --bench codec --locked -- --test
 cargo test -p zip-codec --bench comparison --locked -- --test
+cargo test -p zip-codec --bench wheel_corpus --locked -- --test
+cargo test -p zip-codec --bench wheel_extract --locked -- --test
 ```
 
 ### CodSpeed
@@ -165,10 +199,11 @@ cargo test -p zip-codec --bench comparison --locked -- --test
 [The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
 and pushes to `main`, and supports manual runs:
 
-- `tar-framing`, `zip-framing`, and both `zip-codec` targets: CPU simulation on
+- `tar-framing`, `zip-framing`, and ZIP codec and reader targets: CPU simulation on
   GitHub-hosted Linux runners.
-- `tar-codec` comparisons: walltime on CodSpeed Graviton macro runners, including
-  time spent in filesystem operations and other system calls.
+- `tar-codec` comparisons and `zip-codec --bench wheel_extract`: walltime on
+  CodSpeed Graviton macro runners, including filesystem operations and other
+  system calls.
 
 Simulation estimates CPU cost, not elapsed time; compare results within the same
 mode.
@@ -176,7 +211,7 @@ mode.
 By default, the workflow runs all framing and ZIP codec cases and only our
 implementation in each comparison target. Add the `benchmarks:compare` PR label or
 enable **Compare implementations** in a manual run to include the other
-implementations in both comparison targets.
+implementations in the synthetic and wheel comparison targets.
 
 Build and check all instrumented benchmarks locally with:
 
