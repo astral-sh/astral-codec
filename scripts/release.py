@@ -3,10 +3,11 @@
 # requires-python = ">=3.12"
 # dependencies = ["tomlkit"]
 # ///
-"""Update the workspace version, internal dependencies, and lockfile for a release."""
+"""Prepare or validate a workspace release."""
 
+import argparse
+import json
 import subprocess
-import sys
 from collections.abc import Mapping
 from pathlib import Path
 
@@ -15,11 +16,39 @@ import tomlkit
 ROOT = Path(__file__).resolve().parent.parent
 
 
-def main() -> None:
-    if len(sys.argv) != 2:
-        raise SystemExit(f"usage: {Path(sys.argv[0]).name} <version>")
+def validate_release(version: str) -> None:
+    metadata = json.loads(
+        subprocess.check_output(
+            ["cargo", "metadata", "--locked", "--no-deps", "--format-version", "1"],
+            cwd=ROOT,
+        )
+    )
+    if not metadata["workspace_members"] or any(
+        package["version"] != version
+        for package in metadata["packages"]
+        if package["id"] in metadata["workspace_members"]
+    ):
+        raise SystemExit(
+            f"Requested version {version} does not match all workspace packages"
+        )
+    if subprocess.check_output(["git", "tag", "--list", f"v{version}"], cwd=ROOT):
+        raise SystemExit(f"Tag v{version} already exists")
 
-    version = sys.argv[1]
+
+def main() -> None:
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("version")
+    parser.add_argument(
+        "--validate",
+        action="store_true",
+        help="Check the version and tag without changing files",
+    )
+    arguments = parser.parse_args()
+    version = arguments.version
+    if arguments.validate:
+        validate_release(version)
+        return
+
     manifest = ROOT / "Cargo.toml"
     contents = tomlkit.parse(manifest.read_text())
     workspace = contents["workspace"]

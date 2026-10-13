@@ -31,26 +31,12 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+        with:
+          enable-cache: false
+
       - name: Validate release metadata
-        shell: bash
-        run: |
-          cargo metadata --locked --no-deps --format-version 1 |
-            jq --exit-status --arg version "$VERSION" '
-              .workspace_members as $members |
-              [.packages[] | select(.id as $id | $members | index($id))] |
-              length > 0 and all(.version == $version)
-            ' > /dev/null || {
-              echo "::error::Requested version ${VERSION} does not match all workspace packages"
-              exit 1
-            }
-
-          tag="v${VERSION}"
-          if git rev-parse --verify --quiet "refs/tags/${tag}" > /dev/null; then
-            echo "::error::Tag ${tag} already exists"
-            exit 1
-          fi
-
-          echo "Preparing ${tag} from ${GITHUB_SHA}" >> "$GITHUB_STEP_SUMMARY"
+        run: uv run --locked scripts/release.py --validate "$VERSION"
         env:
           VERSION: ${{ inputs.version }}
 
