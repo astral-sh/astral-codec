@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "archive-trait"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "cap-std",
  "junction",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "tar-codec"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "archive-trait",
  "astral-tokio-tar",
@@ -881,7 +881,7 @@ dependencies = [
 
 [[package]]
 name = "tar-framing"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "codspeed-divan-compat",
  "thiserror",
@@ -890,7 +890,7 @@ dependencies = [
 
 [[package]]
 name = "tarpit"
-version = "0.0.14"
+version = "0.0.15"
 dependencies = [
  "async-compression",
  "clap",
