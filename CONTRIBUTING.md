@@ -54,6 +54,15 @@ cargo test
 In general, integration tests are preferred over unit tests. Unit tests
 should be used primarily for small, pure private helpers.
 
+## Releases
+
+1. Run [Prepare release](https://github.com/astral-sh/astral-codec/actions/workflows/release-prepare.yml)
+   from `main` with the version to release, without a `v` prefix.
+2. Review and merge the version bump PR.
+3. Run [Release](https://github.com/astral-sh/astral-codec/actions/workflows/release.yml)
+   from `main` with the same version.
+4. Approve the `release-gate` deployment.
+
 ## Benchmarking
 
 The benchmarks use [CodSpeed's Divan adapter](https://codspeed.io/docs/reference/codspeed-rust/divan).
