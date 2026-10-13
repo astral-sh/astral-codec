@@ -55,6 +55,9 @@ impl<R> TarArchive<R> {
             .max_pax_extension_size(policy.pax_policy.max_extension_size)
             .max_global_pax_extensions_size(policy.pax_policy.max_global_extensions_size)
             .allow_all_nul_numeric_fields(policy.allow_all_nul_numeric_fields)
+            .allow_header_uname_and_gname_without_terminator(
+                policy.allow_header_uname_and_gname_without_terminator,
+            )
             .max_gnu_extension_size(policy.max_gnu_extension_size);
         self.reader = self.reader.with_policy(stream_policy);
         self.policy = policy;
@@ -69,6 +72,7 @@ impl<R> TarArchive<R> {
 pub struct DecodePolicy {
     allow_gnu: bool,
     allow_all_nul_numeric_fields: bool,
+    allow_header_uname_and_gname_without_terminator: bool,
     max_gnu_extension_size: u64,
     pax_policy: PaxDecodePolicy,
 }
@@ -141,6 +145,7 @@ impl Default for DecodePolicy {
         Self {
             allow_gnu: true,
             allow_all_nul_numeric_fields: true,
+            allow_header_uname_and_gname_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
             pax_policy: PaxDecodePolicy::default(),
         }
@@ -168,6 +173,16 @@ impl DecodePolicy {
     /// archive family.
     pub fn allow_all_nul_numeric_fields(mut self, allow: bool) -> Self {
         self.allow_all_nul_numeric_fields = allow;
+        self
+    }
+
+    /// Configures whether ordinary header `uname` and `gname` fields may omit their NUL terminators.
+    ///
+    /// This compatibility option applies to ordinary pax/ustar and GNU member
+    /// headers and is **disabled by default**. Enabling it accepts names that
+    /// occupy all 32 bytes of either field.
+    pub fn allow_header_uname_and_gname_without_terminator(mut self, allow: bool) -> Self {
+        self.allow_header_uname_and_gname_without_terminator = allow;
         self
     }
 

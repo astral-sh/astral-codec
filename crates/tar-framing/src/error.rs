@@ -101,7 +101,7 @@ pub enum FrameErrorInner {
         /// The bytes found in the invalid header field.
         found: Vec<u8>,
     },
-    /// An ordinary ustar member header's string field had no NUL terminator.
+    /// An ordinary pax/ustar or GNU member header's string field had no NUL terminator.
     #[error("invalid ustar {field} field: missing NUL terminator")]
     UnterminatedUstarStringField {
         /// The name of the unterminated header field.

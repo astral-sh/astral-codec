@@ -90,6 +90,13 @@
 //! missing rather than assigned a value. This can be disabled with
 //! [`StreamPolicy::allow_all_nul_numeric_fields`].
 //!
+//! By default, tar-framing follows a strict reading of pax and requires the `uname` and `gname`
+//! header fields to be NUL terminated (the `magic` field is also required to be NUL terminated, but
+//! is so by definition). However, some encoders will incorrectly pack a 32-byte value into
+//! these fields, rather than honoring the 31-byte + NUL terminator limit.
+//! CPython's `tarfile` in particular does this.
+//! This can be disabled with [`StreamPolicy::allow_header_uname_and_gname_without_terminator`].
+//!
 //! Separately, higher-level crates (like tar-codec) may choose to apply additional
 //! restrictions when processing logical archive members. For example, a consumer
 //! of tar-framing may choose to reject vendor-specific pax records, or member names

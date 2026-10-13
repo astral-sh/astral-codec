@@ -170,7 +170,7 @@ impl HeaderFrame {
         declared_size: u64,
         local_records: Option<&PaxRecords>,
         global_records: Option<&GlobalPaxRecords>,
-        allow_all_nul_numeric_fields: bool,
+        policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         let kind = UstarKind::try_from_framed(position, typeflag)?;
 
@@ -183,7 +183,7 @@ impl HeaderFrame {
                 ArchiveFormat::Pax,
                 field,
                 &block[range],
-                allow_all_nul_numeric_fields,
+                policy.allow_all_nul_numeric_fields,
             )
         };
         let mode = parse_numeric_field("mode", MODE_RANGE)?;
@@ -191,18 +191,7 @@ impl HeaderFrame {
         let gid = parse_numeric_field("gid", GID_RANGE)?;
         let mtime = parse_numeric_field("mtime", MTIME_RANGE)?;
 
-        let validate_string_field = |field: &'static str, bytes: &[u8]| {
-            if bytes.contains(&0) {
-                Ok(())
-            } else {
-                Err(FrameError::at(
-                    position,
-                    FrameErrorInner::UnterminatedUstarStringField { field },
-                ))
-            }
-        };
-        validate_string_field("uname", &block[UNAME_RANGE])?;
-        validate_string_field("gname", &block[GNAME_RANGE])?;
+        Self::validate_owner_names(position, &block, policy)?;
 
         // POSIX pax deliberately leaves the representation of device numbers unspecified.
         // We do not consume those fields, so devmajor and devminor remain opaque.
@@ -238,7 +227,7 @@ impl HeaderFrame {
         typeflag: u8,
         declared_size: u64,
         require_link_kind: bool,
-        allow_all_nul_numeric_fields: bool,
+        policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         let kind = UstarKind::try_from_framed(position, typeflag)?;
         if require_link_kind && !matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink) {
@@ -255,13 +244,14 @@ impl HeaderFrame {
                 ArchiveFormat::Gnu,
                 field,
                 &block[range],
-                allow_all_nul_numeric_fields,
+                policy.allow_all_nul_numeric_fields,
             )
         };
         let mode = parse_numeric_field("mode", MODE_RANGE)?;
         let uid = parse_numeric_field("uid", UID_RANGE)?;
         let gid = parse_numeric_field("gid", GID_RANGE)?;
         let mtime = parse_numeric_field("mtime", MTIME_RANGE)?;
+        Self::validate_owner_names(position, &block, policy)?;
 
         Ok(Self {
             position,
@@ -275,6 +265,25 @@ impl HeaderFrame {
             gid,
             mtime,
         })
+    }
+
+    fn validate_owner_names(
+        position: u64,
+        block: &Block,
+        policy: &StreamPolicy,
+    ) -> Result<(), FrameError> {
+        if policy.allow_header_uname_and_gname_without_terminator {
+            return Ok(());
+        }
+        for (field, range) in [("uname", UNAME_RANGE), ("gname", GNAME_RANGE)] {
+            if !block[range].contains(&0) {
+                return Err(FrameError::at(
+                    position,
+                    FrameErrorInner::UnterminatedUstarStringField { field },
+                ));
+            }
+        }
+        Ok(())
     }
 
     fn parse_numeric_field(
@@ -427,6 +436,7 @@ pub struct StreamPolicy {
     max_pax_extension_size: u64,
     max_global_pax_extensions_size: u64,
     allow_all_nul_numeric_fields: bool,
+    allow_header_uname_and_gname_without_terminator: bool,
     max_gnu_extension_size: u64,
 }
 
@@ -436,6 +446,7 @@ impl Default for StreamPolicy {
             max_pax_extension_size: DEFAULT_MAX_PAX_EXTENSION_SIZE,
             max_global_pax_extensions_size: DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
             allow_all_nul_numeric_fields: true,
+            allow_header_uname_and_gname_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
         }
     }
@@ -475,6 +486,16 @@ impl StreamPolicy {
     /// for its archive family.
     pub fn allow_all_nul_numeric_fields(mut self, allow: bool) -> Self {
         self.allow_all_nul_numeric_fields = allow;
+        self
+    }
+
+    /// Configures whether ordinary header `uname` and `gname` fields may omit their NUL terminators.
+    ///
+    /// This compatibility option applies to ordinary pax/ustar and GNU member
+    /// headers and is disabled by default. Enabling it accepts all 32 bytes of
+    /// an unterminated field as the name.
+    pub fn allow_header_uname_and_gname_without_terminator(mut self, allow: bool) -> Self {
+        self.allow_header_uname_and_gname_without_terminator = allow;
         self
     }
 
@@ -1173,7 +1194,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             parsed.size,
             local_pax_records.as_deref(),
             self.global_pax_records.as_ref(),
-            self.policy.allow_all_nul_numeric_fields,
+            &self.policy,
         )?;
         self.state = member_payload_state(frame.effective_size);
         Ok(Frame::Header(frame))
@@ -1237,7 +1258,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             parsed.typeflag,
             parsed.size,
             pending.long_link,
-            self.policy.allow_all_nul_numeric_fields,
+            &self.policy,
         )?;
         self.state = member_payload_state(frame.effective_size);
         Ok(Frame::Header(frame))
