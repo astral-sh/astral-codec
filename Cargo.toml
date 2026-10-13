@@ -13,12 +13,12 @@ homepage = "https://github.com/astral-sh/astral-codec"
 repository = "https://github.com/astral-sh/astral-codec"
 authors = ["William Woodruff <william@astral.sh>"]
 license = "MIT OR Apache-2.0"
-version = "0.0.14"
+version = "0.0.15"
 
 [workspace.dependencies]
-archive-trait = { path = "crates/archive-trait", version = "0.0.14" }
-tar-codec = { path = "crates/tar-codec", version = "0.0.14" }
-tar-framing = { path = "crates/tar-framing", version = "0.0.14" }
+archive-trait = { path = "crates/archive-trait", version = "0.0.15" }
+tar-codec = { path = "crates/tar-codec", version = "0.0.15" }
+tar-framing = { path = "crates/tar-framing", version = "0.0.15" }
 
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 astral-tokio-tar = "0.7"
