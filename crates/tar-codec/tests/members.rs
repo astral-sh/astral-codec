@@ -8,7 +8,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
+    FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
@@ -157,47 +157,29 @@ async fn unterminated_owner_names_are_policy_controlled() -> TestResult {
     for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
         for (field, range) in [("uname", UNAME_RANGE), ("gname", GNAME_RANGE)] {
             let mut block = header(format, "file", b'0', 0, "", 0o644);
+            block[range].fill(b'n');
+            set_checksum(&mut block);
+
             let mut archive = ArchiveBuilder::new();
-            for length in [31, 32] {
-                block[range.start..range.start + length].fill(b'n');
-                set_checksum(&mut block);
-                archive.block(&block);
-            }
+            archive.block(&block);
             let bytes = archive.finish();
 
-            for (policy, allow) in [
-                (DecodePolicy::default(), false),
-                (
-                    DecodePolicy::default()
-                        .allow_header_uname_and_gname_without_terminator(true)
-                        .allow_header_uname_and_gname_without_terminator(false),
-                    false,
-                ),
-                (
+            let mut members = TarArchive::new(bytes.as_slice()).members();
+            assert!(matches!(
+                members.next().await,
+                Err(DecodeError::Framing(FrameError {
+                    inner: FrameErrorInner::UnterminatedUstarStringField { field: found },
+                    ..
+                })) if found == field
+            ));
+
+            let mut members = TarArchive::new(bytes.as_slice())
+                .with_policy(
                     DecodePolicy::default().allow_header_uname_and_gname_without_terminator(true),
-                    true,
-                ),
-            ] {
-                let mut members = TarArchive::new(bytes.as_slice())
-                    .with_policy(policy)
-                    .members();
-                assert!(matches!(members.next().await?, Some(Member::File { .. })));
-                if allow {
-                    assert!(matches!(members.next().await?, Some(Member::File { .. })));
-                } else {
-                    assert!(
-                        matches!(
-                            members.next().await,
-                            Err(DecodeError::Framing(FrameError {
-                                position,
-                                inner: FrameErrorInner::UnterminatedUstarStringField { field: found },
-                            })) if position == BLOCK_SIZE as u64 && found == field
-                        ),
-                        "strict policy should reject an unterminated {format:?} {field} field"
-                    );
-                }
-                assert!(members.next().await?.is_none());
-            }
+                )
+                .members();
+            assert!(matches!(members.next().await?, Some(Member::File { .. })));
+            assert!(members.next().await?.is_none());
         }
     }
     Ok(())

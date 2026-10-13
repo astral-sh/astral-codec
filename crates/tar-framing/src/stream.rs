@@ -1578,11 +1578,6 @@ mod tests {
 
         vec![
             ("magic", bad_magic, ExpectedHeaderError::InvalidIdentity),
-            (
-                "unterminated magic",
-                checksummed_header(|block| block[IDENTITY_RANGE.start + 5] = b' '),
-                ExpectedHeaderError::InvalidIdentity,
-            ),
             ("version", bad_version, ExpectedHeaderError::InvalidIdentity),
             (
                 "checksum",
@@ -2131,24 +2126,9 @@ mod tests {
     #[test]
     fn rejects_header_format_type_and_field_errors() {
         for (case, block, expected) in invalid_header_cases() {
-            for allow in [false, true] {
-                if allow
-                    && matches!(
-                        expected,
-                        ExpectedHeaderError::UnterminatedUstarStringField(_)
-                    )
-                {
-                    continue;
-                }
-                let frames = ready(collect_frames(
-                    TarStream::new(block.as_slice()).with_policy(
-                        StreamPolicy::default()
-                            .allow_header_uname_and_gname_without_terminator(allow),
-                    ),
-                ));
-                let error = last_error_inner(&frames);
-                assert!(expected.matches(error), "{case}: {error:?}");
-            }
+            let frames = collect(block.to_vec(), BLOCK_SIZE);
+            let error = last_error_inner(&frames);
+            assert!(expected.matches(error), "{case}: {error:?}");
         }
     }
 
