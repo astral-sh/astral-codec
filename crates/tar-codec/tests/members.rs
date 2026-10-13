@@ -8,8 +8,9 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    FrameError, FrameErrorInner, GnuKind, PaxKeyword,
-    header::{GID_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE},
+    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
+    header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
+    logical::TarReader,
 };
 
 type TestResult = Result<(), Box<dyn Error>>;
@@ -147,6 +148,79 @@ async fn all_nul_numeric_fields_are_policy_controlled() -> TestResult {
                 "strict policy should reject an all-NUL {format:?} {field} field"
             );
         }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unterminated_owner_names_are_policy_controlled() -> TestResult {
+    for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
+        for (field, range) in [("uname", UNAME_RANGE), ("gname", GNAME_RANGE)] {
+            let mut block = header(format, "file", b'0', 0, "", 0o644);
+            let mut archive = ArchiveBuilder::new();
+            for length in [31, 32] {
+                block[range.start..range.start + length].fill(b'n');
+                set_checksum(&mut block);
+                archive.block(&block);
+            }
+            let bytes = archive.finish();
+
+            for (policy, allow) in [
+                (DecodePolicy::default(), false),
+                (
+                    DecodePolicy::default()
+                        .allow_header_uname_and_gname_without_terminator(true)
+                        .allow_header_uname_and_gname_without_terminator(false),
+                    false,
+                ),
+                (
+                    DecodePolicy::default().allow_header_uname_and_gname_without_terminator(true),
+                    true,
+                ),
+            ] {
+                let mut members = TarArchive::new(bytes.as_slice())
+                    .with_policy(policy)
+                    .members();
+                assert!(matches!(members.next().await?, Some(Member::File { .. })));
+                if allow {
+                    assert!(matches!(members.next().await?, Some(Member::File { .. })));
+                } else {
+                    assert!(
+                        matches!(
+                            members.next().await,
+                            Err(DecodeError::Framing(FrameError {
+                                position,
+                                inner: FrameErrorInner::UnterminatedUstarStringField { field: found },
+                            })) if position == BLOCK_SIZE as u64 && found == field
+                        ),
+                        "strict policy should reject an unterminated {format:?} {field} field"
+                    );
+                }
+                assert!(members.next().await?.is_none());
+            }
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unterminated_owner_names_preserve_all_bytes() -> TestResult {
+    for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
+        let mut block = header(format, "file", b'0', 0, "", 0o644);
+        block[UNAME_RANGE].fill(b'u');
+        block[GNAME_RANGE].fill(b'g');
+        set_checksum(&mut block);
+
+        let mut archive = ArchiveBuilder::new();
+        archive.block(&block);
+        let bytes = archive.finish();
+        let mut reader = TarReader::new(bytes.as_slice()).with_policy(
+            StreamPolicy::default().allow_header_uname_and_gname_without_terminator(true),
+        );
+        let member = reader.next_frame().await?.expect("expected file member");
+        assert_eq!(member.header.uname, &[b'u'; 32]);
+        assert_eq!(member.header.gname, &[b'g'; 32]);
+        assert!(reader.next_frame().await?.is_none());
     }
     Ok(())
 }
