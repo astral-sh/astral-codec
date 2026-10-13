@@ -7,6 +7,10 @@ dependencies = []
 [dependency-groups]
 dev = ["astral-dev-toolchain-cargo-codspeed>=5.0.1"]
 
+[tool.uv]
+require-build-hashes = true
+preview-features = ["build-dependency-hashes"]
+
 [[tool.uv.index]]
 url = "https://pypi.org/simple"
 default = true
