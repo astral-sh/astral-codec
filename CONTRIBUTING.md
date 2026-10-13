@@ -56,28 +56,12 @@ should be used primarily for small, pure private helpers.
 
 ## Releases
 
-1. Run the [Prepare release workflow](https://github.com/astral-sh/astral-codec/actions/workflows/release-prepare.yml)
-   from `main` with the exact Cargo version, without a leading `v`.
-2. Review and merge the generated version-bump pull request. It updates the shared
-   workspace version, internal dependency versions, and `Cargo.lock`.
-3. Run the [Release workflow](https://github.com/astral-sh/astral-codec/actions/workflows/release.yml)
+1. Run [Prepare release](https://github.com/astral-sh/astral-codec/actions/workflows/release-prepare.yml)
+   from `main` with the version to release, without a `v` prefix.
+2. Review and merge the version bump PR.
+3. Run [Release](https://github.com/astral-sh/astral-codec/actions/workflows/release.yml)
    from `main` with the same version.
-4. Approve the protected `release-gate` deployment after validation succeeds.
-
-The release workflow checks all workspace versions and performs a Cargo publish
-dry run before approval. It then publishes `archive-trait`, `tar-framing`, and
-`tar-codec` through crates.io Trusted Publishing using the `release` environment.
-`tarpit` remains unpublished.
-
-After all crates are published, the workflow creates the `v<version>` tag and
-GitHub release at the validated commit, marking prereleases accordingly.
-Review and curate the generated release notes as needed.
-
-Before the first release with this workflow, create the `release-gate` environment
-and move the existing required-reviewer rule from `release` to `release-gate`,
-preserving the reviewers and prevention of self-review. Restrict both environments
-to `main`. The `release` environment must remain configured for each crate's
-Trusted Publisher.
+4. Approve the `release-gate` deployment.
 
 ## Benchmarking
 
