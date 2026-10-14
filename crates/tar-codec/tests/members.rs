@@ -8,7 +8,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
+    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
@@ -369,6 +369,45 @@ async fn payload_errors_fuse_member_iteration() -> TestResult {
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_zero_length_gnu_extensions_at_their_header() -> TestResult {
+    for (typeflag, kind, other) in [
+        (b'L', GnuKind::LongName, b'K'),
+        (b'K', GnuKind::LongLink, b'L'),
+    ] {
+        for previous in [None, Some(other)] {
+            let mut archive = ArchiveBuilder::new();
+            let header_position = if let Some(previous) = previous {
+                archive.gnu("metadata", previous, b"value\0", "", 0o644);
+                2 * BLOCK_SIZE
+            } else {
+                0
+            };
+            archive
+                .gnu("metadata", typeflag, b"", "", 0o644)
+                .gnu("link", b'2', b"", "target", 0o644);
+            let bytes = archive.finish();
+            let mut unread = bytes.as_slice();
+            let mut members = TarArchive::new(&mut unread).members();
+
+            assert!(matches!(
+                members.next().await,
+                Err(DecodeError::Framing(FrameError {
+                    position,
+                    inner: FrameErrorInner::InvalidGnuMetadata { kind: found, .. },
+                })) if position == header_position as u64 && found == kind
+            ));
+            assert!(members.next().await?.is_none());
+            assert_eq!(
+                bytes.len() - unread.len(),
+                header_position + BLOCK_SIZE,
+                "reader must stop after the empty {kind:?} header at byte {header_position}",
+            );
+        }
+    }
     Ok(())
 }
 
