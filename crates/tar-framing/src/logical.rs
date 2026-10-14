@@ -347,20 +347,12 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
                     });
                 }
                 Frame::Gnu(frame) => {
-                    if frame.payload_size == 0 {
-                        let metadata = GnuMetadata {
-                            position: frame.position,
-                            payload: Vec::new(),
-                        };
-                        self.pending_extensions.set_gnu(frame.kind, metadata);
-                    } else {
-                        self.extension_payload = Some(ExtensionPayload::Gnu {
-                            position: frame.position,
-                            kind: frame.kind,
-                            remaining: frame.payload_size,
-                            payload: Vec::new(),
-                        });
-                    }
+                    self.extension_payload = Some(ExtensionPayload::Gnu {
+                        position: frame.position,
+                        kind: frame.kind,
+                        remaining: frame.payload_size,
+                        payload: Vec::new(),
+                    });
                 }
                 Frame::Header(header) => {
                     let pending_extensions = mem::take(&mut self.pending_extensions);
@@ -671,7 +663,7 @@ mod tests {
         PaxValue,
         header::{
             GID_RANGE, GNAME_RANGE, LINK_NAME_RANGE, MODE_RANGE, MTIME_RANGE, NAME_RANGE,
-            PREFIX_RANGE, TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE,
+            PREFIX_RANGE, UID_RANGE, UNAME_RANGE,
         },
         stream::DataOwner,
         test_support::{
@@ -1276,40 +1268,20 @@ mod tests {
         let mut bytes = Vec::new();
         append_gnu(&mut bytes, b'L', &long_name);
         let after_first_payload_block = BLOCK_SIZE * 2;
+        let after_extension = bytes.len();
         append_block(&mut bytes, &gnu_header(b'0', 0));
         append_terminator(&mut bytes);
 
-        let mut reader = TarReader::new(ChunkedReader::pending_once(
-            bytes,
-            after_first_payload_block,
-        ));
-        cancel_pending(reader.next_frame());
+        for position in [after_first_payload_block, after_extension] {
+            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position));
+            cancel_pending(reader.next_frame());
 
-        ready_ok(async {
-            let member = next_member(&mut reader).await?;
-            assert_eq!(member.effective_path()?.as_ref(), expected_name);
-            Ok(())
-        });
-
-        let mut bytes = Vec::new();
-        append_gnu(&mut bytes, b'L', &[]);
-        let after_extension_header = bytes.len();
-        append_block(&mut bytes, &gnu_header(b'0', 0));
-        append_terminator(&mut bytes);
-        let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, after_extension_header));
-        cancel_pending(reader.next_frame());
-
-        ready_ok(async {
-            let member = next_member(&mut reader).await?;
-            assert!(matches!(
-                &member.extensions,
-                MemberExtensions::Gnu {
-                    long_name: Some(GnuMetadata { payload, .. }),
-                    ..
-                } if payload.is_empty()
-            ));
-            Ok(())
-        });
+            ready_ok(async {
+                let member = next_member(&mut reader).await?;
+                assert_eq!(member.effective_path()?.as_ref(), expected_name);
+                Ok(())
+            });
+        }
     }
 
     #[test]
@@ -1671,15 +1643,11 @@ mod tests {
             Ok(())
         });
 
-        for header in [
-            header(b'x', record("path", "name").len() as u64),
-            gnu_header(b'L', 0),
-        ] {
-            let mut bytes = Vec::new();
-            append_block(&mut bytes, &header);
-            if header[TYPEFLAG_OFFSET] == b'x' {
-                append_payload(&mut bytes, &record("path", "name"));
-            }
+        let mut local_pax = Vec::new();
+        append_pax(&mut local_pax, b'x', &record("path", "name"));
+        let mut long_name = Vec::new();
+        append_gnu(&mut long_name, b'L', b"name\0");
+        for bytes in [local_pax, long_name] {
             let error: Result<(), FrameError> = ready(async {
                 let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
                 reader.next_frame().await.map(|_| ())

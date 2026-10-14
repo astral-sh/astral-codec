@@ -154,7 +154,8 @@ pub enum FrameErrorInner {
         /// The configured maximum payload size for the archive.
         limit: u64,
     },
-    /// A GNU long-name or long-link metadata payload is not a valid value.
+    /// A GNU long-name or long-link extension declares an empty payload or
+    /// contains an invalid value.
     #[error("malformed GNU {kind:?} metadata payload: {reason}")]
     InvalidGnuMetadata {
         /// The GNU metadata extension being decoded.

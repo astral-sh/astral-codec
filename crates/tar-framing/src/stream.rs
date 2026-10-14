@@ -3,7 +3,7 @@
 //! This API emits one frame for each accepted non-terminator physical
 //! tar block and preserves each source block verbatim.
 //!
-//! The following Mermaid diagram described the state machine:
+//! The following Mermaid diagram describes the state machine:
 //!
 //! ```mermaid
 //! ---
@@ -46,13 +46,11 @@
 //!     state "ReadingMember" as GnuMemberData
 //!
 //!     GnuBoundary --> GnuHeader: next header
-//!     GnuHeader --> ReadingGnu: L or K data
-//!     GnuHeader --> AwaitingGnuMember: empty L or K
+//!     GnuHeader --> ReadingGnu: nonempty L or K
 //!     GnuHeader --> GnuMemberData: member data
 //!     GnuHeader --> GnuBoundary: empty member
 //!     ReadingGnu --> AwaitingGnuMember: metadata payload complete
-//!     AwaitingGnuMember --> ReadingGnu: another L or K data
-//!     AwaitingGnuMember --> AwaitingGnuMember: another empty L or K
+//!     AwaitingGnuMember --> ReadingGnu: nonempty extension of the other kind
 //!     AwaitingGnuMember --> GnuMemberData: member data
 //!     AwaitingGnuMember --> GnuBoundary: empty member
 //!     GnuMemberData --> GnuBoundary: payload complete
@@ -60,14 +58,16 @@
 //!
 //! PosixBoundary --> AwaitingSecondZero: first zero block
 //! GnuBoundary --> AwaitingSecondZero: first zero block
+//! GnuHeader --> Failed: zero-length L or K
+//! AwaitingGnuMember --> Failed: zero-length or duplicate L or K
 //! AwaitingSecondZero --> Complete: second zero block
 //! AwaitingSecondZero --> Failed: nonzero block or EOF
 //! Complete --> [*]
 //! Failed --> [*]
 //!
 //! note right of Failed
-//!   Validation, ordering, and family-mismatch
-//!   errors also enter Failed; arrows omitted.
+//!   Other validation, ordering, and family-mismatch
+//!   errors also enter Failed. Those arrows are omitted.
 //! end note
 //! ```
 
@@ -130,7 +130,7 @@ pub struct GnuFrame {
     pub block: Block,
     /// The GNU extension kind.
     pub kind: GnuKind,
-    /// The number of metadata payload bytes following the header.
+    /// The number of metadata payload bytes following the header. Always greater than zero.
     pub payload_size: u64,
 }
 
@@ -502,7 +502,7 @@ impl StreamPolicy {
     /// Configures the maximum size accepted for each GNU extension.
     ///
     /// A GNU extension member that declares a larger payload is rejected before
-    /// its payload is consumed. Setting the maximum to zero rejects every nonempty
+    /// its payload is consumed. Setting the maximum to zero rejects every
     /// GNU extension member. Setting it to [`u64::MAX`] removes the per-extension bound.
     pub fn max_gnu_extension_size(mut self, max_gnu_extension_size: u64) -> Self {
         self.max_gnu_extension_size = max_gnu_extension_size;
@@ -1213,6 +1213,13 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             _ => None,
         };
         if let Some(kind) = extension {
+            if parsed.size == 0 {
+                return Err(FrameError::invalid_gnu_metadata(
+                    position,
+                    kind,
+                    "declared payload size is zero",
+                ));
+            }
             let already_seen = match kind {
                 GnuKind::LongName => &mut pending.long_name,
                 GnuKind::LongLink => &mut pending.long_link,
@@ -1235,14 +1242,10 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 ));
             }
             *already_seen = true;
-            self.state = if parsed.size == 0 {
-                State::AwaitingGnuMember { pending }
-            } else {
-                State::ReadingGnu {
-                    kind,
-                    remaining: parsed.size,
-                    pending,
-                }
+            self.state = State::ReadingGnu {
+                kind,
+                remaining: parsed.size,
+                pending,
             };
             return Ok(Frame::Gnu(GnuFrame {
                 position,
@@ -2337,13 +2340,13 @@ mod tests {
     #[test]
     fn rejects_invalid_gnu_sequences_and_sizes() {
         let mut duplicate = Vec::new();
-        append_block(&mut duplicate, &gnu_header(b'L', 0));
-        append_block(&mut duplicate, &gnu_header(b'L', 0));
+        append_gnu(&mut duplicate, b'L', b"name\0");
+        append_gnu(&mut duplicate, b'L', b"name\0");
         let mut long_link_for_regular = Vec::new();
-        append_block(&mut long_link_for_regular, &gnu_header(b'K', 0));
+        append_gnu(&mut long_link_for_regular, b'K', b"target\0");
         append_block(&mut long_link_for_regular, &gnu_header(b'0', 0));
         let mut dangling = Vec::new();
-        append_block(&mut dangling, &gnu_header(b'L', 0));
+        append_gnu(&mut dangling, b'L', b"name\0");
         append_terminator(&mut dangling);
         for (case, bytes) in [
             ("duplicate", duplicate),

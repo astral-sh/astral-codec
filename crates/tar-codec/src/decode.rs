@@ -191,8 +191,8 @@ impl DecodePolicy {
     /// The limit applies independently to long-name and long-link extensions.
     /// An extension that declares a larger payload is rejected before its
     /// payload is consumed. The default is [`DEFAULT_MAX_GNU_EXTENSION_SIZE`].
-    /// Setting the limit to zero rejects every nonempty GNU extension. Setting
-    /// it to [`u64::MAX`] permits unbounded metadata buffering.
+    /// Setting the limit to zero rejects every GNU extension. Setting it to
+    /// [`u64::MAX`] permits unbounded metadata buffering.
     pub fn max_gnu_extension_size(mut self, max_gnu_extension_size: u64) -> Self {
         self.max_gnu_extension_size = max_gnu_extension_size;
         self

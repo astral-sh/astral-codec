@@ -69,6 +69,8 @@
 //!
 //! - The GNU "longname" and "longlink" (`'L'` and `'K'`) typeflags are supported,
 //!   with similar path-precedence semantics as their pax record equivalents.
+//!   Both must declare a nonzero payload size. A zero-length extension is
+//!   rejected at its header, before the next block is read.
 //!
 //! - Other GNU-specific typeflags are **not** supported whatsoever, and produce
 //!   a framing error. This includes sparse files (`'S'`) and multivolume headers
