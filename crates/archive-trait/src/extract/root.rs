@@ -31,7 +31,9 @@ use {
     windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
 };
 
-use self::buffered::{BufferedFile, BufferedFileReplacement, write_buffered_files};
+use self::buffered::{
+    BufferedFile, BufferedFileReplacement, BufferedOperation, write_buffered_files,
+};
 use super::{
     LinkPolicy,
     path::{ExtractMember, NormalizedPath, resolve_link_target, validate_symlink_target},
@@ -74,7 +76,7 @@ const SYMLINK_RESOLUTION_LIMIT_EXCEEDED: &str =
 const BUFFERED_PAYLOAD_MAX_BYTES: usize = 1024 * 1024;
 
 // Bound read-ahead while amortizing blocking-pool handoffs across small files.
-const BUFFERED_FILE_BATCH_MAX_ENTRIES: usize = 64;
+const BUFFERED_BATCH_MAX_OPERATIONS: usize = 64;
 const BUFFERED_FILE_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 // Balance reusable-buffer initialization against blocking write cadence.
@@ -85,13 +87,20 @@ const STREAMING_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 enum ExtractedEntry {
     File,
     CreatedDirectory,
+    /// An implicit parent whose creation is queued ahead of its children.
+    PendingDirectory,
     AmbientDirectory,
-    Symlink { index: usize },
+    Symlink {
+        index: usize,
+    },
 }
 
 impl ExtractedEntry {
     fn is_directory(self) -> bool {
-        matches!(self, Self::CreatedDirectory | Self::AmbientDirectory)
+        matches!(
+            self,
+            Self::CreatedDirectory | Self::AmbientDirectory | Self::PendingDirectory
+        )
     }
 }
 
@@ -242,9 +251,9 @@ pub(super) struct ExtractionRoot<E> {
     entries: EntryTree,
     /// Append-only storage; duplicate paths invalidate earlier indices.
     symlinks: Vec<PendingSymlink>,
-    /// Fully validated files awaiting ordered creation in one blocking task.
-    buffered_files: Vec<BufferedFile>,
-    /// Total payload size retained by [`Self::buffered_files`].
+    /// Validated files and their parents awaiting ordered creation in one blocking task.
+    buffered_operations: Vec<BufferedOperation>,
+    /// Total payload size retained by [`Self::buffered_operations`].
     buffered_file_bytes: usize,
     /// Initialized payload allocations recycled after each completed batch.
     buffered_file_buffers: Vec<Vec<u8>>,
@@ -352,7 +361,7 @@ impl<E> ExtractionRoot<E> {
             allow_overwrites,
             entries: EntryTree::new(),
             symlinks: Vec::new(),
-            buffered_files: Vec::new(),
+            buffered_operations: Vec::new(),
             buffered_file_bytes: 0,
             buffered_file_buffers: Vec::new(),
             buffered_file_cancellation: Arc::new(AtomicBool::new(false)),
@@ -630,8 +639,7 @@ impl<E> ExtractionRoot<E> {
         let parent = if let Some(parent) = self.known_parent(path) {
             parent
         } else {
-            self.flush_buffered_files().await?;
-            self.ensure_parents(path).await?
+            self.queue_parents(path).await?
         };
         let entry = self.entries.ensure_child(parent, leaf_name(path));
         if matches!(
@@ -641,7 +649,7 @@ impl<E> ExtractionRoot<E> {
             self.flush_buffered_files().await?;
             self.replace_leaf(path, entry, parent).await?;
         }
-        if !self.buffered_files.is_empty()
+        if !self.buffered_operations.is_empty()
             && self.buffered_file_bytes.saturating_add(contents.len())
                 > BUFFERED_FILE_BATCH_MAX_BYTES
         {
@@ -654,19 +662,18 @@ impl<E> ExtractionRoot<E> {
         } else {
             BufferedFileReplacement::Allowed
         };
-        self.directory_handles.remove(entry);
-        let (directory, relative_path) = self.entry_capability(path, parent);
         self.buffered_file_bytes = self.buffered_file_bytes.saturating_add(contents.len());
-        self.buffered_files.push(BufferedFile {
-            directory,
-            relative_path,
-            error_path: path.to_path_buf(),
-            executable,
-            contents,
-            replacement,
-        });
+        self.buffered_operations
+            .push(BufferedOperation::File(BufferedFile {
+                entry,
+                parent,
+                path: path.to_path_buf(),
+                executable,
+                contents,
+                replacement,
+            }));
         self.entries.set_state(entry, ExtractedEntry::File);
-        if self.buffered_files.len() >= BUFFERED_FILE_BATCH_MAX_ENTRIES
+        if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS
             || self.buffered_file_bytes >= BUFFERED_FILE_BATCH_MAX_BYTES
         {
             self.flush_buffered_files().await?;
@@ -679,16 +686,25 @@ impl<E> ExtractionRoot<E> {
     }
 
     pub(super) async fn flush_buffered_files(&mut self) -> Result<(), ExtractError<E>> {
-        if self.buffered_files.is_empty() {
+        if self.buffered_operations.is_empty() {
             return Ok(());
         }
         self.buffered_file_bytes = 0;
-        let files = mem::take(&mut self.buffered_files);
+        let operations = mem::take(&mut self.buffered_operations);
+        let directory = Arc::clone(&self.directory);
+        let handles = mem::take(&mut self.directory_handles);
         let cancellation = Arc::clone(&self.buffered_file_cancellation);
-        let result =
-            tokio::task::spawn_blocking(move || write_buffered_files(files, &cancellation))
-                .await
-                .map_err(ExtractError::<E>::BlockingTask)?;
+        let result = tokio::task::spawn_blocking(move || {
+            write_buffered_files(directory, handles, operations, &cancellation)
+        })
+        .await
+        .map_err(ExtractError::<E>::BlockingTask)?;
+        self.directory_handles = result.handles;
+        for (entry, state) in result.directories {
+            if self.entries.state(entry) == Some(ExtractedEntry::PendingDirectory) {
+                self.entries.set_state(entry, state);
+            }
+        }
         for mut buffer in result.buffers {
             buffer.clear();
             self.buffered_file_buffers.push(buffer);
@@ -697,6 +713,40 @@ impl<E> ExtractionRoot<E> {
             return Err(error.into_extract(&path));
         }
         Ok(())
+    }
+
+    /// Queue only implicit parents; explicit directories and link operations
+    /// flush these commands before inspecting or replacing filesystem state.
+    async fn queue_parents(&mut self, path: &NormalizedPath) -> Result<EntryId, ExtractError<E>> {
+        let mut current = NormalizedPath::default();
+        let mut parent = ROOT_ENTRY;
+        for component in path.parent_components() {
+            current.push(component);
+            let entry = self.entries.ensure_child(parent, component);
+            match self.entries.state(entry) {
+                Some(state) if state.is_directory() => {}
+                Some(_) => {
+                    self.flush_buffered_files().await?;
+                    return Err(ExtractError::PathCollision {
+                        path: current.to_path_buf(),
+                    });
+                }
+                None => {
+                    self.buffered_operations.push(BufferedOperation::Directory {
+                        entry,
+                        parent,
+                        path: current.to_path_buf(),
+                    });
+                    self.entries
+                        .set_state(entry, ExtractedEntry::PendingDirectory);
+                    if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS {
+                        self.flush_buffered_files().await?;
+                    }
+                }
+            }
+            parent = entry;
+        }
+        Ok(parent)
     }
 
     fn known_parent(&self, path: &NormalizedPath) -> Option<EntryId> {
@@ -915,9 +965,8 @@ impl<E> ExtractionRoot<E> {
                     }
                     Some(ExtractedEntry::File) => ResolvedTarget::Known(TerminalKind::NonDirectory),
                     Some(ExtractedEntry::Symlink { .. }) => continue,
-                    Some(ExtractedEntry::AmbientDirectory) | None => {
-                        ResolvedTarget::Unowned(path.into_owned())
-                    }
+                    Some(ExtractedEntry::AmbientDirectory | ExtractedEntry::PendingDirectory)
+                    | None => ResolvedTarget::Unowned(path.into_owned()),
                 });
             }
         }
@@ -1111,16 +1160,30 @@ impl<E> ExtractionRoot<E> {
     }
 
     fn entry_capability(&self, path: &NormalizedPath, parent: EntryId) -> (Arc<Dir>, PathBuf) {
-        if let Some(file_name) = path.file_name() {
-            if parent == ROOT_ENTRY {
-                return (Arc::clone(&self.directory), file_name.into());
-            }
-            if let Some(directory) = self.directory_handles.get(parent) {
-                return (Arc::clone(directory), file_name.into());
-            }
-        }
-        (Arc::clone(&self.directory), path.to_path_buf())
+        entry_capability(
+            &self.directory,
+            &self.directory_handles,
+            path.as_path(),
+            parent,
+        )
     }
+}
+
+fn entry_capability(
+    directory: &Arc<Dir>,
+    handles: &DirectoryHandles,
+    path: &Path,
+    parent: EntryId,
+) -> (Arc<Dir>, PathBuf) {
+    if let Some(file_name) = path.file_name() {
+        if parent == ROOT_ENTRY {
+            return (Arc::clone(directory), file_name.into());
+        }
+        if let Some(directory) = handles.get(parent) {
+            return (Arc::clone(directory), file_name.into());
+        }
+    }
+    (Arc::clone(directory), path.to_path_buf())
 }
 
 fn check_symlink_resolution_limit(

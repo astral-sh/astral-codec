@@ -1,4 +1,4 @@
-//! Single-task creation and replacement of validated small files.
+//! Single-task creation of parent directories and validated small files.
 
 use std::{
     io::{self, Write as _},
@@ -11,7 +11,10 @@ use std::{
 
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
-use super::{FileOpenMode, directory_is_empty, metadata_is_link, remove_file_or_symlink};
+use super::{
+    DirectoryHandles, EntryId, ExtractedEntry, FileOpenMode, directory_is_empty, entry_capability,
+    metadata_is_link, remove_file_or_symlink,
+};
 use crate::ExtractError;
 
 /// Whether a buffered file may replace an existing destination leaf.
@@ -25,8 +28,8 @@ pub(super) enum BufferedFileReplacement {
     ExpectedFile,
 }
 
-/// A failure while creating or replacing a validated buffered file.
-pub(super) enum BufferedFileError {
+/// A failure while creating a parent or writing a validated buffered file.
+pub(super) enum BufferedError {
     Collision,
     Filesystem {
         operation: &'static str,
@@ -36,21 +39,33 @@ pub(super) enum BufferedFileError {
 
 /// One fully validated small file prepared for ordered batch creation.
 pub(super) struct BufferedFile {
-    pub(super) directory: Arc<Dir>,
-    pub(super) relative_path: PathBuf,
-    pub(super) error_path: PathBuf,
+    pub(super) entry: EntryId,
+    pub(super) parent: EntryId,
+    pub(super) path: PathBuf,
     pub(super) executable: bool,
     pub(super) contents: Vec<u8>,
     pub(super) replacement: BufferedFileReplacement,
 }
 
-/// The reusable buffers and first error produced by an ordered file batch.
-pub(super) struct BufferedFileBatchResult {
-    pub(super) buffers: Vec<Vec<u8>>,
-    pub(super) error: Option<(PathBuf, BufferedFileError)>,
+/// Parent creation and payload writes execute in archive order.
+pub(super) enum BufferedOperation {
+    Directory {
+        entry: EntryId,
+        parent: EntryId,
+        path: PathBuf,
+    },
+    File(BufferedFile),
 }
 
-impl BufferedFileError {
+/// The reusable buffers and first error produced by an ordered file batch.
+pub(super) struct BufferedBatchResult {
+    pub(super) handles: DirectoryHandles,
+    pub(super) directories: Vec<(EntryId, ExtractedEntry)>,
+    pub(super) buffers: Vec<Vec<u8>>,
+    pub(super) error: Option<(PathBuf, BufferedError)>,
+}
+
+impl BufferedError {
     fn filesystem(operation: &'static str, source: io::Error) -> Self {
         Self::Filesystem { operation, source }
     }
@@ -69,27 +84,83 @@ impl BufferedFileError {
 
 /// Creates buffered files in archive order and stops after cancellation or the first failure.
 pub(super) fn write_buffered_files(
-    files: Vec<BufferedFile>,
+    root: Arc<Dir>,
+    mut handles: DirectoryHandles,
+    operations: Vec<BufferedOperation>,
     cancellation: &AtomicBool,
-) -> BufferedFileBatchResult {
-    let mut buffers = Vec::with_capacity(files.len());
+) -> BufferedBatchResult {
+    let mut buffers = Vec::new();
+    let mut directories = Vec::new();
     let mut error = None;
-    for file in files {
-        if error.is_none()
-            && !cancellation.load(Ordering::Acquire)
-            && let Err(source) = write_buffered_file(
-                &file.directory,
-                &file.relative_path,
-                file.executable,
-                &file.contents,
-                file.replacement,
-            )
-        {
-            error = Some((file.error_path, source));
+    for operation in operations {
+        let execute = error.is_none() && !cancellation.load(Ordering::Acquire);
+        match operation {
+            BufferedOperation::Directory {
+                entry,
+                parent,
+                path,
+            } => {
+                if execute {
+                    let (directory, relative_path) =
+                        entry_capability(&root, &handles, &path, parent);
+                    match create_parent(&directory, &relative_path) {
+                        Ok((opened, state)) => {
+                            handles.insert(entry, parent, Arc::new(opened));
+                            directories.push((entry, state));
+                        }
+                        Err(source) => error = Some((path, source)),
+                    }
+                }
+            }
+            BufferedOperation::File(file) => {
+                if execute {
+                    handles.remove(file.entry);
+                    let (directory, relative_path) =
+                        entry_capability(&root, &handles, &file.path, file.parent);
+                    if let Err(source) = write_buffered_file(
+                        &directory,
+                        &relative_path,
+                        file.executable,
+                        &file.contents,
+                        file.replacement,
+                    ) {
+                        error = Some((file.path, source));
+                    }
+                }
+                buffers.push(file.contents);
+            }
         }
-        buffers.push(file.contents);
     }
-    BufferedFileBatchResult { buffers, error }
+    BufferedBatchResult {
+        handles,
+        directories,
+        buffers,
+        error,
+    }
+}
+
+/// Match implicit-parent creation: accept real ambient directories, and never
+/// follow or replace a symbolic link or another non-directory ancestor.
+fn create_parent(directory: &Dir, path: &Path) -> Result<(Dir, ExtractedEntry), BufferedError> {
+    let create_error = match directory
+        .create_dir(path)
+        .and_then(|()| directory.open_dir(path))
+    {
+        Ok(opened) => return Ok((opened, ExtractedEntry::CreatedDirectory)),
+        Err(error) => error,
+    };
+    match directory.symlink_metadata(path) {
+        Ok(metadata) if metadata.is_dir() && !metadata_is_link(&metadata) => {}
+        Ok(_) => return Err(BufferedError::Collision),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+            return Err(BufferedError::filesystem("create directory", create_error));
+        }
+        Err(error) => return Err(BufferedError::filesystem("inspect", error)),
+    }
+    directory
+        .open_dir(path)
+        .map(|opened| (opened, ExtractedEntry::AmbientDirectory))
+        .map_err(|source| BufferedError::filesystem("open directory", source))
 }
 
 /// Creates or safely replaces and writes one fully validated small file.
@@ -99,12 +170,12 @@ pub(super) fn write_buffered_file(
     executable: bool,
     contents: &[u8],
     replacement: BufferedFileReplacement,
-) -> Result<(), BufferedFileError> {
+) -> Result<(), BufferedError> {
     // Unique destination access makes this the common duplicate-member path.
     // If the leaf changed unexpectedly, fall through to no-follow inspection.
     if replacement == BufferedFileReplacement::ExpectedFile && directory.remove_file(path).is_ok() {
         let file = open_new_file(directory, path, executable)
-            .map_err(|source| BufferedFileError::filesystem("create file", source))?;
+            .map_err(|source| BufferedError::filesystem("create file", source))?;
         return write_buffered_contents(file, contents);
     }
 
@@ -115,22 +186,22 @@ pub(super) fn write_buffered_file(
     let metadata = match directory.symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(BufferedFileError::filesystem("create file", create_error));
+            return Err(BufferedError::filesystem("create file", create_error));
         }
-        Err(error) => return Err(BufferedFileError::filesystem("inspect", error)),
+        Err(error) => return Err(BufferedError::filesystem("inspect", error)),
     };
     if replacement == BufferedFileReplacement::Disallowed {
-        return Err(BufferedFileError::Collision);
+        return Err(BufferedError::Collision);
     }
     remove_buffered_leaf(directory, path, &metadata)?;
     let file = open_new_file(directory, path, executable)
-        .map_err(|source| BufferedFileError::filesystem("create file", source))?;
+        .map_err(|source| BufferedError::filesystem("create file", source))?;
     write_buffered_contents(file, contents)
 }
 
-fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), BufferedFileError> {
+fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), BufferedError> {
     file.write_all(contents)
-        .map_err(|source| BufferedFileError::filesystem("write file", source))
+        .map_err(|source| BufferedError::filesystem("write file", source))
 }
 
 fn open_new_file(directory: &Dir, path: &Path, executable: bool) -> io::Result<CapFile> {
@@ -142,18 +213,18 @@ fn remove_buffered_leaf(
     directory: &Dir,
     path: &Path,
     metadata: &Metadata,
-) -> Result<(), BufferedFileError> {
+) -> Result<(), BufferedError> {
     if metadata.is_dir() && !metadata_is_link(metadata) {
         let is_empty = directory_is_empty(directory, path)
-            .map_err(|source| BufferedFileError::filesystem("inspect directory", source))?;
+            .map_err(|source| BufferedError::filesystem("inspect directory", source))?;
         if !is_empty {
-            return Err(BufferedFileError::Collision);
+            return Err(BufferedError::Collision);
         }
         return directory
             .remove_dir(path)
-            .map_err(|source| BufferedFileError::filesystem("remove directory", source));
+            .map_err(|source| BufferedError::filesystem("remove directory", source));
     }
 
     remove_file_or_symlink(directory, path, metadata_is_link(metadata))
-        .map_err(|source| BufferedFileError::filesystem("remove file", source))
+        .map_err(|source| BufferedError::filesystem("remove file", source))
 }

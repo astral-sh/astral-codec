@@ -365,6 +365,31 @@ async fn rejects_invalid_destinations_unsafe_special_and_colliding_members() {
             .await,
         Err(ExtractError::PathCollision { path }) if path == Path::new("file")
     ));
+
+    // A parent-directory failure in a batch must preserve earlier files and
+    // prevent every later write, including files outside the blocked parent.
+    let destination = temp.path().join("parent-collision");
+    std::fs::create_dir(&destination).expect("destination should be created");
+    std::fs::write(destination.join("blocked"), b"ambient").expect("parent file should be written");
+    let result = TestArchive::new([
+        entry::file("before", b"kept"),
+        entry::file("blocked/child", b"invalid"),
+        entry::file("after", b"not written"),
+    ])
+    .extract_in(&destination, ExtractPolicy::default())
+    .await;
+    assert!(
+        matches!(result, Err(ExtractError::PathCollision { path }) if path == Path::new("blocked"))
+    );
+    assert_eq!(
+        std::fs::read(destination.join("before")).expect("prior file should remain"),
+        b"kept"
+    );
+    assert_eq!(
+        std::fs::read(destination.join("blocked")).expect("parent file should remain"),
+        b"ambient"
+    );
+    assert!(!destination.join("after").exists());
 }
 
 #[tokio::test]
