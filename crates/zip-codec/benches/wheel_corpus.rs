@@ -42,7 +42,11 @@ fn read_index(
                 // zip exposes sizes and CRCs through ZipFile, not its directory
                 // metadata. The raw reader avoids constructing decompressors.
                 let entry = archive.by_index_raw(index).expect("zip wheel entry");
-                consume(entry.name(), entry.size(), entry.crc32());
+                consume(
+                    &entry.name().expect("zip wheel path"),
+                    entry.size(),
+                    entry.crc32(),
+                );
             }
         }
         Implementation::AsyncZip => runtime.block_on(async {
@@ -105,13 +109,13 @@ fn read(
             for index in 0..archive.len() {
                 let mut entry = archive.by_index(index).expect("zip wheel entry");
                 if entry.is_dir() {
-                    consume(entry.name(), None);
+                    consume(&entry.name().expect("zip wheel path"), None);
                 } else {
                     data.clear();
                     entry
                         .read_to_end(&mut data)
                         .expect("zip wheel CRC and payload");
-                    consume(entry.name(), Some(&data));
+                    consume(&entry.name().expect("zip wheel path"), Some(&data));
                 }
             }
         }
