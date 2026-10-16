@@ -1,3 +1,5 @@
+#[cfg(target_arch = "aarch64")]
+use std::arch::is_aarch64_feature_detected;
 use std::io;
 
 use flate2::{Crc, Decompress, FlushDecompress, Status};
@@ -252,7 +254,7 @@ impl Integrity {
             .decoded_remaining
             .checked_sub(bytes.len() as u64)
             .ok_or_else(|| self.invalid("decoded payload exceeds declared size"))?;
-        self.crc.update(bytes);
+        update_crc(&mut self.crc, bytes);
 
         Ok(())
     }
@@ -275,6 +277,72 @@ impl Integrity {
         DecodeError::Integrity {
             position: self.position,
             reason,
+        }
+    }
+}
+
+fn update_crc(crc: &mut Crc, bytes: &[u8]) {
+    #[cfg(target_arch = "aarch64")]
+    if (4096..19200).contains(&bytes.len()) && is_aarch64_feature_detected!("crc") {
+        // The backend interleaves hardware CRC chains only above 19,200 bytes.
+        // Alternate two independent chains for medium buffers, leaving small
+        // inputs and the backend's large-buffer path alone. Process the first
+        // segment's remainder before combining the checksums in byte order.
+        let length = bytes.len() / 512 * 256;
+        let (first, second) = bytes.split_at(bytes.len() - length);
+        let mut additional = Crc::new();
+        for (first, second) in first[..length]
+            .as_chunks::<256>()
+            .0
+            .iter()
+            .zip(second.as_chunks::<256>().0)
+        {
+            crc.update(first);
+            additional.update(second);
+        }
+        crc.update(&first[length..]);
+        crc.combine(&additional);
+        return;
+    }
+    crc.update(bytes);
+}
+
+#[cfg(test)]
+mod tests {
+    use flate2::Crc;
+
+    use super::{CHUNK_SIZE, update_crc};
+
+    #[test]
+    fn checksum_updates_match_contiguous_bytes() {
+        let mut state = 0x1234_5678u32;
+        let bytes: Vec<_> = (0..CHUNK_SIZE + 8)
+            .map(|_| {
+                state ^= state << 13;
+                state ^= state >> 17;
+                state ^= state << 5;
+                state as u8
+            })
+            .collect();
+
+        // Cover both fast-path thresholds, partial interleaved blocks, source
+        // alignment, and updates before and after an interleaved checksum.
+        for length in [
+            0, 1, 63, 64, 255, 256, 511, 512, 4095, 4096, 4097, 4351, 4352, 4353, 8191, 8192, 8193,
+            19199, 19200, 19201, CHUNK_SIZE,
+        ] {
+            for alignment in 0..8 {
+                for prefix in [&b""[..], &bytes[..37]] {
+                    let mut actual = Crc::new();
+                    let mut expected = crc32fast::Hasher::new();
+                    for part in [prefix, &bytes[alignment..alignment + length], &bytes[..73]] {
+                        update_crc(&mut actual, part);
+                        expected.update(part);
+                        assert_eq!(actual.sum(), expected.clone().finalize());
+                    }
+                    assert_eq!(actual.amount() as usize, prefix.len() + length + 73);
+                }
+            }
         }
     }
 }
