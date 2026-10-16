@@ -1,5 +1,7 @@
 #[cfg(target_arch = "aarch64")]
 use std::arch::is_aarch64_feature_detected;
+#[cfg(target_arch = "x86_64")]
+use std::arch::is_x86_feature_detected;
 use std::io;
 
 use flate2::{Crc, Decompress, FlushDecompress, Status};
@@ -282,9 +284,9 @@ impl Integrity {
 }
 
 fn update_crc(crc: &mut Crc, bytes: &[u8]) {
-    #[cfg(target_arch = "aarch64")]
-    if (4096..19200).contains(&bytes.len()) && is_aarch64_feature_detected!("crc") {
-        // The backend interleaves hardware CRC chains only above 19,200 bytes.
+    #[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+    if (4096..19200).contains(&bytes.len()) && supports_crc_interleaving() {
+        // The ARM backend interleaves hardware CRC chains only above 19,200 bytes.
         // Alternate two independent chains for medium buffers, leaving small
         // inputs and the backend's large-buffer path alone. Process the first
         // segment's remainder before combining the checksums in byte order.
@@ -305,6 +307,18 @@ fn update_crc(crc: &mut Crc, bytes: &[u8]) {
         return;
     }
     crc.update(bytes);
+}
+
+#[cfg(any(target_arch = "aarch64", target_arch = "x86_64"))]
+fn supports_crc_interleaving() -> bool {
+    #[cfg(target_arch = "aarch64")]
+    {
+        is_aarch64_feature_detected!("crc")
+    }
+    #[cfg(target_arch = "x86_64")]
+    {
+        is_x86_feature_detected!("pclmulqdq") && is_x86_feature_detected!("sse4.1")
+    }
 }
 
 #[cfg(test)]

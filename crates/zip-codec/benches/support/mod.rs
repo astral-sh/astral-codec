@@ -82,6 +82,7 @@ pub(super) fn cases() -> impl Iterator<Item = Case> {
                     Content::Repeating,
                 ),
                 ("small", 1, &[128][..], Content::Repeating),
+                ("medium-crc", 128, &[4096, 8192, 16384][..], Content::Random),
                 (
                     "mixed-package",
                     64,
