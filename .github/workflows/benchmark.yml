@@ -29,10 +29,10 @@ jobs:
     permissions:
       contents: read
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/zip-crc-target
-      WHEEL_CORPUS_DIR: ${{ runner.temp }}/wheel-corpus
+      CARGO_TARGET_DIR: ${{ github.workspace }}/target/zip-crc-target
+      WHEEL_CORPUS_DIR: ${{ github.workspace }}/target/wheel-corpus
       BENCHMARK_TRIAL: ${{ matrix.trial }}
-      BENCHMARK_BINARIES: ${{ runner.temp }}/zip-crc-binaries
+      BENCHMARK_BINARIES: ${{ github.workspace }}/target/zip-crc-binaries
       BENCHMARK_RESULTS: ${{ github.workspace }}/target/zip-crc-results
     steps:
       - name: Check out candidate
