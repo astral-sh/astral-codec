@@ -1492,8 +1492,9 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let mut shared = bytes.clone();
     set32(&mut shared, central + 42, 0);
 
+    // Repeated offsets must fail during indexing, before any local resolution.
     assert!(
-        read_validated(&mut Cursor::new(shared), Limits::default())
+        Index::read(&mut Cursor::new(shared), Limits::default())
             .await
             .is_err()
     );
