@@ -1,4 +1,4 @@
-use std::str;
+use std::{cell::RefCell, mem, str};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -16,6 +16,45 @@ mod entry;
 use entry::ResolvedMember;
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
+thread_local! {
+    static DIRECTORY_WINDOW: RefCell<Vec<u8>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Owns its window across awaits, returning a bounded allocation for later opens.
+struct DirectoryWindow(Vec<u8>);
+
+impl DirectoryWindow {
+    fn take() -> Self {
+        Self(
+            DIRECTORY_WINDOW
+                .try_with(|window| {
+                    window
+                        .try_borrow_mut()
+                        .map(|mut window| mem::take(&mut *window))
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default(),
+        )
+    }
+}
+
+impl Drop for DirectoryWindow {
+    fn drop(&mut self) {
+        // Variable records can require a larger window; retain only the usual
+        // bounded end-record scan allocation, at most one per thread.
+        if self.0.capacity() <= size::END + usize::from(u16::MAX) {
+            self.0.clear();
+            let _ = DIRECTORY_WINDOW.try_with(|window| {
+                if let Ok(mut window) = window.try_borrow_mut()
+                    && window.capacity() < self.0.capacity()
+                {
+                    *window = mem::take(&mut self.0);
+                }
+            });
+        }
+    }
+}
+
 /// A ZIP member index.
 ///
 /// This is constructed from the central directory, with referenced
@@ -25,7 +64,7 @@ pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 pub struct Index {
     /// The indexed members, in central directory order.
     entries: Vec<IndexedEntry>,
-    /// Cached resolutions, with the same length and order as [`Self::entries`].
+    /// Cached resolutions in directory order, allocated on first access.
     resolved: Vec<Option<ResolvedMember>>,
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
@@ -61,40 +100,39 @@ impl Index {
         limits: Limits,
     ) -> Result<Self, Error> {
         let mut budget = Budget::new(limits);
-        let mut buffer = Vec::new();
-        let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer);
+        let mut buffer = DirectoryWindow::take();
+        let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
-        let entries = end.read_entries(&mut buffered, &mut budget).await?;
+        let mut entries = end.read_entries(&mut buffered, &mut budget).await?;
 
-        let entries = if entries.is_sorted_by_key(CentralDirectoryEntry::position) {
+        if entries.is_sorted_by_key(|entry| entry.directory().position()) {
             if entries
                 .first()
-                .map_or(end.offset, CentralDirectoryEntry::position)
+                .map_or(end.offset, |entry| entry.directory().position())
                 != 0
             {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            // Most directories follow physical order. Derive their boundaries
-            // directly, without allocating a permutation and a boundary table.
-            let mut directory = entries.into_iter().peekable();
-            let mut entries = Vec::with_capacity(directory.len());
+            // Most directories follow physical order. Assign their boundaries
+            // in place, without a second allocation for the indexed entries.
+            let mut directory = entries.iter_mut().peekable();
             while let Some(entry) = directory.next() {
-                let boundary = directory
-                    .peek()
-                    .map_or(end.offset, CentralDirectoryEntry::position);
-                entries.push(IndexedEntry::new(entry, boundary)?);
+                entry.set_boundary(
+                    directory
+                        .peek()
+                        .map_or(end.offset, |next| next.directory().position()),
+                )?;
             }
-            entries
         } else {
             // APPNOTE 4.4.1.3 permits central entries out of physical order.
             // Preserve directory order while assigning boundaries in physical order.
             // Only local reads can establish exact coverage inside these spans.
             let mut order: Vec<_> = (0..entries.len()).collect();
-            order.sort_unstable_by_key(|&index| entries[index].position());
+            order.sort_unstable_by_key(|&index| entries[index].directory().position());
             if order
                 .first()
-                .map_or(end.offset, |&index| entries[index].position())
+                .map_or(end.offset, |&index| entries[index].directory().position())
                 != 0
             {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
@@ -104,17 +142,15 @@ impl Index {
             for (ordinal, &index) in order.iter().enumerate() {
                 boundaries[index] = order
                     .get(ordinal + 1)
-                    .map_or(end.offset, |&next| entries[next].position());
+                    .map_or(end.offset, |&next| entries[next].directory().position());
             }
-            entries
-                .into_iter()
-                .zip(boundaries)
-                .map(|(directory, boundary)| IndexedEntry::new(directory, boundary))
-                .collect::<Result<Vec<_>, _>>()?
-        };
+            for (entry, boundary) in entries.iter_mut().zip(boundaries) {
+                entry.set_boundary(boundary)?;
+            }
+        }
 
         Ok(Self {
-            resolved: (0..entries.len()).map(|_| None).collect(),
+            resolved: Vec::new(),
             entries,
             budget,
             buffer: Vec::new(),
@@ -133,6 +169,10 @@ impl Index {
         let Some(indexed) = self.entries.get(index) else {
             return Ok(None);
         };
+
+        if self.resolved.is_empty() {
+            self.resolved.resize_with(self.entries.len(), || None);
+        }
 
         let resolved = match &mut self.resolved[index] {
             Some(resolved) => resolved,
@@ -335,7 +375,7 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-    ) -> Result<Vec<CentralDirectoryEntry>, Error> {
+    ) -> Result<Vec<IndexedEntry>, Error> {
         let mut pending_budget = *budget;
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
@@ -363,7 +403,7 @@ impl CentralDirectory {
         for _ in 0..self.count {
             let (entry, next) =
                 CentralDirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
-            entries.push(entry);
+            entries.push(IndexedEntry::new(entry, self.offset)?);
             position = next;
 
             tokio::task::consume_budget().await;
