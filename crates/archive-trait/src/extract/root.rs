@@ -215,13 +215,44 @@ impl FileOpenMode {
     }
 }
 
+/// Keep frequently used parents when opening their children, without retaining
+/// a descriptor for every archive directory.
+#[derive(Default)]
+struct DirectoryHandles(Vec<(EntryId, Arc<Dir>)>);
+
+impl DirectoryHandles {
+    fn get(&self, entry: EntryId) -> Option<&Arc<Dir>> {
+        self.0
+            .iter()
+            .rev()
+            .find_map(|(cached, directory)| (*cached == entry).then_some(directory))
+    }
+
+    fn remove(&mut self, entry: EntryId) {
+        self.0.retain(|(cached, _)| *cached != entry);
+    }
+
+    fn insert(&mut self, entry: EntryId, parent: EntryId, directory: Arc<Dir>) {
+        const CAPACITY: usize = 8;
+        self.remove(entry);
+        // A parent used to create siblings should outlive their leaf handles.
+        if let Some(position) = self.0.iter().position(|(cached, _)| *cached == parent) {
+            let parent = self.0.remove(position);
+            self.0.push(parent);
+        }
+        if self.0.len() == CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push((entry, directory));
+    }
+}
+
 /// Tracks destination capabilities and archive-owned state for one extraction.
 pub(super) struct ExtractionRoot<E> {
     /// The capability anchoring all extraction filesystem operations.
     directory: Arc<Dir>,
-    /// The most recently opened directory capability, used to keep nearby leaf
-    /// operations cheap without retaining one descriptor per directory.
-    directory_handle: Option<(EntryId, Arc<Dir>)>,
+    /// A bounded cache of recently opened directory capabilities.
+    directory_handles: DirectoryHandles,
     /// Whether overwrites are allowed during extraction.
     allow_overwrites: bool,
     /// The latest state recorded for every path encountered by the extraction.
@@ -341,7 +372,7 @@ impl<E> ExtractionRoot<E> {
 
         Ok(Self {
             directory,
-            directory_handle: None,
+            directory_handles: DirectoryHandles::default(),
             allow_overwrites,
             entries: EntryTree::new(),
             symlinks: Vec::new(),
@@ -589,7 +620,8 @@ impl<E> ExtractionRoot<E> {
                         Ok(directory)
                     })
                     .await?;
-                self.directory_handle = Some((parent, Arc::new(directory)));
+                self.directory_handles
+                    .insert(parent, ROOT_ENTRY, Arc::new(directory));
             }
             match self
                 .try_create_symlink(&path, parent, contents.clone())
@@ -682,13 +714,7 @@ impl<E> ExtractionRoot<E> {
         } else {
             BufferedFileReplacement::Allowed
         };
-        if self
-            .directory_handle
-            .as_ref()
-            .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-        {
-            self.directory_handle = None;
-        }
+        self.directory_handles.remove(entry);
         let (directory, relative_path) = self.entry_capability(path, parent);
         self.buffered_file_bytes = self.buffered_file_bytes.saturating_add(contents.len());
         self.buffered_files.push(BufferedFile {
@@ -819,7 +845,7 @@ impl<E> ExtractionRoot<E> {
             |source| ExtractError::filesystem("create directory", path.to_path_buf(), source);
         let collision = match self.try_create_directory(path, parent).await? {
             Ok(directory) => {
-                self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+                self.record_directory(entry, parent, directory, ExtractedEntry::CreatedDirectory);
                 return Ok(());
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => source,
@@ -835,7 +861,7 @@ impl<E> ExtractionRoot<E> {
                     directory.open_dir(path)
                 })
                 .await?;
-            self.record_directory(entry, directory, ExtractedEntry::AmbientDirectory);
+            self.record_directory(entry, parent, directory, ExtractedEntry::AmbientDirectory);
             return Ok(());
         }
 
@@ -849,12 +875,19 @@ impl<E> ExtractionRoot<E> {
             .try_create_directory(path, parent)
             .await?
             .map_err(create_error)?;
-        self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+        self.record_directory(entry, parent, directory, ExtractedEntry::CreatedDirectory);
         Ok(())
     }
 
-    fn record_directory(&mut self, entry: EntryId, directory: Dir, state: ExtractedEntry) {
-        self.directory_handle = Some((entry, Arc::new(directory)));
+    fn record_directory(
+        &mut self,
+        entry: EntryId,
+        parent: EntryId,
+        directory: Dir,
+        state: ExtractedEntry,
+    ) {
+        self.directory_handles
+            .insert(entry, parent, Arc::new(directory));
         self.entries.set_state(entry, state);
     }
 
@@ -1013,13 +1046,7 @@ impl<E> ExtractionRoot<E> {
     ) -> Result<(), ExtractError<E>> {
         if metadata.is_dir() && !metadata_is_link(metadata) {
             // Windows directory handles do not share delete access.
-            if self
-                .directory_handle
-                .as_ref()
-                .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-            {
-                self.directory_handle = None;
-            }
+            self.directory_handles.remove(entry);
             let (directory, relative_path) = self.entry_capability(path, parent);
             run_blocking_io(directory, relative_path, |directory, path| {
                 directory.remove_dir(path)
@@ -1131,9 +1158,7 @@ impl<E> ExtractionRoot<E> {
             if parent == ROOT_ENTRY {
                 return (Arc::clone(&self.directory), file_name.into());
             }
-            if let Some((cached_entry, directory)) = &self.directory_handle
-                && *cached_entry == parent
-            {
+            if let Some(directory) = self.directory_handles.get(parent) {
                 return (Arc::clone(directory), file_name.into());
             }
         }
