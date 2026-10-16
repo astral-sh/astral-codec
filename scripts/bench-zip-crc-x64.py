@@ -45,9 +45,16 @@ def build(variant, directory):
         "wheel_corpus", "--no-run", "--locked", "--message-format=json-render-diagnostics",
     ]
     path = RESULTS / f"build-{variant}.log"
+    environment = dict(os.environ)
+    # Identically named path packages from separate checkouts can otherwise
+    # reuse an executable whose source timestamps happen to be newer.
+    environment["CARGO_TARGET_DIR"] = str(
+        Path(os.environ.get("CARGO_TARGET_DIR", ROOT / "target/zip-crc-target")) / variant
+    )
     print(f"Building {variant}", flush=True)
     with path.open("w") as log:
-        subprocess.run(command, cwd=directory, stdout=log, stderr=subprocess.STDOUT,
+        subprocess.run(command, cwd=directory, env=environment,
+                       stdout=log, stderr=subprocess.STDOUT,
                        check=True, timeout=900)
     executables = {}
     for line in path.read_text().splitlines():
@@ -126,6 +133,9 @@ def main():
         for variant, binaries in executables.items()
     }
     (RESULTS / "metadata.json").write_text(json.dumps(metadata, indent=2) + "\n")
+    for name in ("codec", "wheel_corpus"):
+        if metadata["binaries"]["baseline"][name] == metadata["binaries"]["candidate"][name]:
+            raise RuntimeError(f"The {name} variants are identical; refusing to measure")
     print(json.dumps(metadata, indent=2), flush=True)
 
     for case in CASES:
