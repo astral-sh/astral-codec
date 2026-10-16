@@ -92,7 +92,7 @@ impl Fixture {
                 // pinned, pre-checked paths; it is not a general-purpose extractor.
                 assert!(entry.enclosed_name().is_some(), "invalid corpus path");
                 Entry {
-                    path: entry.name().to_owned(),
+                    path: entry.name().expect("zip wheel path").into_owned(),
                     directory: entry.is_dir(),
                     size: entry.size(),
                     crc: entry.crc32(),
