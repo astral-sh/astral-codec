@@ -182,7 +182,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         };
         let size = directory.size();
 
-        self.active = Some(Payload::new(&entry)?);
+        self.active = Some(Payload::new(&entry, self.active.take())?);
         self.reader
             .seek(SeekFrom::Start(entry.data_offset()))
             .await?;
@@ -275,8 +275,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         let mut buffer = Vec::new();
         while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {}
 
-        self.active = None;
-
+        // Keep the completed decoder and its input allocation for the next member.
         Ok(())
     }
 }
