@@ -31,7 +31,7 @@ const FILE_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 // payload storage remains below twice this value.
 const SOURCE_FILE_PREPARATION_BATCH_BYTES: usize = BUFFERED_SOURCE_FILE_BYTES;
 
-/// Minimal regular-file metadata accepted by [`Builder::add_file`].
+/// Minimal regular-file metadata accepted by [`Builder`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct EntryMetadata {
     executable: bool,
@@ -176,7 +176,7 @@ impl<'a> FilePayload<'a> {
     /// Returns the next chunk of logical, uncompressed source bytes.
     ///
     /// Once this method has been called, the payload cannot be passed to
-    /// [`Builder::add_file`].
+    /// [`Builder::add_file`] or [`Builder::add_file_with_options`].
     pub async fn next_chunk<E>(&mut self) -> Result<Option<&[u8]>, BuildError<E>> {
         self.started = true;
         match &mut self.inner {
@@ -313,17 +313,17 @@ pub struct BuildFailure<E> {
 
 impl<E> BuildFailure<E> {
     /// Reports a failure that occurred before the hook wrote any output.
-    pub fn recoverable(error: BuildError<E>) -> Self {
+    pub fn recoverable(error: impl Into<BuildError<E>>) -> Self {
         Self {
-            error,
+            error: error.into(),
             poisons_builder: false,
         }
     }
 
     /// Reports a failure that may have left partial output.
-    pub fn poisoned(error: BuildError<E>) -> Self {
+    pub fn poisoned(error: impl Into<BuildError<E>>) -> Self {
         Self {
-            error,
+            error: error.into(),
             poisons_builder: true,
         }
     }
@@ -351,6 +351,12 @@ pub trait ArchiveBuilder: Sized {
     /// The archive-format error returned while encoding entries.
     type Error;
 
+    /// Format-specific settings for one regular file.
+    ///
+    /// Default values should preserve the writer's configured defaults.
+    /// Formats without per-file settings can use `()`.
+    type FileOptions: Default;
+
     /// Wraps this format writer in a builder using default policy.
     ///
     /// Implementors should not override this default implementation.
@@ -373,6 +379,7 @@ pub trait ArchiveBuilder: Sized {
         path: &str,
         payload: &mut FilePayload<'_>,
         metadata: EntryMetadata,
+        options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>>;
 
     /// Writes one directory member.
@@ -404,7 +411,9 @@ impl<B: ArchiveBuilder> Builder<B> {
         self
     }
 
-    /// Adds one regular file from a [`FilePayload`].
+    /// Adds one regular file from a [`FilePayload`] using default file options.
+    ///
+    /// Use [`Self::add_file_with_options`] to supply format-specific settings.
     ///
     /// If the payload ends before its declared size or returns an error, the
     /// addition fails and the builder is poisoned if the archive member's
@@ -421,7 +430,27 @@ impl<B: ArchiveBuilder> Builder<B> {
     where
         P: AsRef<Path>,
     {
+        self.add_file_with_options(path, payload, metadata, B::FileOptions::default())
+            .await
+    }
+
+    /// Adds one regular file with format-specific settings.
+    ///
+    /// This applies the same name validation, collision tracking, and payload
+    /// requirements as [`Self::add_file`]. Options are passed to the format
+    /// writer for this file only.
+    pub async fn add_file_with_options<'a, P>(
+        &mut self,
+        path: P,
+        payload: impl Into<FilePayload<'a>>,
+        metadata: EntryMetadata,
+        options: B::FileOptions,
+    ) -> Result<(), BuildError<B::Error>>
+    where
+        P: AsRef<Path>,
+    {
         self.state.ensure_active()?;
+
         let archive_path = path.as_ref();
         let Some(path) = archive_path.to_str() else {
             return Err(BuildError::InvalidArchivePath {
@@ -435,6 +464,7 @@ impl<B: ArchiveBuilder> Builder<B> {
                 value: path.to_owned(),
             });
         }
+
         let path = path.to_owned();
         let reservation = self
             .state
@@ -444,15 +474,17 @@ impl<B: ArchiveBuilder> Builder<B> {
         if payload.started {
             return Err(BuildError::FilePayloadAlreadyRead);
         }
+
         payload.swap_buffer(&mut self.state.source_buffer);
         self.state.begin_write();
         let result = self
             .backend
-            .write_file_member(&path, &mut payload, metadata)
+            .write_file_member(&path, &mut payload, metadata, options)
             .await;
         self.state.complete_write();
         payload.swap_buffer(&mut self.state.source_buffer);
         self.resolve_hook(result)?;
+
         self.state.entries.commit_entry(&path, reservation);
         Ok(())
     }
@@ -496,10 +528,10 @@ impl<B: ArchiveBuilder> Builder<B> {
     /// Recursively adds a filesystem directory beneath its UTF-8 basename.
     ///
     /// Entries are visited in deterministic sorted order and files are streamed
-    /// with bounded memory. Source symbolic links are rejected by default;
-    /// [`BuilderPolicy::symlink_policy`] can instead preserve them. A late
-    /// traversal or validation failure may leave partial output and poison
-    /// this builder.
+    /// with bounded memory and default file options. Source symbolic links are
+    /// rejected by default; [`BuilderPolicy::symlink_policy`] can instead
+    /// preserve them. A late traversal or validation failure may leave partial
+    /// output and poison this builder.
     pub async fn add_directory_all<P: AsRef<Path>>(
         &mut self,
         source: P,
@@ -641,6 +673,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                         &entry.archive_path,
                         &mut payload,
                         EntryMetadata::default().executable(executable),
+                        B::FileOptions::default(),
                     )
                     .await?;
             }
@@ -659,6 +692,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                         &entry.archive_path,
                         &mut payload,
                         EntryMetadata::default().executable(executable),
+                        B::FileOptions::default(),
                     )
                     .await;
                 payload.swap_buffer(buffer);
@@ -868,7 +902,8 @@ pub enum BuildError<E> {
         /// The conflicting normalized archive path.
         path: String,
     },
-    /// A file payload was read before it was passed to [`Builder::add_file`].
+    /// A file payload was read before it was passed to [`Builder::add_file`]
+    /// or [`Builder::add_file_with_options`].
     #[error("file payload was already read before being added to the archive")]
     FilePayloadAlreadyRead,
     /// A source filesystem operation failed.
@@ -1054,6 +1089,7 @@ mod tests {
 
     impl ArchiveBuilder for NoopArchiveBuilder {
         type Error = TestError;
+        type FileOptions = ();
 
         async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
             Ok(())
@@ -1064,6 +1100,7 @@ mod tests {
             _path: &str,
             payload: &mut FilePayload<'_>,
             _metadata: EntryMetadata,
+            _options: Self::FileOptions,
         ) -> Result<(), BuildFailure<Self::Error>> {
             if mem::take(&mut self.fail_next_file) {
                 return Err(BuildFailure::recoverable(BuildError::Encoder(TestError)));

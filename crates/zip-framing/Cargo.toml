@@ -1,0 +1,27 @@
+[package]
+name = "zip-framing"
+description = "Strict, bounded framing for seekable ZIP archives"
+readme = "README.md"
+version = { workspace = true }
+edition = { workspace = true }
+homepage = { workspace = true }
+repository = { workspace = true }
+authors = { workspace = true }
+license = { workspace = true }
+
+[dependencies]
+flate2 = { workspace = true }
+memchr = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["io-util", "rt"] }
+
+[dev-dependencies]
+divan = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[bench]]
+name = "framing"
+harness = false
+
+[lints]
+workspace = true
