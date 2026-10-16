@@ -262,15 +262,26 @@ impl IndexedEntry {
 
     #[inline]
     pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
+        let mut entry = Self {
+            directory,
+            boundary,
+        };
+        entry.set_boundary(boundary)?;
+        Ok(entry)
+    }
+
+    #[inline]
+    pub(super) fn set_boundary(&mut self, boundary: u64) -> Result<(), Error> {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(
-            size::LOCAL as u64 + directory.metadata.path.len() as u64,
-            directory.compressed_size(),
+            size::LOCAL as u64 + self.directory.metadata.path.len() as u64,
+            self.directory.compressed_size(),
         )?;
         let minimum = add(
             minimum,
-            if directory
+            if self
+                .directory
                 .metadata
                 .common
                 .flags
@@ -281,17 +292,15 @@ impl IndexedEntry {
                 0
             },
         )?;
-        if add(directory.position(), minimum)? > boundary {
+        if add(self.directory.position(), minimum)? > boundary {
             return Err(invalid(
-                directory.position(),
+                self.directory.position(),
                 "member cannot fit before the next record",
             ));
         }
 
-        Ok(Self {
-            directory,
-            boundary,
-        })
+        self.boundary = boundary;
+        Ok(())
     }
 
     /// Read and validate an indexed entry's local header, filename, extras, and optional descriptor
