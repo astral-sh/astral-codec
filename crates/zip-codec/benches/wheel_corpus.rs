@@ -36,12 +36,11 @@ fn read_index(
             }
         }),
         Implementation::Zip => {
-            let mut archive = SyncZipArchive::new(Cursor::new(black_box(&fixture.bytes)))
+            let archive = SyncZipArchive::new(Cursor::new(black_box(&fixture.bytes)))
                 .expect("zip should open wheel");
             for index in 0..archive.len() {
-                // zip exposes sizes and CRCs through ZipFile, not its directory
-                // metadata. The raw reader avoids constructing decompressors.
-                let entry = archive.by_index_raw(index).expect("zip wheel entry");
+                // Inspect central-directory metadata without reading local headers.
+                let entry = archive.by_index_data(index).expect("zip wheel entry");
                 consume(
                     &entry.name().expect("zip wheel path"),
                     entry.size(),
