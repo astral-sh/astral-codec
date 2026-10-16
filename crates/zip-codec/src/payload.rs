@@ -1,7 +1,6 @@
 use std::io;
 
-use crc32fast::Hasher;
-use flate2::{Decompress, FlushDecompress, Status};
+use flate2::{Crc, Decompress, FlushDecompress, Status};
 use tokio::io::{AsyncRead, AsyncReadExt};
 use zip_framing::{CompressionMethod, Entry};
 
@@ -41,7 +40,7 @@ impl DeflateState {
 struct Integrity {
     position: u64,
     expected_crc: u32,
-    crc: Hasher,
+    crc: Crc,
     decoded_remaining: u64,
     done: bool,
 }
@@ -76,7 +75,7 @@ impl Payload {
             integrity: Integrity {
                 position: directory.position(),
                 expected_crc: directory.crc32(),
-                crc: Hasher::new(),
+                crc: Crc::new(),
                 decoded_remaining: directory.size(),
                 done: false,
             },
@@ -138,8 +137,12 @@ impl Payload {
 
         tokio::task::consume_budget().await;
 
+        // Leave one maximum DEFLATE match of output slack so its fast loop can
+        // finish the stream. Integrity checks reject any excess before yielding
+        // bytes, and every decoder call still respects the chunk target.
         let length = (target_len.min(CHUNK_SIZE) as u64)
-            .min(self.integrity.decoded_remaining.saturating_add(1)) as usize;
+            .min(self.integrity.decoded_remaining.saturating_add(258))
+            as usize;
         let previous_length = output.len();
         let offset = if APPEND { previous_length } else { 0 };
         match &mut self.encoding {
@@ -259,7 +262,7 @@ impl Integrity {
             return Err(self.invalid("decoded payload is shorter than declared size"));
         }
 
-        if self.crc.clone().finalize() != self.expected_crc {
+        if self.crc.sum() != self.expected_crc {
             return Err(self.invalid("payload CRC mismatch"));
         }
 
