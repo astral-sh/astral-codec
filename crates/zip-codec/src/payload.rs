@@ -47,11 +47,21 @@ struct Integrity {
 }
 
 impl Payload {
-    pub(crate) fn new(entry: &Entry<'_>) -> Result<Self, DecodeError> {
+    pub(crate) fn new(entry: &Entry<'_>, previous: Option<Self>) -> Result<Self, DecodeError> {
         let directory = entry.directory();
-        let encoding = match directory.method() {
-            CompressionMethod::Stored => Encoding::Stored,
-            CompressionMethod::Deflate => {
+        let encoding = match (directory.method(), previous.map(|payload| payload.encoding)) {
+            (CompressionMethod::Stored, _) => Encoding::Stored,
+            (CompressionMethod::Deflate, Some(Encoding::Deflate(mut state))) => {
+                state.decoder.reset(false);
+                state.input.resize(
+                    directory.compressed_size().min(CHUNK_SIZE as u64) as usize,
+                    0,
+                );
+                state.consumed = 0;
+                state.available = 0;
+                Encoding::Deflate(state)
+            }
+            (CompressionMethod::Deflate, _) => {
                 Encoding::Deflate(Box::new(DeflateState::new(directory.compressed_size())))
             }
             _ => {
@@ -178,12 +188,21 @@ impl Payload {
 
                 let before_input = state.decoder.total_in();
                 let before_output = state.decoder.total_out();
+                // A final bounded call needs no saved history when both the
+                // remaining input and an overflow-detection byte fit.
+                let flush = if self.encoded_remaining == 0
+                    && self.integrity.decoded_remaining < length as u64
+                {
+                    FlushDecompress::Finish
+                } else {
+                    FlushDecompress::None
+                };
                 let status = state
                     .decoder
                     .decompress(
                         &state.input[state.consumed..state.available],
                         &mut output[offset..end],
-                        FlushDecompress::None,
+                        flush,
                     )
                     .map_err(|_| self.integrity.invalid("invalid DEFLATE stream"))?;
 
