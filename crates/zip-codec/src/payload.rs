@@ -52,10 +52,10 @@ impl Payload {
             (CompressionMethod::Stored, _) => Encoding::Stored,
             (CompressionMethod::Deflate, Some(Encoding::Deflate(mut state))) => {
                 state.decoder.reset(false);
-                state.input.resize(
-                    directory.compressed_size().min(CHUNK_SIZE as u64) as usize,
-                    0,
-                );
+                let length = directory.compressed_size().min(CHUNK_SIZE as u64) as usize;
+                if state.input.len() < length {
+                    state.input.resize(length, 0);
+                }
                 state.consumed = 0;
                 state.available = 0;
                 Encoding::Deflate(state)
