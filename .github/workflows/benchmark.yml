@@ -32,7 +32,7 @@ on:
   workflow_dispatch:
     inputs:
       compare:
-        description: Compare implementations
+        description: Compare tar implementations
         type: boolean
         default: false
 
@@ -64,16 +64,9 @@ jobs:
           - package: zip-codec
             target: codec
             build-args: --features bench-allocator
-          - package: zip-codec
-            target: comparison
-            build-args: --features bench-allocator
     permissions:
       contents: read
       id-token: write # Authenticate uploads to CodSpeed with OIDC.
-    env:
-      COMPARE_IMPLEMENTATIONS: >-
-        ${{ (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'benchmarks:compare')) ||
-            (github.event_name == 'workflow_dispatch' && inputs.compare) }}
 
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -94,12 +87,7 @@ jobs:
         uses: CodSpeedHQ/action@373d6868929f444bc08d901fd0eb0ad52a8875ea # v5.2.1
         with:
           mode: simulation
-          run: |
-            if [ "${{ matrix.target }}" = "comparison" ] && [ "$COMPARE_IMPLEMENTATIONS" != "true" ]; then
-              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation -- '/${{ matrix.package }}(\]|$)'
-            else
-              uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation
-            fi
+          run: uv run --only-dev --locked cargo codspeed run -p ${{ matrix.package }} --bench ${{ matrix.target }} -m simulation
 
   benchmark-comparison-build:
     name: Build comparison benchmarks (tar-codec)
