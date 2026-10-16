@@ -253,23 +253,7 @@ impl CentralDirectory {
         let tail_start = length - tail_size as u64;
         let tail = reader.read_slice(tail_start, tail_size, length).await?;
 
-        let mut candidate = None;
-        // Scan the whole tail: a second valid EOCD is ambiguous even
-        // when the last 22 bytes already look like an end record.
-        for offset in memmem::find_iter(tail, &signature::END.to_le_bytes()) {
-            if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
-                && offset
-                    + size::END
-                    + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
-                    == tail.len()
-                && candidate.replace((offset, *header)).is_some()
-            {
-                return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
-            }
-        }
-
-        let (offset, end) =
-            candidate.ok_or_else(|| invalid(length, "missing end record or trailing bytes"))?;
+        let (offset, end) = find_end(tail, tail_start)?;
         let position = tail_start + offset as u64;
         str::from_utf8(&tail[offset + size::END..])
             .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
@@ -419,6 +403,56 @@ impl CentralDirectory {
         *budget = pending_budget;
         Ok(entries)
     }
+}
+
+/// Scans the whole tail: a second EOCD reaching EOF is ambiguous even when the
+/// last 22 bytes already look like an end record.
+fn find_end(tail: &[u8], tail_start: u64) -> Result<(usize, [u8; size::END]), Error> {
+    const SIGNATURE: [u8; 4] = signature::END.to_le_bytes();
+    let mut candidate = None;
+    let mut scan = |bytes: &[u8], start: usize| {
+        for offset in memmem::find_iter(bytes, &SIGNATURE).map(|offset| start + offset) {
+            if let Some(header) = tail[offset..].first_chunk::<{ size::END }>()
+                && offset
+                    + size::END
+                    + usize::from(u16::from_le_bytes(array_at::<20, 2, _>(header)))
+                    == tail.len()
+                && candidate.replace((offset, *header)).is_some()
+            {
+                return Err(invalid(tail_start + offset as u64, "ambiguous end records"));
+            }
+        }
+        Ok(())
+    };
+
+    // Filter short blocks by the EOCD suffix, avoiding the common PK prefix of
+    // other ZIP records. The reduction permits vectorization without intrinsics.
+    let candidates = tail.len() - (size::END - 1);
+    let (blocks, remainder) = tail[2..2 + candidates].as_chunks::<64>();
+    for (ordinal, first) in blocks.iter().enumerate() {
+        let start = ordinal * 64;
+        let second = &tail[start + 3..start + 3 + 64];
+        let candidate = first
+            .iter()
+            .zip(second)
+            .fold(0, |found, (&first, &second)| {
+                found | (u8::from(first == SIGNATURE[2]) & u8::from(second == SIGNATURE[3]))
+            });
+        if candidate != 0 {
+            // Include the next three bytes for signatures crossing a block
+            // boundary. Each possible starting position is checked once.
+            scan(&tail[start..start + 64 + 3], start)?;
+        }
+    }
+    let start = blocks.len() * 64;
+    scan(&tail[start..start + remainder.len() + 3], start)?;
+
+    candidate.ok_or_else(|| {
+        invalid(
+            tail_start + tail.len() as u64,
+            "missing end record or trailing bytes",
+        )
+    })
 }
 
 /// A ZIP64 end record with a validated locator, fixed fields, and extensible sector.
