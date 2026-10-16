@@ -62,6 +62,10 @@ async fn extracts_common_members_and_streams_payload_sizes() {
     let buffered_boundary = patterned_payload(BUFFERED_BOUNDARY_BYTES);
     let large = patterned_payload(LARGE_BYTES);
     let archive = TestArchive::new([
+        // Both write paths must release older cached handles before replacing
+        // empty directories; Windows does not share directory delete access.
+        entry::directory("same"),
+        entry::directory("large"),
         entry::directory("bin"),
         entry::executable("bin/tool", b"run"),
         entry::file("same", b"old"),
