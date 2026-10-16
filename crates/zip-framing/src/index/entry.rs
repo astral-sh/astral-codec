@@ -260,6 +260,7 @@ impl IndexedEntry {
         self.directory.position()..self.boundary
     }
 
+    #[inline]
     pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
