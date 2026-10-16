@@ -17,7 +17,7 @@ use crate::{
 #[derive(Clone, Debug)]
 struct Metadata {
     /// The member's path.
-    path: String,
+    path: Box<str>,
     /// Common (fixed size) metadata in a central directory entry.
     common: Common,
     /// The effective compressed size declared by the central directory.
@@ -112,7 +112,7 @@ pub struct CentralDirectoryEntry {
     metadata: Metadata,
     /// Extra data retained for local/central reconciliation. ZIP64-only extras
     /// need no copy: their resolved values are already part of the metadata.
-    extra: Vec<u8>,
+    extra: Box<[u8]>,
 }
 
 impl CentralDirectoryEntry {
@@ -210,7 +210,7 @@ impl CentralDirectoryEntry {
         budget.charge_member(sizes.uncompressed)?;
         let entry = Self {
             metadata: Metadata {
-                path: path.to_owned(),
+                path: path.into(),
                 common,
                 compressed_size: sizes.compressed,
                 size: sizes.uncompressed,
@@ -219,9 +219,9 @@ impl CentralDirectoryEntry {
                 attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             },
             extra: if extras.needs_reconciliation() {
-                variable[name_length..name_length + extra_length].to_vec()
+                variable[name_length..name_length + extra_length].into()
             } else {
-                Vec::new()
+                Box::default()
             },
         };
 
