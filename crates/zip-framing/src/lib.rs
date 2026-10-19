@@ -36,10 +36,10 @@ use std::io;
 use thiserror::Error;
 
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
-pub use extra::{ExtraHeaderId, UnixData};
+pub use extra::ExtraHeaderId;
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
-pub use kind::EntryKind;
+pub use kind::{DeviceNumbers, EntryKind};
 
 /// A supported ZIP compression method.
 ///
