@@ -2,7 +2,7 @@ mod support;
 
 use std::{error::Error, io::Cursor};
 
-use flate2::Crc;
+use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, EntryKind, Error as FrameError, HostSystem, Index,
@@ -671,9 +671,7 @@ async fn rejects_unsupported_extras_in_either_header() {
 #[tokio::test]
 async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     let name = "café".as_bytes();
-    let mut crc = Crc::new();
-    crc.update(name);
-    let unicode = [vec![1], crc.sum().to_le_bytes().to_vec(), name.to_vec()].concat();
+    let unicode = [vec![1], crc32(name).to_le_bytes().to_vec(), name.to_vec()].concat();
     let fixture = Fixture {
         name: name.to_vec(),
         local_extra: field(0x7075, &unicode),
@@ -752,11 +750,14 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     // A valid Unicode extra is corroborating metadata, not a replacement for
     // a legacy-encoded name or a missing UTF-8 flag on a non-ASCII name.
     for original in [b"caf\xe9".as_slice(), name] {
-        let mut crc = Crc::new();
-        crc.update(original);
         let extra = field(
             0x7075,
-            &[vec![1], crc.sum().to_le_bytes().to_vec(), name.to_vec()].concat(),
+            &[
+                vec![1],
+                crc32(original).to_le_bytes().to_vec(),
+                name.to_vec(),
+            ]
+            .concat(),
         );
         let archive = Fixture {
             name: original.to_vec(),
@@ -1064,9 +1065,12 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
     // Incomplete Unicode comments remain invalid even when the ordinary comment
     // is usable; do not fall back to treating a recognized field as opaque data.
     let comment = b"comment";
-    let mut crc = Crc::new();
-    crc.update(comment);
-    let unicode = [vec![1], crc.sum().to_le_bytes().to_vec(), comment.to_vec()].concat();
+    let unicode = [
+        vec![1],
+        crc32(comment).to_le_bytes().to_vec(),
+        comment.to_vec(),
+    ]
+    .concat();
     for length in (0..5).chain([unicode.len()]) {
         let archive = Fixture {
             member_comment: comment.to_vec(),
