@@ -16,11 +16,13 @@ use zip_framing::{
 
 use crate::payload::CHUNK_SIZE;
 
-/// Per-file ZIP settings for [`archive_trait::Builder::add_file_with_options`].
+/// Options for one regular ZIP file.
 ///
+/// Construct from [`EntryMetadata`] to set format-neutral file metadata.
 /// Default options inherit the method configured by [`ZipEncoder::with_compression`].
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 pub struct ZipFileOptions {
+    metadata: EntryMetadata,
     compression: Option<CompressionMethod>,
 }
 
@@ -31,6 +33,15 @@ impl ZipFileOptions {
     pub fn with_compression(mut self, method: CompressionMethod) -> Self {
         self.compression = Some(method);
         self
+    }
+}
+
+impl From<EntryMetadata> for ZipFileOptions {
+    fn from(metadata: EntryMetadata) -> Self {
+        Self {
+            metadata,
+            compression: None,
+        }
     }
 }
 
@@ -307,7 +318,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         &mut self,
         path: &str,
         payload: &mut FilePayload<'_>,
-        metadata: EntryMetadata,
         options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         let method = if payload.size() == 0 {
@@ -319,7 +329,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
             path,
             method,
             EntryKind::File {
-                executable: metadata.is_executable(),
+                executable: options.metadata.is_executable(),
             },
             payload,
         )
