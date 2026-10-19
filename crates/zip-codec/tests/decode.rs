@@ -80,15 +80,22 @@ fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Bo
 #[tokio::test]
 async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
     for (attributes, expected_kind, expected_error) in [
-        (0x08, Some(DecodedEntryKind::VolumeLabel), "volume label"),
+        (
+            0x08,
+            Some(DecodedEntryKind::VolumeLabel { unix_data: None }),
+            "volume label",
+        ),
         (
             0o140600 << 16,
-            Some(DecodedEntryKind::Socket),
+            Some(DecodedEntryKind::Socket { unix_data: None }),
             "unsupported file attributes",
         ),
         (
             0o030600 << 16,
-            Some(DecodedEntryKind::Unknown(0o030000)),
+            Some(DecodedEntryKind::Unknown {
+                mode: 0o030000,
+                unix_data: None,
+            }),
             "unsupported file attributes",
         ),
         (
@@ -106,7 +113,7 @@ async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
                 archive.member(0).await.map(|_| ())
             };
 
-            if let Some(expected_kind) = expected_kind {
+            if let Some(expected_kind) = &expected_kind {
                 assert!(
                     matches!(result, Err(DecodeError::Unsupported { position: 0, feature }) if feature == expected_error)
                 );
@@ -144,7 +151,7 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
             };
             assert_eq!(
                 archive.resolved(0).ok_or("unresolved entry")?.kind(),
-                DecodedEntryKind::SymbolicLink
+                &DecodedEntryKind::SymbolicLink { unix_target: None }
             );
 
             if length == usize::from(u16::MAX) {
