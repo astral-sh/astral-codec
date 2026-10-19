@@ -5,8 +5,8 @@ use std::{error::Error, io::Cursor};
 use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, EntryKind, Error as FrameError, HostSystem, Index,
-    IndexedEntry, LimitExceeded, Limits, UnixData,
+    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
+    HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -242,35 +242,56 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
             EntryKind::Directory,
             0o040755,
         ),
-        ("link", 3, 0o120777 << 16, EntryKind::SymbolicLink, 0o120777),
+        (
+            "link",
+            3,
+            0o120777 << 16,
+            EntryKind::SymbolicLink { unix_target: None },
+            0o120777,
+        ),
         (
             "device",
             3,
             0o020600 << 16,
-            EntryKind::CharacterDevice,
+            EntryKind::CharacterDevice { numbers: None },
             0o020600,
         ),
         (
             "device",
             3,
             0o060600 << 16,
-            EntryKind::BlockDevice,
+            EntryKind::BlockDevice { numbers: None },
             0o060600,
         ),
         ("fifo", 3, 0o010600 << 16, EntryKind::Fifo, 0o010600),
-        ("socket", 3, 0o140600 << 16, EntryKind::Socket, 0o140600),
-        ("volume", 0, 0x08, EntryKind::VolumeLabel, 0),
+        (
+            "socket",
+            3,
+            0o140600 << 16,
+            EntryKind::Socket { unix_data: None },
+            0o140600,
+        ),
+        (
+            "volume",
+            0,
+            0x08,
+            EntryKind::VolumeLabel { unix_data: None },
+            0,
+        ),
         (
             "unknown",
             3,
             0o030600 << 16,
-            EntryKind::Unknown(0o030000),
+            EntryKind::Unknown {
+                mode: 0o030000,
+                unix_data: None,
+            },
             0o030600,
         ),
     ] {
         let archive = Fixture {
             name: name.as_bytes().to_vec(),
-            payload: Some(if expected == EntryKind::SymbolicLink {
+            payload: Some(if matches!(expected, EntryKind::SymbolicLink { .. }) {
                 b"target".to_vec()
             } else {
                 Vec::new()
@@ -285,12 +306,12 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
         assert!(index.resolved(0).is_none());
 
         let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
-        assert_eq!(entry.kind(), expected, "{name}, host {host}");
+        assert_eq!(entry.kind(), &expected, "{name}, host {host}");
         assert_eq!(entry.unix_mode(), mode, "{name}, host {host}");
 
         source.reads.clear();
         let cached = index.resolved(0).ok_or("unresolved entry")?;
-        assert_eq!(cached.kind(), expected);
+        assert_eq!(cached.kind(), &expected);
         index.validate_all(&mut source).await?;
         assert!(source.reads.is_empty());
     }
@@ -301,80 +322,84 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
 #[tokio::test]
 async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
     let device_numbers = [0x78, 0x56, 0x34, 0x92, 0xef, 0xcd, 0xab, 0x80];
-    let device = UnixData::Device {
+    let device = DeviceNumbers {
         major: 0x9234_5678,
         minor: 0x80ab_cdef,
     };
-    for (attributes, data, payload, expected, expected_data) in [
+    for (attributes, data, payload, expected) in [
         (
             0,
             b"target".as_slice(),
             b"".as_slice(),
-            EntryKind::HardLink,
-            &UnixData::LinkTarget("target".to_owned()),
+            EntryKind::HardLink {
+                target: "target".to_owned(),
+            },
         ),
         (
             0o100644 << 16,
             b"target",
             b"data",
-            EntryKind::HardLink,
-            &UnixData::LinkTarget("target".to_owned()),
+            EntryKind::HardLink {
+                target: "target".to_owned(),
+            },
         ),
         (
             0o120777 << 16,
             "../café".as_bytes(),
             b"",
-            EntryKind::SymbolicLink,
-            &UnixData::LinkTarget("../café".to_owned()),
+            EntryKind::SymbolicLink {
+                unix_target: Some("../café".to_owned()),
+            },
         ),
         (
             0o120777 << 16,
             b"target",
             b"target",
-            EntryKind::SymbolicLink,
-            &UnixData::LinkTarget("target".to_owned()),
+            EntryKind::SymbolicLink {
+                unix_target: Some("target".to_owned()),
+            },
         ),
-        (
-            0o100644 << 16,
-            b"",
-            b"data",
-            EntryKind::File,
-            &UnixData::Empty,
-        ),
+        (0o100644 << 16, b"", b"data", EntryKind::File),
         (
             0o020600 << 16,
             device_numbers.as_slice(),
             b"",
-            EntryKind::CharacterDevice,
-            &device,
+            EntryKind::CharacterDevice {
+                numbers: Some(device),
+            },
         ),
         (
             0o060600 << 16,
             device_numbers.as_slice(),
             b"",
-            EntryKind::BlockDevice,
-            &device,
+            EntryKind::BlockDevice {
+                numbers: Some(device),
+            },
         ),
         (
             0o140600 << 16,
             b"opaque",
             b"",
-            EntryKind::Socket,
-            &UnixData::Opaque(b"opaque".to_vec()),
+            EntryKind::Socket {
+                unix_data: Some(b"opaque".to_vec()),
+            },
         ),
         (
             0o030600 << 16,
             b"opaque",
             b"",
-            EntryKind::Unknown(0o030000),
-            &UnixData::Opaque(b"opaque".to_vec()),
+            EntryKind::Unknown {
+                mode: 0o030000,
+                unix_data: Some(b"opaque".to_vec()),
+            },
         ),
         (
             0x08,
             b"opaque",
             b"",
-            EntryKind::VolumeLabel,
-            &UnixData::Opaque(b"opaque".to_vec()),
+            EntryKind::VolumeLabel {
+                unix_data: Some(b"opaque".to_vec()),
+            },
         ),
     ] {
         let archive = Fixture {
@@ -387,8 +412,8 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
         .build();
         let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
         let entry = index.resolved(0).ok_or("unresolved entry")?;
-        assert_eq!(entry.kind(), expected);
-        assert_eq!(entry.unix_data(), Some(expected_data));
+        assert_eq!(entry.kind(), &expected);
+        assert!(entry.has_unix_extra());
     }
 
     Ok(())
@@ -1309,10 +1334,11 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
             read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
 
         let entry = index.resolved(0).ok_or("unresolved entry")?;
-        assert_eq!(entry.kind(), EntryKind::HardLink);
         assert_eq!(
-            entry.unix_data(),
-            Some(&UnixData::LinkTarget("target".to_owned()))
+            entry.kind(),
+            &EntryKind::HardLink {
+                target: "target".to_owned()
+            }
         );
     }
 
@@ -1438,10 +1464,10 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
     assert_eq!(entry.directory().path(), "next");
     assert_eq!(entry.record_range(), first.central as u64..central as u64);
-    assert_eq!(
-        entry.unix_data(),
-        Some(&UnixData::LinkTarget("target".to_owned()))
-    );
+    let expected_link = EntryKind::HardLink {
+        target: "target".to_owned(),
+    };
+    assert_eq!(entry.kind(), &expected_link);
     assert!(index.resolved(0).is_some());
     assert!(index.resolved(1).is_none());
 
@@ -1460,13 +1486,15 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         first.central as u64
     );
     assert_eq!(
-        index.resolved(0).ok_or("unresolved entry")?.unix_data(),
-        Some(&UnixData::LinkTarget("target".to_owned()))
+        index.resolved(0).ok_or("unresolved entry")?.kind(),
+        &expected_link
     );
     assert_eq!(index.entries()[1].directory().position(), 0);
-    assert_eq!(
-        index.resolved(1).ok_or("unresolved entry")?.unix_data(),
-        None
+    assert!(
+        !index
+            .resolved(1)
+            .ok_or("unresolved entry")?
+            .has_unix_extra()
     );
 
     // The ordered path must derive the same physical spans without sorting.
@@ -1483,8 +1511,8 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     );
     ordered.validate_all(&mut source).await?;
     assert_eq!(
-        ordered.resolved(1).ok_or("unresolved entry")?.unix_data(),
-        Some(&UnixData::LinkTarget("target".to_owned()))
+        ordered.resolved(1).ok_or("unresolved entry")?.kind(),
+        &expected_link
     );
 
     let mut shared = bytes.clone();
