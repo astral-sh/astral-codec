@@ -152,7 +152,8 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
         };
         let size = directory.size();
 
-        self.active = Some(Payload::new(&entry, self.active.take())?);
+        let previous = self.active.take();
+        let active = self.active.insert(Payload::new(&entry, previous)?);
         self.reader
             .seek(SeekFrom::Start(entry.data_offset()))
             .await?;
@@ -171,16 +172,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
             }
             Kind::HardLink(target) => Member::HardLink {
                 metadata,
-                target,
+                target: target.to_owned(),
                 size,
                 payload: (),
             },
             Kind::SymbolicLink(expected) => {
                 let mut target = Vec::new();
-                let mut chunk = Vec::new();
-                while self.read_chunk(&mut chunk, CHUNK_SIZE).await? {
-                    target.extend_from_slice(&chunk);
-                }
+                active.read_to_end(&mut self.reader, &mut target).await?;
 
                 let mut target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
                     position: metadata.position,
@@ -195,7 +193,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
 
                 if let Some(expected) = expected {
                     if size == 0 {
-                        target = expected;
+                        target = expected.to_owned();
                     } else if target != expected {
                         return Err(DecodeError::Integrity {
                             position: metadata.position,
@@ -313,21 +311,21 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
     }
 }
 
-enum Kind {
+enum Kind<'a> {
     File(bool),
     Directory,
-    SymbolicLink(Option<String>),
-    HardLink(String),
+    SymbolicLink(Option<&'a str>),
+    HardLink(&'a str),
     Special(SpecialKind),
 }
 
-impl TryFrom<&Entry<'_>> for Kind {
+impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
     type Error = DecodeError;
 
-    fn try_from(entry: &Entry<'_>) -> Result<Self, Self::Error> {
+    fn try_from(entry: &'a Entry<'_>) -> Result<Self, Self::Error> {
         let directory = entry.directory();
         let link = match entry.unix_data() {
-            Some(UnixData::LinkTarget(target)) => Some(target.clone()),
+            Some(UnixData::LinkTarget(target)) => Some(target.as_str()),
             _ => None,
         };
 
