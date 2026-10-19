@@ -213,16 +213,8 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         } else {
             Vec::new()
         };
-        let mut consumed = 0_u64;
 
         while let Some(chunk) = payload.next_chunk().await? {
-            consumed = consumed
-                .checked_add(chunk.len() as u64)
-                .ok_or(EncodeError::Overflow)?;
-            if consumed > size {
-                return Err(EncodeError::SizeMismatch.into());
-            }
-
             for chunk in chunk.chunks(CHUNK_SIZE) {
                 crc.update(chunk);
                 if let Some(compressor) = &mut compressor {
@@ -234,10 +226,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
 
                 tokio::task::consume_budget().await;
             }
-        }
-
-        if consumed != size {
-            return Err(EncodeError::SizeMismatch.into());
         }
 
         if let Some(compressor) = &mut compressor {
@@ -385,9 +373,6 @@ pub enum EncodeError {
     /// A compressor failed or made no progress.
     #[error("DEFLATE compression failed")]
     Compression,
-    /// A source did not produce its declared size.
-    #[error("ZIP source payload size mismatch")]
-    SizeMismatch,
     /// Output arithmetic exceeded the ZIP64 range.
     #[error("ZIP output size overflow")]
     Overflow,
