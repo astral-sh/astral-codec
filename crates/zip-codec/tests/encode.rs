@@ -11,7 +11,8 @@ use std::{
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
     Archive, ArchiveBuilder, BuildError, CompressionMethod, EncodeError, EntryMetadata,
-    FilePayload, Limits, Member, MemberPayload, ZipArchive, ZipEncoder, ZipFileOptions,
+    FilePayload, LimitExceeded, Limits, Member, MemberPayload, ZipArchive, ZipEncoder,
+    ZipFileOptions,
 };
 use zip_framing::write::{EntryKind, PendingMember};
 
@@ -214,7 +215,7 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
             builder
                 .add_file("next", &b""[..], EntryMetadata::default())
                 .await,
-            Err(BuildError::Encoder(EncodeError::Limit { resource: "metadata bytes", limit }))
+            Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
                 if limit == limits.metadata_size
         ));
         let output = builder.finish_into_inner().await?.into_inner();

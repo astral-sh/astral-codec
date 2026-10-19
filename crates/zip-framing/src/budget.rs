@@ -64,18 +64,18 @@ impl Budget {
     }
 
     /// Checks the encoded archive's size against its limit.
-    pub fn check_archive_size(&self, size: u64) -> Result<(), BudgetError> {
+    pub fn check_archive_size(&self, size: u64) -> Result<(), LimitExceeded> {
         if size > self.limits.archive_size {
-            return Err(BudgetError::ArchiveSize(self.limits.archive_size));
+            return Err(LimitExceeded::ArchiveSize(self.limits.archive_size));
         }
 
         Ok(())
     }
 
     /// Checks the archive's entry count against its limit.
-    pub fn check_entry_count(&self, count: u64) -> Result<(), BudgetError> {
+    pub fn check_entry_count(&self, count: u64) -> Result<(), LimitExceeded> {
         if count > self.limits.entries as u64 {
-            return Err(BudgetError::EntryCount(self.limits.entries as u64));
+            return Err(LimitExceeded::EntryCount(self.limits.entries as u64));
         }
 
         Ok(())
@@ -88,7 +88,7 @@ impl Budget {
             .checked_add(length)
             .ok_or(BudgetError::Overflow(self.metadata))?;
         if metadata > self.limits.metadata_size {
-            return Err(BudgetError::MetadataSize(self.limits.metadata_size));
+            return Err(LimitExceeded::MetadataSize(self.limits.metadata_size).into());
         }
 
         self.metadata = metadata;
@@ -99,7 +99,7 @@ impl Budget {
     /// and [`Limits::total_size`].
     pub fn charge_member(&mut self, size: u64) -> Result<(), BudgetError> {
         if size > self.limits.member_size {
-            return Err(BudgetError::MemberSize(self.limits.member_size));
+            return Err(LimitExceeded::MemberSize(self.limits.member_size).into());
         }
 
         let uncompressed = self
@@ -107,7 +107,7 @@ impl Budget {
             .checked_add(size)
             .ok_or(BudgetError::Overflow(self.uncompressed))?;
         if uncompressed > self.limits.total_size {
-            return Err(BudgetError::TotalSize(self.limits.total_size));
+            return Err(LimitExceeded::TotalSize(self.limits.total_size).into());
         }
 
         self.uncompressed = uncompressed;
@@ -115,9 +115,20 @@ impl Budget {
     }
 }
 
-/// A failed budget check or charge.
+/// A failed cumulative budget charge.
 #[derive(Debug, Error)]
 pub enum BudgetError {
+    /// A configured resource limit was exceeded.
+    #[error(transparent)]
+    Limit(#[from] LimitExceeded),
+    /// Adding to the given cumulative usage overflowed [`u64`].
+    #[error("ZIP budget size overflow")]
+    Overflow(u64),
+}
+
+/// A ZIP resource limit and its configured maximum.
+#[derive(Clone, Copy, Debug, Eq, Error, PartialEq)]
+pub enum LimitExceeded {
     /// The encoded archive exceeded the given byte limit.
     #[error("ZIP exceeds archive bytes limit ({0})")]
     ArchiveSize(u64),
@@ -128,12 +139,9 @@ pub enum BudgetError {
     #[error("ZIP exceeds metadata bytes limit ({0})")]
     MetadataSize(u64),
     /// A member's uncompressed size exceeded the given byte limit.
-    #[error("ZIP exceeds member bytes limit ({0})")]
+    #[error("ZIP exceeds uncompressed member bytes limit ({0})")]
     MemberSize(u64),
     /// Cumulative uncompressed sizes exceeded the given byte limit.
-    #[error("ZIP exceeds total member bytes limit ({0})")]
+    #[error("ZIP exceeds total uncompressed bytes limit ({0})")]
     TotalSize(u64),
-    /// Adding to the given cumulative usage overflowed [`u64`].
-    #[error("ZIP budget size overflow")]
-    Overflow(u64),
 }
