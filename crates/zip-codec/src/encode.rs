@@ -351,6 +351,8 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
             return Err(BuildFailure::recoverable(EncodeError::InvalidLink));
         }
 
+        // Store the target in the member payload: readers such as libarchive do not
+        // read symbolic-link targets from the PKWARE UNIX extra field (0x000d).
         self.add_member(
             path,
             CompressionMethod::Stored,
