@@ -10,7 +10,7 @@ authors = { workspace = true }
 license = { workspace = true }
 
 [dependencies]
-flate2 = { workspace = true }
+crc32fast = { workspace = true }
 memchr = { workspace = true }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["io-util", "rt"] }
