@@ -5,7 +5,7 @@ use std::io::{self, SeekFrom};
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, UnixData, constants::attributes};
+use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -324,33 +324,25 @@ impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
 
     fn try_from(entry: &'a Entry<'_>) -> Result<Self, Self::Error> {
         let directory = entry.directory();
-        let link = match entry.unix_data() {
-            Some(UnixData::LinkTarget(target)) => Some(target.as_str()),
-            _ => None,
-        };
-
         match entry.kind() {
             EntryKind::File => Ok(Self::File(
                 entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
             )),
             EntryKind::Directory => Ok(Self::Directory),
-            EntryKind::HardLink => Ok(Self::HardLink(link.ok_or(DecodeError::Integrity {
-                position: directory.position(),
-                reason: "missing UNIX hard-link target",
-            })?)),
-            EntryKind::SymbolicLink => {
+            EntryKind::HardLink { target } => Ok(Self::HardLink(target)),
+            EntryKind::SymbolicLink { unix_target } => {
                 if directory.size() > u64::from(u16::MAX) {
                     return Err(DecodeError::Integrity {
                         position: directory.position(),
                         reason: "oversized symbolic-link target",
                     });
                 }
-                Ok(Self::SymbolicLink(link))
+                Ok(Self::SymbolicLink(unix_target.as_deref()))
             }
-            EntryKind::CharacterDevice => Ok(Self::Special(SpecialKind::CharacterDevice)),
-            EntryKind::BlockDevice => Ok(Self::Special(SpecialKind::BlockDevice)),
+            EntryKind::CharacterDevice { .. } => Ok(Self::Special(SpecialKind::CharacterDevice)),
+            EntryKind::BlockDevice { .. } => Ok(Self::Special(SpecialKind::BlockDevice)),
             EntryKind::Fifo => Ok(Self::Special(SpecialKind::Fifo)),
-            EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
+            EntryKind::VolumeLabel { .. } => Err(DecodeError::Unsupported {
                 position: directory.position(),
                 feature: "volume label",
             }),

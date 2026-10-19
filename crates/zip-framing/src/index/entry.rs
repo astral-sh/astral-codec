@@ -3,7 +3,7 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, HostSystem, UnixData, add,
+    Budget, CompressionMethod, EntryKind, Error, HostSystem, add,
     constants::{signature, size},
     extra::Extras,
     invalid,
@@ -37,8 +37,8 @@ impl Entry<'_> {
     /// Returns the member's kind, validated during local record resolution.
     ///
     /// This does not decode payloads or apply an extraction policy.
-    pub fn kind(&self) -> EntryKind {
-        self.resolved.kind
+    pub fn kind(&self) -> &EntryKind {
+        &self.resolved.kind
     }
 
     /// Returns the UNIX file type and permission bits from external attributes.
@@ -53,18 +53,19 @@ impl Entry<'_> {
         self.resolved.data_offset
     }
 
-    /// Returns reconciled PKWARE UNIX file-type data, if the field is present.
+    /// Returns whether a PKWARE UNIX extra field was present in either header.
     ///
-    /// A prefix-only field returns [`UnixData::Empty`].
-    pub fn unix_data(&self) -> Option<&UnixData> {
-        self.resolved.unix_data.as_ref()
+    /// A field containing only the timestamp and ownership prefix counts as
+    /// present. Any file-type data is available through [`Self::kind`].
+    pub fn has_unix_extra(&self) -> bool {
+        self.resolved.has_unix_extra
     }
 }
 
 #[derive(Debug)]
 pub(super) struct ResolvedMember {
     data_offset: u64,
-    unix_data: Option<UnixData>,
+    has_unix_extra: bool,
     kind: EntryKind,
     unix_mode: u16,
 }
@@ -374,12 +375,10 @@ impl IndexedEntry {
 
         let attributes =
             ExternalAttributes::new(directory.host_system(), directory.external_attributes());
-        let (kind, unix_data) = EntryKind::resolve(directory, unix_data, &attributes)?;
-
         Ok(ResolvedMember {
             data_offset,
-            unix_data,
-            kind,
+            has_unix_extra: unix_data.is_some(),
+            kind: EntryKind::resolve(directory, unix_data, &attributes)?,
             unix_mode: attributes.unix_mode,
         })
     }
