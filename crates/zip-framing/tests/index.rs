@@ -6,7 +6,7 @@ use flate2::Crc;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, EntryKind, Error as FrameError, HostSystem, Index,
-    IndexedEntry, Limits, UnixData,
+    IndexedEntry, LimitExceeded, Limits, UnixData,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -806,52 +806,46 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
 #[tokio::test]
 async fn enforces_resource_budgets_before_exposing_members() {
     let bytes = Fixture::default().build().bytes;
-    for (limits, expected_resource, expected_limit) in [
+    for (limits, expected) in [
         (
             Limits {
                 archive_size: 1,
                 ..Limits::default()
             },
-            "archive bytes",
-            1,
+            LimitExceeded::ArchiveSize(1),
         ),
         (
             Limits {
                 entries: 0,
                 ..Limits::default()
             },
-            "entry count",
-            0,
+            LimitExceeded::EntryCount(0),
         ),
         (
             Limits {
                 metadata_size: 1,
                 ..Limits::default()
             },
-            "metadata bytes",
-            1,
+            LimitExceeded::MetadataSize(1),
         ),
         (
             Limits {
                 member_size: 6,
                 ..Limits::default()
             },
-            "decoded member bytes",
-            6,
+            LimitExceeded::MemberSize(6),
         ),
         (
             Limits {
                 total_size: 6,
                 ..Limits::default()
             },
-            "total decoded bytes",
-            6,
+            LimitExceeded::TotalSize(6),
         ),
     ] {
         assert!(matches!(
             read_validated(&mut Cursor::new(&bytes), limits).await,
-            Err(FrameError::Limit { resource, limit })
-                if resource == expected_resource && limit == expected_limit
+            Err(FrameError::Limit(limit)) if limit == expected
         ));
     }
 }
@@ -867,20 +861,20 @@ async fn rejects_directory_limits_before_reading_entries() {
         .build();
         let directory_size = (archive.end - archive.central - if zip64 { 76 } else { 0 }) as u64;
 
-        for (limits, expected_resource) in [
+        for (limits, expected) in [
             (
                 Limits {
                     entries: 0,
                     ..Limits::default()
                 },
-                "entry count",
+                LimitExceeded::EntryCount(0),
             ),
             (
                 Limits {
                     metadata_size: directory_size - 1,
                     ..Limits::default()
                 },
-                "metadata bytes",
+                LimitExceeded::MetadataSize(directory_size - 1),
             ),
         ] {
             let mut source = Observed::new(archive.bytes.clone());
@@ -889,7 +883,7 @@ async fn rejects_directory_limits_before_reading_entries() {
             source.fail_at = Some(archive.central as u64);
             assert!(matches!(
                 Index::read(&mut source, limits).await,
-                Err(FrameError::Limit { resource, .. }) if resource == expected_resource
+                Err(FrameError::Limit(limit)) if limit == expected
             ));
             assert_eq!(source.fail_at, Some(archive.central as u64));
         }
@@ -1727,10 +1721,7 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
         } else {
             assert!(matches!(
                 result,
-                Err(FrameError::Limit {
-                    resource: "metadata bytes",
-                    limit,
-                }) if limit == metadata_size
+                Err(FrameError::Limit(LimitExceeded::MetadataSize(limit))) if limit == metadata_size
             ));
         }
     }
@@ -1748,10 +1739,7 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
             },
         )
         .await,
-        Err(FrameError::Limit {
-            resource: "metadata bytes",
-            limit,
-        }) if limit == directory_budget - 1
+        Err(FrameError::Limit(LimitExceeded::MetadataSize(limit))) if limit == directory_budget - 1
     ));
     assert_eq!(source.fail_at, Some(end_offset as u64 + 56));
 
@@ -1902,7 +1890,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
         if !valid {
             assert!(matches!(
                 index.entry(&mut source, 0).await,
-                Err(FrameError::Limit { .. })
+                Err(FrameError::Limit(_))
             ));
             continue;
         }
