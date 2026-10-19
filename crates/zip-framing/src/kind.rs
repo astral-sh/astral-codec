@@ -1,11 +1,13 @@
-use crate::{CentralDirectoryEntry, Error, HostSystem, UnixData, constants::version, invalid};
+use crate::{
+    CentralDirectoryEntry, Error, HostSystem, constants::version, invalid, record::array_at,
+};
 
 /// A ZIP member's kind, determined from its reconciled metadata.
 ///
-/// This describes the archive entry without imposing an extraction policy.
-/// Link targets remain available through [`crate::Entry::unix_data`] or
-/// the member's payload. Targets in payloads have not been validated.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+/// This describes the archive entry without imposing an extraction policy. Link
+/// targets from a PKWARE UNIX extra field are nonempty UTF-8 without NUL bytes.
+/// Targets in payloads have not been validated.
+#[derive(Clone, Debug, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum EntryKind {
     /// A regular file, including entries with no explicit file type.
@@ -13,21 +15,44 @@ pub enum EntryKind {
     /// A directory.
     Directory,
     /// A symbolic link with a target in the UNIX extra field or payload.
-    SymbolicLink,
+    SymbolicLink {
+        /// The target from the PKWARE UNIX extra field, if any.
+        unix_target: Option<String>,
+    },
     /// A hard link with a nonempty target in the UNIX extra field.
-    HardLink,
+    HardLink {
+        /// The target from the PKWARE UNIX extra field.
+        target: String,
+    },
     /// A character device.
-    CharacterDevice,
+    CharacterDevice {
+        /// Device numbers from the PKWARE UNIX extra field, if any.
+        numbers: Option<DeviceNumbers>,
+    },
     /// A block device.
-    BlockDevice,
+    BlockDevice {
+        /// Device numbers from the PKWARE UNIX extra field, if any.
+        numbers: Option<DeviceNumbers>,
+    },
     /// A named pipe.
     Fifo,
     /// A UNIX socket.
-    Socket,
+    Socket {
+        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
+        unix_data: Option<Vec<u8>>,
+    },
     /// A DOS volume label.
-    VolumeLabel,
+    VolumeLabel {
+        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
+        unix_data: Option<Vec<u8>>,
+    },
     /// An unrecognized UNIX file type, masked from the mode.
-    Unknown(u16),
+    Unknown {
+        /// The masked UNIX file-type bits.
+        mode: u16,
+        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
+        unix_data: Option<Vec<u8>>,
+    },
 }
 
 impl EntryKind {
@@ -35,66 +60,109 @@ impl EntryKind {
         directory: &CentralDirectoryEntry,
         unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
-    ) -> Result<(Self, Option<UnixData>), Error> {
-        let extra = unix_data.as_deref().filter(|data| !data.is_empty());
-        let is_directory = directory.path().ends_with('/') || attributes.dos_directory;
-        let kind = if attributes.dos_volume_label {
-            Self::VolumeLabel
-        } else {
-            match UnixFileType::from(attributes.unix_mode) {
-                UnixFileType::Unspecified if is_directory => Self::Directory,
-                UnixFileType::Unspecified | UnixFileType::Regular if !is_directory => {
-                    if extra.is_some() {
-                        Self::HardLink
-                    } else {
-                        Self::File
-                    }
-                }
-                UnixFileType::Directory => Self::Directory,
-                UnixFileType::SymbolicLink if !is_directory => Self::SymbolicLink,
-                UnixFileType::CharacterDevice if !is_directory => Self::CharacterDevice,
-                UnixFileType::BlockDevice if !is_directory => Self::BlockDevice,
-                UnixFileType::Fifo if !is_directory => Self::Fifo,
-                UnixFileType::Socket if !is_directory => Self::Socket,
-                UnixFileType::Unknown(mode) if !is_directory => Self::Unknown(mode),
-                _ => {
-                    return Err(invalid(
-                        directory.position(),
-                        "inconsistent file attributes",
-                    ));
-                }
-            }
+    ) -> Result<Self, Error> {
+        let unix_data = unix_data.filter(|data| !data.is_empty());
+        if attributes.dos_volume_label {
+            return Ok(Self::VolumeLabel { unix_data });
+        }
+
+        let position = directory.position();
+        let file_type = match (
+            UnixFileType::from(attributes.unix_mode),
+            directory.path().ends_with('/') || attributes.dos_directory,
+        ) {
+            (UnixFileType::Unspecified | UnixFileType::Directory, true) => UnixFileType::Directory,
+            (file_type, false) => file_type,
+            _ => return Err(invalid(position, "inconsistent file attributes")),
         };
 
         if matches!(
-            kind,
-            Self::Directory | Self::CharacterDevice | Self::BlockDevice | Self::Fifo | Self::Socket
+            file_type,
+            UnixFileType::Directory
+                | UnixFileType::CharacterDevice
+                | UnixFileType::BlockDevice
+                | UnixFileType::Fifo
+                | UnixFileType::Socket
         ) && (directory.size() != 0 || directory.crc32() != 0)
         {
-            return Err(invalid(
-                directory.position(),
-                "non-file member has payload data",
-            ));
+            return Err(invalid(position, "non-file member has payload data"));
         }
 
-        if matches!(kind, Self::Directory) && directory.version_needed() < version::V2_0 {
+        if file_type == UnixFileType::Directory && directory.version_needed() < version::V2_0 {
             return Err(invalid(
-                directory.position(),
+                position,
                 "directory requires extraction version 2.0",
             ));
         }
 
-        if matches!(kind, Self::SymbolicLink) && directory.size() == 0 && extra.is_none() {
-            return Err(invalid(directory.position(), "empty symbolic-link target"));
+        if file_type == UnixFileType::SymbolicLink && directory.size() == 0 && unix_data.is_none() {
+            return Err(invalid(position, "empty symbolic-link target"));
         }
 
-        Ok((
-            kind,
-            unix_data
-                .map(|data| UnixData::parse(kind, data, directory.position()))
-                .transpose()?,
-        ))
+        if matches!(file_type, UnixFileType::Directory | UnixFileType::Fifo) && unix_data.is_some()
+        {
+            return Err(invalid(position, "unexpected UNIX file-type data"));
+        }
+
+        Ok(match file_type {
+            UnixFileType::Unspecified | UnixFileType::Regular => match unix_data {
+                Some(data) => Self::HardLink {
+                    target: parse_link_target(data, position)?,
+                },
+                None => Self::File,
+            },
+            UnixFileType::Directory => Self::Directory,
+            UnixFileType::SymbolicLink => Self::SymbolicLink {
+                unix_target: unix_data
+                    .map(|data| parse_link_target(data, position))
+                    .transpose()?,
+            },
+            UnixFileType::CharacterDevice => Self::CharacterDevice {
+                numbers: DeviceNumbers::parse(unix_data, position)?,
+            },
+            UnixFileType::BlockDevice => Self::BlockDevice {
+                numbers: DeviceNumbers::parse(unix_data, position)?,
+            },
+            UnixFileType::Fifo => Self::Fifo,
+            UnixFileType::Socket => Self::Socket { unix_data },
+            UnixFileType::Unknown(mode) => Self::Unknown { mode, unix_data },
+        })
     }
+}
+
+/// Device numbers from a PKWARE UNIX extra field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct DeviceNumbers {
+    /// The device's major number.
+    pub major: u32,
+    /// The device's minor number.
+    pub minor: u32,
+}
+
+impl DeviceNumbers {
+    fn parse(data: Option<Vec<u8>>, position: u64) -> Result<Option<Self>, Error> {
+        let Some(data) = data else {
+            return Ok(None);
+        };
+
+        let bytes: [u8; 8] = data
+            .as_slice()
+            .try_into()
+            .map_err(|_| invalid(position, "invalid UNIX device numbers"))?;
+        Ok(Some(Self {
+            major: u32::from_le_bytes(array_at::<0, 4, _>(&bytes)),
+            minor: u32::from_le_bytes(array_at::<4, 4, _>(&bytes)),
+        }))
+    }
+}
+
+fn parse_link_target(data: Vec<u8>, position: u64) -> Result<String, Error> {
+    let target =
+        String::from_utf8(data).map_err(|_| invalid(position, "non-UTF-8 UNIX link target"))?;
+    if target.contains('\0') {
+        return Err(invalid(position, "NUL in UNIX link target"));
+    }
+    Ok(target)
 }
 
 /// The file-type bits of a UNIX mode, excluding permissions.
