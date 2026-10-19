@@ -191,6 +191,10 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
                     });
                 }
 
+                // APPNOTE 4.5.7 defines a symbolic-link target in the optional PKWARE
+                // UNIX extra field (0x000d). Writers including Info-ZIP, libarchive, and
+                // our encoder store the target in the member payload by convention.
+                // If both contain targets, require an exact match to avoid ambiguity.
                 if let Some(expected) = expected {
                     if size == 0 {
                         target = expected.to_owned();
