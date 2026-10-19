@@ -143,18 +143,25 @@ impl CompletedMember<'_> {
 
     /// Serializes the matching central-directory header.
     pub fn central_header(&self) -> Vec<u8> {
-        let mut bytes = Vec::with_capacity(self.header.central_header_size());
-        push32(&mut bytes, signature::CENTRAL);
-        push16(&mut bytes, VERSION_MADE_BY);
+        let mut bytes = Vec::new();
+        self.append_central_header(&mut bytes);
+        bytes
+    }
+
+    /// Appends the matching central-directory header to `bytes`.
+    pub fn append_central_header(&self, bytes: &mut Vec<u8>) {
+        bytes.reserve(self.header.central_header_size());
+        push32(bytes, signature::CENTRAL);
+        push16(bytes, VERSION_MADE_BY);
         bytes.extend_from_slice(&self.common().to_bytes());
-        push16(&mut bytes, self.header.path.len() as u16);
+        push16(bytes, self.header.path.len() as u16);
         push16(
-            &mut bytes,
+            bytes,
             (extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE) as u16,
         );
-        push16(&mut bytes, 0); // Comment length.
-        push16(&mut bytes, 0); // Starting disk.
-        push16(&mut bytes, 0); // Internal attributes.
+        push16(bytes, 0); // Comment length.
+        push16(bytes, 0); // Starting disk.
+        push16(bytes, 0); // Internal attributes.
 
         let (file_type, permissions) = match self.header.kind {
             EntryKind::File { executable: true } => (UnixFileType::Regular, 0o755),
@@ -168,21 +175,19 @@ impl CompletedMember<'_> {
             0
         };
         push32(
-            &mut bytes,
+            bytes,
             (u32::from(u16::from(file_type) | permissions) << ExternalAttributes::UNIX_MODE_SHIFT)
                 | dos,
         );
-        push32(&mut bytes, u32::MAX);
+        push32(bytes, u32::MAX);
 
         bytes.extend_from_slice(self.header.path.as_bytes());
 
-        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
-        push16(&mut bytes, extra::ZIP64_CENTRAL_SIZE as u16);
-        push64(&mut bytes, self.uncompressed);
-        push64(&mut bytes, self.compressed);
-        push64(&mut bytes, self.offset);
-
-        bytes
+        push16(bytes, u16::from(ExtraHeaderId::Zip64));
+        push16(bytes, extra::ZIP64_CENTRAL_SIZE as u16);
+        push64(bytes, self.uncompressed);
+        push64(bytes, self.compressed);
+        push64(bytes, self.offset);
     }
 
     /// Returns a [`Common`] for this completed member's common metadata.
