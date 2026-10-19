@@ -25,10 +25,9 @@ let mut builder = ZipEncoder::new(output)
     .with_compression(CompressionMethod::Deflate)
     .builder();
 builder.add_file("hello.txt", &b"hello\n"[..], EntryMetadata::default()).await?;
-builder.add_file_with_options(
+builder.add_file(
     "raw.bin",
     &b"store these bytes"[..],
-    EntryMetadata::default(),
     ZipFileOptions::default().with_compression(CompressionMethod::Stored),
 ).await?;
 builder.finish().await?;
@@ -39,9 +38,10 @@ builder.finish().await?;
 The output must implement `AsyncWrite + AsyncSeek + Unpin`, be empty, and start
 at byte zero. Use `std::io::Cursor<Vec<u8>>` for an in-memory archive.
 
-`ZipFileOptions` overrides compression for one file. Default options, plain
-`add_file`, and recursive builds use the encoder's configured compression method.
-Empty files are always stored.
+`ZipFileOptions` overrides compression for one file. Use
+`ZipFileOptions::from(metadata)` to combine an override with `EntryMetadata`.
+Files without an override and recursive builds use the encoder's configured
+compression method. Empty files are always stored.
 
 `ZipArchive::entries` exposes indexed members; call `directory()` on an entry
 to access its central-directory metadata. `ZipArchive::member(index)` selects

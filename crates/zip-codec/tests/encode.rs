@@ -132,9 +132,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             .builder();
 
         for (path, options, contents, _) in cases {
-            builder
-                .add_file_with_options(path, contents, EntryMetadata::default(), options)
-                .await?;
+            builder.add_file(path, contents, options).await?;
         }
 
         let mut archive = ZipArchive::open(builder.finish_into_inner().await?.into_inner()).await?;

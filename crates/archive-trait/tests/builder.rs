@@ -54,6 +54,20 @@ impl RecordedEntry {
 #[error("injected format failure")]
 struct MockError;
 
+struct MockFileOptions {
+    metadata: EntryMetadata,
+    custom: Option<String>,
+}
+
+impl From<EntryMetadata> for MockFileOptions {
+    fn from(metadata: EntryMetadata) -> Self {
+        Self {
+            metadata,
+            custom: None,
+        }
+    }
+}
+
 struct MockFormat {
     entries: Rc<RefCell<Vec<RecordedEntry>>>,
     finished: bool,
@@ -112,7 +126,7 @@ impl MockFormat {
 
 impl ArchiveBuilder for MockFormat {
     type Error = MockError;
-    type FileOptions = Option<String>;
+    type FileOptions = MockFileOptions;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         self.finished = true;
@@ -123,7 +137,6 @@ impl ArchiveBuilder for MockFormat {
         &mut self,
         path: &str,
         payload: &mut FilePayload<'_>,
-        metadata: EntryMetadata,
         options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         if self.recoverable_failure.as_deref() == Some(path) {
@@ -148,9 +161,9 @@ impl ArchiveBuilder for MockFormat {
         self.entries.borrow_mut().push(RecordedEntry::File {
             path: path.to_owned(),
             data,
-            executable: metadata.is_executable(),
+            executable: options.metadata.is_executable(),
             chunks,
-            options,
+            options: options.custom,
         });
         Ok(())
     }
@@ -210,11 +223,13 @@ async fn manual_entries_preserve_order_metadata_options_and_collision_state() {
     let entries = format.entries();
     let mut builder = format.builder();
     builder
-        .add_file_with_options(
+        .add_file(
             "bin/tool",
             b"run".as_slice(),
-            EntryMetadata::default().executable(true),
-            Some("custom".to_owned()),
+            MockFileOptions {
+                metadata: EntryMetadata::default().executable(true),
+                custom: Some("custom".to_owned()),
+            },
         )
         .await
         .expect("first entry should be added");
@@ -233,11 +248,13 @@ async fn manual_entries_preserve_order_metadata_options_and_collision_state() {
     for path in ["bin/tool", "bin/tool/child"] {
         assert!(matches!(
             builder
-                .add_file_with_options(
+                .add_file(
                     path,
                     b"".as_slice(),
-                    EntryMetadata::default(),
-                    Some("rejected".to_owned()),
+                    MockFileOptions {
+                        metadata: EntryMetadata::default(),
+                        custom: Some("rejected".to_owned()),
+                    },
                 )
                 .await,
             Err(BuildError::PathCollision { .. })
