@@ -1,123 +1,64 @@
-# CONTRIBUTING
+# Contributing
 
 ## Architecture
 
+`archive-trait` defines the shared member model and owns format-neutral
+filesystem extraction and archive building. Its builder handles name validation,
+collision tracking, filesystem traversal, and cancellation. Each codec defines
+and interprets its own file options.
+
 ### Tar archives
 
-There are a few important architectural divisions/separations of concerns
-to be aware of when making changes.
+Reading proceeds through three format-specific layers:
 
-Archive reading has four abstraction layers, from lowest to highest:
-
-- tar-framing: the _physical_ layer turns an asynchronous input source into a
+- `tar-framing`'s _physical_ layer turns an asynchronous input source into a
   stream of tar blocks according to the pax or GNU tar state machine.
-  This is the lowest level of abstraction.
-- tar-framing: the _logical_ layer turns a stream of blocks from the physical layer
-  into a stream of _assembled members_, i.e. tar entries along with
-  their relevant pax or GNU metadata.
-- tar-codec: the _decode_ layer validates tar-specific policy and projects
-  assembled tar members into the format-neutral archive member model.
-- archive-trait: the _extract_ layer turns format-neutral archive members into
-  files, directories, links, and other destination state on disk.
+- `tar-framing`'s _logical_ layer assembles those blocks into members with their
+  pax or GNU metadata.
+- `tar-codec` validates tar-specific policy and projects assembled members into
+  the shared member model.
 
-Archive building follows the same separation in reverse:
-
-- archive-trait: the _build_ layer wraps format writers in a stateful engine
-  that owns entry addition, name validation, collision tracking, recursive
-  filesystem traversal, source streaming, and poisoning semantics.
-  It forwards format-specific file options to the writer; each codec defines
-  and interprets its own options type.
-- tar-codec: the _encode_ layer implements the format-writer hooks that project
-  generic build operations into pax members and owns tar framing, padding,
-  sequence numbers, and terminators.
-- tar-framing: the _physical_ write layer serializes individual pax members.
-
-These layers/concerns should be preserved when making changes.
-For example, any change that affects framing (which blocks are considered
-headers, extensions, data, etc.) should occur in the physical layer, while a
-change to source traversal, path containment, or filesystem behavior belongs in
-`archive-trait`.
+When writing, `tar-codec` projects generic build operations into pax members and
+owns padding, sequence numbers, and terminators. `tar-framing` serializes each
+member.
 
 ### ZIP archives
 
-ZIP reading starts from a seekable source. `zip-framing` finds the end records,
-resolves ZIP64 fields, and reads the central directory through a bounded window.
-The index preserves directory order and derives each member's physical boundary
-from sorted local offsets, without fetching local records during opening.
+ZIP reading requires a seekable source whose contents remain unchanged.
+`zip-framing` validates the end records and central directory, preserves
+directory order, and derives each member's physical bounds. It checks local
+records on member access or full metadata validation. Only checked entries
+expose payload offsets and reconciled metadata.
 
-`IndexedEntry` owns a `CentralDirectoryEntry` with declared metadata and tracks the
-derived record boundary. `Index` owns the resolution cache, accessible through
-`Index::resolved`. `Index::entry` checks a selected local header, extras,
-descriptor, exact record extent, and kind-specific metadata
-before constructing a borrowed `Entry`. The resolved member data is cached only
-after every check succeeds; payload offsets, reconciled UNIX extras, and the
-ZIP-native `EntryKind` are available only through that checked type.
-Link targets in UNIX extras must be UTF-8 and contain no NUL bytes.
-`Entry::kind` returns the cached kind without I/O or further validation.
-`Index::validate_all` checks all members without decoding payloads. Local metadata
-budgets are charged once per successful resolution.
+`zip-codec` projects checked entries into the shared member model and owns
+random access, decompression, and payload integrity checks. It drains and
+validates an unfinished payload before advancing to another member; errors or
+cancellation poison the reader. `ZipArchive::validate_all` checks every member's
+metadata and projection, but does not verify unread payloads.
 
-Parsing constructors own their resource checks. Callers must not need separate
-validation or budget calls to make a returned value usable. Check limits before
-allocating variable-size metadata and commit usage only after successful
-construction. The index and encoder share `zip-framing::Budget` for limit checks
-and cumulative metadata and uncompressed-size accounting. Both charge a pending
-copy and commit it after the operation succeeds.
+When writing, `zip-codec` streams payloads and retains bounded central-directory
+metadata; `zip-framing` serializes UTF-8 ZIP64 headers and end records. The
+encoder requires seekable output to fill in each local header after streaming
+its payload. See [SECURITY.md](SECURITY.md#zip-archives) for validation
+guarantees and resource limits.
 
-`zip-codec` resolves entries before projecting them into `archive-trait` members.
-It owns raw DEFLATE processing, decoded-size and CRC checks, payload lending,
-random access, and cursor poisoning. Advancing past an unfinished member drains
-and validates its payload. `ZipArchive::validate_all` also checks whether member
-kinds can be projected and enforces the symbolic-link size limit. Symbolic-link
-payloads are decoded and validated by the codec. Framing exposes volume labels,
-sockets, and unknown UNIX types; the codec rejects these kinds because they
-cannot be projected.
-`reader_mut().await` drains an active payload before lending the immutable source
-for caller-controlled prefetching or seeking. Filesystem extraction remains in
-`archive-trait`.
+## Development checks
 
-Decoder I/O runs through a private operation guard. The archive remains poisoned
-unless the operation commits after all fallible work succeeds. Member preparation
-returns owned metadata before attaching a payload that borrows the archive.
-
-Writing follows the same separation. `archive-trait::Builder` handles names,
-collisions, traversal, and cancellation. `zip-codec::ZipEncoder` streams payloads
-and retains bounded central-directory metadata. `zip-framing::write` serializes
-UTF-8 ZIP64 headers and end records. ZIP output requires seeking so the encoder
-can fill in each local header after streaming its payload, without descriptors.
-
-Test record-layout behavior in `zip-framing/tests` and compression, projection,
-or builder behavior in `zip-codec/tests`. The checked-in Python-generated ZIP
-fixtures can be reproduced with
-`python3 crates/zip-codec/tests/fixtures/generate.py`; Python is not required to
-run the Rust tests.
-
-## Formatting and linting
-
-Linting and formatting:
+Run linting, formatting, and tests:
 
 ```shell
 cargo clippy --all-targets -- -D warnings
 cargo fmt --all --check
-```
-
-Run tests:
-
-```shell
 cargo test
 ```
 
-In general, integration tests are preferred over unit tests. Unit tests
-should be used primarily for small, pure private helpers.
+Prefer integration tests; use unit tests primarily for small, pure private
+helpers. For ZIP changes, test record layout in `crates/zip-framing/tests` and
+compression, projection, or builder behavior in `crates/zip-codec/tests`.
 
-## Releases
-
-1. Run [Prepare release](https://github.com/astral-sh/astral-codec/actions/workflows/release-prepare.yml)
-   from `main` with the version to release, without a `v` prefix.
-2. Review and merge the version bump PR.
-3. Run [Release](https://github.com/astral-sh/astral-codec/actions/workflows/release.yml)
-   from `main` with the same version.
-4. Approve the `release-gate` deployment.
+Regenerate the checked-in ZIP fixtures with
+`python3 crates/zip-codec/tests/fixtures/generate.py`. Python is not required to
+run the Rust tests.
 
 ## Benchmarking
 
@@ -129,28 +70,25 @@ cargo bench -p tar-codec --bench comparison --locked
 cargo bench -p tar-framing --bench framing --locked
 ```
 
-The `tar-codec` comparison target compares `tar-codec`, `tar`, and `astral-tokio-tar` on
-recursive directory encoding and USTAR extraction.
+The `tar-codec` comparison target measures recursive directory encoding and
+USTAR extraction across `tar-codec`, `tar`, and `astral-tokio-tar`.
 
-ZIP's CodSpeed benchmarks use in-memory ZIP64 archives:
+The ZIP CodSpeed targets use in-memory ZIP64 archives:
 
-- `zip-framing --bench framing` measures header serialization, directory
-  indexing, and uncached local-record validation with single-entry, many-entry,
-  and long Unicode path fixtures.
-- `zip-codec --bench codec` measures encoding and payload decoding with Stored
-  and DEFLATE. Decoding excludes directory indexing. The fixtures cover large
-  compressible and incompressible files, many small files, a single 128-byte
-  file, and a mixed 64-file package.
+- `zip-framing --bench framing`: header serialization, directory indexing, and
+  uncached local-record validation.
+- `zip-codec --bench codec`: encoding and payload decoding for stored and
+  DEFLATE members. Decoding excludes directory indexing.
 
-CodSpeed builds `codec` with `--features bench-allocator`: reallocations always
-move, so buffer growth has a consistent cost. Smoke-test these benchmarks with:
+CodSpeed enables `bench-allocator` for `zip-codec --bench codec`: reallocations
+always move, so buffer growth has a consistent cost. Smoke-test both targets with:
 
 ```shell
 cargo test -p zip-framing --bench framing --locked -- --test
 cargo test -p zip-codec --bench codec --locked -- --test
 ```
 
-### Comparative benchmarks
+### ZIP wheel corpus
 
 Run the local ZIP comparisons (index, decode, extract) with:
 
@@ -163,8 +101,8 @@ Set `WHEEL_CORPUS_DIR` to override the default cache in `target/wheel-corpus`.
 
 ### CodSpeed
 
-[The benchmark workflow](.github/workflows/benchmark.yml) runs on pull requests
-and pushes to `main`, and supports manual runs:
+[The benchmark workflow](.github/workflows/benchmark.yml) runs for relevant
+changes in pull requests and pushes to `main`, and supports manual runs:
 
 - `tar-framing --bench framing`, `zip-framing --bench framing`, and
   `zip-codec --bench codec`: CPU simulation on GitHub-hosted Linux runners.
@@ -197,3 +135,12 @@ To select only our implementation in the tar comparison target, use:
 ```shell
 uv run --only-dev --locked cargo codspeed run -p tar-codec --bench comparison -m walltime -- '/tar-codec(\]|$)'
 ```
+
+## Releases
+
+1. Run [Prepare release](https://github.com/astral-sh/astral-codec/actions/workflows/release-prepare.yml)
+   from `main` with the version to release, without a `v` prefix.
+2. Review and merge the version bump PR.
+3. Run [Release](https://github.com/astral-sh/astral-codec/actions/workflows/release.yml)
+   from `main` with the same version.
+4. Approve the `release-gate` deployment.
