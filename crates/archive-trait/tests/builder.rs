@@ -29,6 +29,7 @@ enum RecordedEntry {
         data: Vec<u8>,
         executable: bool,
         chunks: usize,
+        options: Option<String>,
     },
     Directory(String),
     SymbolicLink {
@@ -44,6 +45,7 @@ impl RecordedEntry {
             data: data.to_vec(),
             executable,
             chunks: 1,
+            options: None,
         }
     }
 }
@@ -51,6 +53,20 @@ impl RecordedEntry {
 #[derive(Debug, Error)]
 #[error("injected format failure")]
 struct MockError;
+
+struct MockFileOptions {
+    metadata: EntryMetadata,
+    custom: Option<String>,
+}
+
+impl From<EntryMetadata> for MockFileOptions {
+    fn from(metadata: EntryMetadata) -> Self {
+        Self {
+            metadata,
+            custom: None,
+        }
+    }
+}
 
 struct MockFormat {
     entries: Rc<RefCell<Vec<RecordedEntry>>>,
@@ -110,6 +126,7 @@ impl MockFormat {
 
 impl ArchiveBuilder for MockFormat {
     type Error = MockError;
+    type FileOptions = MockFileOptions;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         self.finished = true;
@@ -120,7 +137,7 @@ impl ArchiveBuilder for MockFormat {
         &mut self,
         path: &str,
         payload: &mut FilePayload<'_>,
-        metadata: EntryMetadata,
+        options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>> {
         if self.recoverable_failure.as_deref() == Some(path) {
             return Err(BuildFailure::recoverable(BuildError::Encoder(MockError)));
@@ -144,8 +161,9 @@ impl ArchiveBuilder for MockFormat {
         self.entries.borrow_mut().push(RecordedEntry::File {
             path: path.to_owned(),
             data,
-            executable: metadata.is_executable(),
+            executable: options.metadata.is_executable(),
             chunks,
+            options: options.custom,
         });
         Ok(())
     }
@@ -200,7 +218,7 @@ async fn finishing_into_inner_returns_the_finalized_format_writer() {
 }
 
 #[tokio::test]
-async fn manual_files_and_directories_preserve_order_metadata_and_collision_state() {
+async fn manual_entries_preserve_order_metadata_options_and_collision_state() {
     let format = MockFormat::new();
     let entries = format.entries();
     let mut builder = format.builder();
@@ -208,7 +226,10 @@ async fn manual_files_and_directories_preserve_order_metadata_and_collision_stat
         .add_file(
             "bin/tool",
             b"run".as_slice(),
-            EntryMetadata::default().executable(true),
+            MockFileOptions {
+                metadata: EntryMetadata::default().executable(true),
+                custom: Some("custom".to_owned()),
+            },
         )
         .await
         .expect("first entry should be added");
@@ -227,7 +248,14 @@ async fn manual_files_and_directories_preserve_order_metadata_and_collision_stat
     for path in ["bin/tool", "bin/tool/child"] {
         assert!(matches!(
             builder
-                .add_file(path, b"".as_slice(), EntryMetadata::default(),)
+                .add_file(
+                    path,
+                    b"".as_slice(),
+                    MockFileOptions {
+                        metadata: EntryMetadata::default(),
+                        custom: Some("rejected".to_owned()),
+                    },
+                )
                 .await,
             Err(BuildError::PathCollision { .. })
         ));
@@ -244,7 +272,13 @@ async fn manual_files_and_directories_preserve_order_metadata_and_collision_stat
     assert_eq!(
         entries.borrow().as_slice(),
         [
-            RecordedEntry::file("bin/tool", b"run", true),
+            RecordedEntry::File {
+                path: "bin/tool".to_owned(),
+                data: b"run".to_vec(),
+                executable: true,
+                chunks: 1,
+                options: Some("custom".to_owned()),
+            },
             RecordedEntry::file("README", b"hello", false),
             RecordedEntry::Directory("bin".to_owned()),
             RecordedEntry::file("bin/other", b"other", false),
@@ -274,6 +308,7 @@ async fn manual_entries_stream_async_sources_in_bounded_chunks() {
             data,
             executable: false,
             chunks: 2,
+            options: None,
         }] if path == "streamed"
             && data.len() == LARGE_FILE_BYTES
             && data.iter().all(|byte| *byte == b'x')
@@ -452,6 +487,14 @@ async fn recursive_build_sorts_entries_batches_small_files_and_streams_large_fil
         .expect("directory should be added");
 
     let entries = entries.borrow();
+    assert!(entries.iter().all(|entry| !matches!(
+        entry,
+        RecordedEntry::File {
+            options: Some(_),
+            ..
+        }
+    )));
+
     let paths = entries
         .iter()
         .map(|entry| match entry {
