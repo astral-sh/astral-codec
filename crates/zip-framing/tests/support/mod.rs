@@ -5,7 +5,7 @@ use std::{
     task::{Context, Poll},
 };
 
-use flate2::Crc;
+use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
 #[derive(Default)]
@@ -74,9 +74,7 @@ impl Fixture {
         };
 
         let payload = self.payload.unwrap_or_else(|| b"payload".to_vec());
-        let mut crc = Crc::new();
-        crc.update(&payload);
-        let checksum = self.crc.unwrap_or_else(|| crc.sum());
+        let checksum = self.crc.unwrap_or_else(|| crc32(&payload));
 
         let version = if self.zip64 { 45 } else { 20 };
         let flags = self

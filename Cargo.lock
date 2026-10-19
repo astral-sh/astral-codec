@@ -1516,7 +1516,7 @@ name = "zip-framing"
 version = "0.0.15"
 dependencies = [
  "codspeed-divan-compat",
- "flate2",
+ "crc32fast",
  "memchr",
  "thiserror",
  "tokio",

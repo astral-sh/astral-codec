@@ -119,8 +119,8 @@ Read errors or cancellation poison the archive cursor. Construction uses
 fills in local headers after streaming each payload. Write, seek, or source
 failures after output begins poison the builder, as does cancellation during
 header replacement or cursor restoration. The ZIP crates forbid unsafe Rust;
-CRC and DEFLATE use `flate2` with its `zlib-rs` backend. No native compression
-library is required.
+CRC-32 uses `flate2` or `crc32fast`; DEFLATE uses `flate2` with its `zlib-rs`
+backend. No native compression library is required.
 
 As with tar, concurrent mutation of the input, build sources, or extraction root
 is outside the threat model. Extraction may leave partial destination state after
