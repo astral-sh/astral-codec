@@ -13,42 +13,6 @@ use crate::{
     },
 };
 
-/// Central directory metadata for a ZIP member.
-#[derive(Clone, Debug)]
-struct Metadata {
-    /// The member's path.
-    path: Box<str>,
-    /// Common (fixed size) metadata in a central directory entry.
-    common: Common,
-    /// The effective compressed size declared by the central directory.
-    ///
-    /// If [`Common::compressed`] is [`SizeField::Zip64`], this comes from the
-    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
-    compressed_size: u64,
-    /// The effective uncompressed size declared by the central directory.
-    ///
-    /// If [`Common::uncompressed`] is [`SizeField::Zip64`], this comes from the
-    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
-    size: u64,
-    /// An absolute offset to the central directory entry's corresponding
-    /// local file entry.
-    ///
-    /// If the central directory's 32-bit offset is `u32::MAX`, this comes
-    /// from the ZIP64 extra field; otherwise it is that offset widened to `u64`.
-    ///
-    /// Note that our parser is conservative and rejects ZIPs with arbitrary
-    /// prefixed content, so this is always the offset from the start of the
-    /// source.
-    local_offset: u64,
-    /// The "version made by" field in the central directory entry.
-    made_by: u16,
-    /// The central directory entry's raw external file attributes.
-    ///
-    /// The semantics of this field depend on the system identifier
-    /// within [`Metadata::made_by`].
-    attributes: u32,
-}
-
 /// A member whose local file entry, extras, and optional data descriptor
 /// have been reconciled with the directory and checked for a consistent kind.
 #[derive(Clone, Copy, Debug)]
@@ -108,8 +72,37 @@ pub(super) struct ResolvedMember {
 /// Metadata retained from a member's central directory entry.
 #[derive(Debug)]
 pub struct CentralDirectoryEntry {
-    /// Central directory entry metadata.
-    metadata: Metadata,
+    /// The member's path.
+    path: Box<str>,
+    /// Common (fixed size) metadata in a central directory entry.
+    common: Common,
+    /// The effective compressed size declared by the central directory.
+    ///
+    /// If [`Common::compressed`] is [`SizeField::Zip64`], this comes from the
+    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
+    compressed_size: u64,
+    /// The effective uncompressed size declared by the central directory.
+    ///
+    /// If [`Common::uncompressed`] is [`SizeField::Zip64`], this comes from the
+    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
+    size: u64,
+    /// An absolute offset to the central directory entry's corresponding
+    /// local file entry.
+    ///
+    /// If the central directory's 32-bit offset is `u32::MAX`, this comes
+    /// from the ZIP64 extra field; otherwise it is that offset widened to `u64`.
+    ///
+    /// Note that our parser is conservative and rejects ZIPs with arbitrary
+    /// prefixed content, so this is always the offset from the start of the
+    /// source.
+    local_offset: u64,
+    /// The "version made by" field in the central directory entry.
+    made_by: u16,
+    /// The central directory entry's raw external file attributes.
+    ///
+    /// The semantics of this field depend on the system identifier
+    /// within [`Self::made_by`].
+    attributes: u32,
     /// Extra data retained for local/central reconciliation. ZIP64-only extras
     /// need no copy: their resolved values are already part of the metadata.
     extra: Box<[u8]>,
@@ -118,49 +111,49 @@ pub struct CentralDirectoryEntry {
 impl CentralDirectoryEntry {
     /// Returns the exact UTF-8 archive path, without filesystem normalization.
     pub fn path(&self) -> &str {
-        &self.metadata.path
+        &self.path
     }
 
     /// Returns the raw compression method selected by the headers.
     pub fn method(&self) -> CompressionMethod {
-        self.metadata.common.method
+        self.common.method
     }
 
     /// Returns the expected CRC-32 of the decoded payload.
     pub fn crc32(&self) -> u32 {
-        self.metadata.common.crc
+        self.common.crc
     }
 
     /// Returns the decoded payload length.
     pub fn size(&self) -> u64 {
-        self.metadata.size
+        self.size
     }
 
     /// Returns the encoded payload length, excluding headers and descriptors.
     pub fn compressed_size(&self) -> u64 {
-        self.metadata.compressed_size
+        self.compressed_size
     }
 
     /// Returns the absolute position of the local header.
     pub fn position(&self) -> u64 {
-        self.metadata.local_offset
+        self.local_offset
     }
 
     /// Returns the host-system interpretation of the external attributes.
     ///
     /// Unrecognized identifiers are preserved as [`HostSystem::Unknown`].
     pub fn host_system(&self) -> HostSystem {
-        HostSystem::from((self.metadata.made_by >> 8) as u8)
+        HostSystem::from((self.made_by >> 8) as u8)
     }
 
     /// Returns the raw external file attributes, whose meaning depends on the host.
     pub fn external_attributes(&self) -> u32 {
-        self.metadata.attributes
+        self.attributes
     }
 
     /// Returns the version needed to extract this member.
     pub fn version_needed(&self) -> u16 {
-        self.metadata.common.version
+        self.common.version
     }
 
     pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
@@ -209,15 +202,13 @@ impl CentralDirectoryEntry {
 
         budget.charge_member(sizes.uncompressed)?;
         let entry = Self {
-            metadata: Metadata {
-                path: path.into(),
-                common,
-                compressed_size: sizes.compressed,
-                size: sizes.uncompressed,
-                local_offset,
-                made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
-                attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
-            },
+            path: path.into(),
+            common,
+            compressed_size: sizes.compressed,
+            size: sizes.uncompressed,
+            local_offset,
+            made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
+            attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             extra: if extras.needs_reconciliation() {
                 variable[name_length..name_length + extra_length].into()
             } else {
@@ -275,14 +266,13 @@ impl IndexedEntry {
         // Even without a local read, the fixed header, filename and payload
         // must fit. Exact coverage and descriptor sizes are checked on access.
         let minimum = add(
-            size::LOCAL as u64 + self.directory.metadata.path.len() as u64,
+            size::LOCAL as u64 + self.directory.path.len() as u64,
             self.directory.compressed_size(),
         )?;
         let minimum = add(
             minimum,
             if self
                 .directory
-                .metadata
                 .common
                 .flags
                 .contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
@@ -310,9 +300,9 @@ impl IndexedEntry {
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
     ) -> Result<ResolvedMember, Error> {
-        let metadata = &self.directory.metadata;
+        let directory = &self.directory;
         let boundary = self.boundary;
-        let position = metadata.local_offset;
+        let position = directory.local_offset;
         let mut header = [0; size::LOCAL];
         reader.read_at(position, &mut header, boundary).await?;
         if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::LOCAL {
@@ -336,20 +326,19 @@ impl IndexedEntry {
         let sizes = extras.local_sizes(common, position)?;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
         // Header agreement below also requires identical encoding flags.
-        if &variable[..name_length] != metadata.path.as_bytes() {
+        if &variable[..name_length] != directory.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
-        extras.check_name(&metadata.path, position)?;
+        extras.check_name(&directory.path, position)?;
 
-        let unix_data =
-            extras.resolve(Extras::parse(&self.directory.extra, position)?, position)?;
+        let unix_data = extras.resolve(Extras::parse(&directory.extra, position)?, position)?;
 
         if (Common {
-            crc: metadata.common.crc,
-            compressed: metadata.common.compressed,
-            uncompressed: metadata.common.uncompressed,
+            crc: directory.common.crc,
+            compressed: directory.common.compressed,
+            uncompressed: directory.common.uncompressed,
             ..common
-        }) != metadata.common
+        }) != directory.common
         {
             return Err(invalid(position, "local and central headers disagree"));
         }
@@ -361,33 +350,31 @@ impl IndexedEntry {
                     "descriptor member has nonzero local CRC or sizes",
                 ));
             }
-        } else if common.crc != metadata.common.crc
-            || sizes.compressed != metadata.compressed_size
-            || sizes.uncompressed != metadata.size
+        } else if common.crc != directory.common.crc
+            || sizes.compressed != directory.compressed_size
+            || sizes.uncompressed != directory.size
         {
             return Err(invalid(position, "local and central CRC or sizes disagree"));
         }
 
         let data_offset = add(position, size::LOCAL as u64 + variable.len() as u64)?;
-        let data_end = add(data_offset, metadata.compressed_size)?;
+        let data_end = add(data_offset, directory.compressed_size)?;
         if data_end > boundary {
             return Err(invalid(position, "payload overlaps the next record"));
         }
 
         if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
             let zip64 = sizes.zip64
-                || metadata.common.compressed == SizeField::Zip64
-                || metadata.common.uncompressed == SizeField::Zip64;
+                || directory.common.compressed == SizeField::Zip64
+                || directory.common.uncompressed == SizeField::Zip64;
             self.check_descriptor(reader, data_end, zip64).await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
 
-        let attributes = ExternalAttributes::new(
-            self.directory.host_system(),
-            self.directory.external_attributes(),
-        );
-        let (kind, unix_data) = EntryKind::resolve(&self.directory, unix_data, &attributes)?;
+        let attributes =
+            ExternalAttributes::new(directory.host_system(), directory.external_attributes());
+        let (kind, unix_data) = EntryKind::resolve(directory, unix_data, &attributes)?;
 
         Ok(ResolvedMember {
             data_offset,
@@ -408,7 +395,7 @@ impl IndexedEntry {
         position: u64,
         zip64: bool,
     ) -> Result<(), Error> {
-        let metadata = &self.directory.metadata;
+        let directory = &self.directory;
         let unsigned_length = if zip64 {
             size::ZIP64_DESCRIPTOR as u64
         } else {
@@ -448,9 +435,9 @@ impl IndexedEntry {
             u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?))
         };
 
-        if crc != metadata.common.crc
-            || compressed != metadata.compressed_size
-            || uncompressed != metadata.size
+        if crc != directory.common.crc
+            || compressed != directory.compressed_size
+            || uncompressed != directory.size
         {
             return Err(invalid(
                 position,
