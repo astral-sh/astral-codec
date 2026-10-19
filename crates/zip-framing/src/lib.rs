@@ -35,7 +35,7 @@ use std::io;
 
 use thiserror::Error;
 
-pub use budget::{Budget, BudgetError, Limits};
+pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraHeaderId, UnixData};
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
@@ -92,26 +92,16 @@ pub enum Error {
         feature: &'static str,
     },
     /// A configured resource budget was exceeded.
-    #[error("ZIP exceeds {resource} limit ({limit})")]
-    Limit {
-        /// The exhausted resource.
-        resource: &'static str,
-        /// Configured maximum.
-        limit: u64,
-    },
+    #[error(transparent)]
+    Limit(#[from] LimitExceeded),
 }
 
 impl From<BudgetError> for Error {
     fn from(error: BudgetError) -> Self {
-        let (resource, limit) = match error {
-            BudgetError::ArchiveSize(limit) => ("archive bytes", limit),
-            BudgetError::EntryCount(limit) => ("entry count", limit),
-            BudgetError::MetadataSize(limit) => ("metadata bytes", limit),
-            BudgetError::MemberSize(limit) => ("decoded member bytes", limit),
-            BudgetError::TotalSize(limit) => ("total decoded bytes", limit),
-            BudgetError::Overflow(usage) => return invalid(usage, "offset or size overflow"),
-        };
-        Self::Limit { resource, limit }
+        match error {
+            BudgetError::Limit(limit) => Self::Limit(limit),
+            BudgetError::Overflow(usage) => invalid(usage, "offset or size overflow"),
+        }
     }
 }
 

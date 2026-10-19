@@ -10,7 +10,7 @@ use flate2::{Compress, Compression, FlushCompress, Status};
 use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
-    Budget, BudgetError, CompressionMethod, Limits,
+    Budget, BudgetError, CompressionMethod, LimitExceeded, Limits,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -380,13 +380,8 @@ pub enum EncodeError {
     #[error("empty, oversized, or NUL-containing symbolic-link target")]
     InvalidLink,
     /// A resource budget was exceeded.
-    #[error("ZIP exceeds {resource} limit ({limit})")]
-    Limit {
-        /// The exhausted resource.
-        resource: &'static str,
-        /// Configured maximum.
-        limit: u64,
-    },
+    #[error(transparent)]
+    Limit(#[from] LimitExceeded),
     /// The writer has already emitted its directory and terminators.
     #[error("ZIP writer is already finalized")]
     Finished,
@@ -400,14 +395,9 @@ impl From<EncodeError> for BuildError<EncodeError> {
 
 impl From<BudgetError> for EncodeError {
     fn from(error: BudgetError) -> Self {
-        let (resource, limit) = match error {
-            BudgetError::ArchiveSize(limit) => ("archive bytes", limit),
-            BudgetError::EntryCount(limit) => ("entry count", limit),
-            BudgetError::MetadataSize(limit) => ("metadata bytes", limit),
-            BudgetError::MemberSize(limit) => ("member bytes", limit),
-            BudgetError::TotalSize(limit) => ("total member bytes", limit),
-            BudgetError::Overflow(_) => return Self::Overflow,
-        };
-        Self::Limit { resource, limit }
+        match error {
+            BudgetError::Limit(limit) => Self::Limit(limit),
+            BudgetError::Overflow(_) => Self::Overflow,
+        }
     }
 }
