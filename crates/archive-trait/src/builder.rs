@@ -176,7 +176,7 @@ impl<'a> FilePayload<'a> {
     /// Returns the next chunk of logical, uncompressed source bytes.
     ///
     /// Once this method has been called, the payload cannot be passed to
-    /// [`Builder::add_file`] or [`Builder::add_file_with_options`].
+    /// [`Builder::add_file`].
     pub async fn next_chunk<E>(&mut self) -> Result<Option<&[u8]>, BuildError<E>> {
         self.started = true;
         match &mut self.inner {
@@ -351,11 +351,12 @@ pub trait ArchiveBuilder: Sized {
     /// The archive-format error returned while encoding entries.
     type Error;
 
-    /// Format-specific settings for one regular file.
+    /// Options for one regular file, including format-neutral metadata.
     ///
-    /// Default values should preserve the writer's configured defaults.
-    /// Formats without per-file settings can use `()`.
-    type FileOptions: Default;
+    /// Conversion from [`EntryMetadata`] must preserve the metadata and use
+    /// the writer's configured defaults for format-specific settings.
+    /// Formats without additional settings can use [`EntryMetadata`] directly.
+    type FileOptions: From<EntryMetadata>;
 
     /// Wraps this format writer in a builder using default policy.
     ///
@@ -378,7 +379,6 @@ pub trait ArchiveBuilder: Sized {
         &mut self,
         path: &str,
         payload: &mut FilePayload<'_>,
-        metadata: EntryMetadata,
         options: Self::FileOptions,
     ) -> Result<(), BuildFailure<Self::Error>>;
 
@@ -411,9 +411,10 @@ impl<B: ArchiveBuilder> Builder<B> {
         self
     }
 
-    /// Adds one regular file from a [`FilePayload`] using default file options.
+    /// Adds one regular file from a [`FilePayload`].
     ///
-    /// Use [`Self::add_file_with_options`] to supply format-specific settings.
+    /// Pass [`EntryMetadata`] to use the writer's configured defaults or
+    /// [`ArchiveBuilder::FileOptions`] to configure this file.
     ///
     /// If the payload ends before its declared size or returns an error, the
     /// addition fails and the builder is poisoned if the archive member's
@@ -425,26 +426,7 @@ impl<B: ArchiveBuilder> Builder<B> {
         &mut self,
         path: P,
         payload: impl Into<FilePayload<'a>>,
-        metadata: EntryMetadata,
-    ) -> Result<(), BuildError<B::Error>>
-    where
-        P: AsRef<Path>,
-    {
-        self.add_file_with_options(path, payload, metadata, B::FileOptions::default())
-            .await
-    }
-
-    /// Adds one regular file with format-specific settings.
-    ///
-    /// This applies the same name validation, collision tracking, and payload
-    /// requirements as [`Self::add_file`]. Options are passed to the format
-    /// writer for this file only.
-    pub async fn add_file_with_options<'a, P>(
-        &mut self,
-        path: P,
-        payload: impl Into<FilePayload<'a>>,
-        metadata: EntryMetadata,
-        options: B::FileOptions,
+        options: impl Into<B::FileOptions>,
     ) -> Result<(), BuildError<B::Error>>
     where
         P: AsRef<Path>,
@@ -475,11 +457,12 @@ impl<B: ArchiveBuilder> Builder<B> {
             return Err(BuildError::FilePayloadAlreadyRead);
         }
 
+        let options = options.into();
         payload.swap_buffer(&mut self.state.source_buffer);
         self.state.begin_write();
         let result = self
             .backend
-            .write_file_member(&path, &mut payload, metadata, options)
+            .write_file_member(&path, &mut payload, options)
             .await;
         self.state.complete_write();
         payload.swap_buffer(&mut self.state.source_buffer);
@@ -672,8 +655,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                     .write_file_member(
                         &entry.archive_path,
                         &mut payload,
-                        EntryMetadata::default().executable(executable),
-                        B::FileOptions::default(),
+                        EntryMetadata::default().executable(executable).into(),
                     )
                     .await?;
             }
@@ -691,8 +673,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                     .write_file_member(
                         &entry.archive_path,
                         &mut payload,
-                        EntryMetadata::default().executable(executable),
-                        B::FileOptions::default(),
+                        EntryMetadata::default().executable(executable).into(),
                     )
                     .await;
                 payload.swap_buffer(buffer);
@@ -902,8 +883,7 @@ pub enum BuildError<E> {
         /// The conflicting normalized archive path.
         path: String,
     },
-    /// A file payload was read before it was passed to [`Builder::add_file`]
-    /// or [`Builder::add_file_with_options`].
+    /// A file payload was read before it was passed to [`Builder::add_file`].
     #[error("file payload was already read before being added to the archive")]
     FilePayloadAlreadyRead,
     /// A source filesystem operation failed.
@@ -1089,7 +1069,7 @@ mod tests {
 
     impl ArchiveBuilder for NoopArchiveBuilder {
         type Error = TestError;
-        type FileOptions = ();
+        type FileOptions = EntryMetadata;
 
         async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
             Ok(())
@@ -1099,7 +1079,6 @@ mod tests {
             &mut self,
             _path: &str,
             payload: &mut FilePayload<'_>,
-            _metadata: EntryMetadata,
             _options: Self::FileOptions,
         ) -> Result<(), BuildFailure<Self::Error>> {
             if mem::take(&mut self.fail_next_file) {

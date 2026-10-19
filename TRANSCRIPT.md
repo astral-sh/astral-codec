@@ -17,9 +17,8 @@
   restores usability. Member preparation finishes before lending a payload.
 - Writing uses ZIP64 throughout, including small archives. The pending encoder
   requires seekable output and backpatches local headers without descriptors.
-- Per-file settings use `ArchiveBuilder::FileOptions` and
-  `Builder::add_file_with_options`. Plain `add_file` and recursive builds use
-  default options; `EntryMetadata` remains format-neutral.
+- Per-file settings use `ArchiveBuilder::FileOptions` and `Builder::add_file`.
+  `EntryMetadata` remains format-neutral and uses the writer's configured defaults.
 - `ZipFileOptions::with_compression` overrides the method for one nonempty file.
   Default options inherit the encoder's method; empty files remain stored.
 - Only added runtime dependency: `flate2` with the `zlib-rs` backend.
