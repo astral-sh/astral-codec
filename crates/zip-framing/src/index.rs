@@ -99,6 +99,8 @@ impl Index {
         reader: &mut R,
         limits: Limits,
     ) -> Result<Self, Error> {
+        // Opening owns this budget until the index is complete. Errors and
+        // cancellation discard all charges made by the opening helpers.
         let mut budget = Budget::new(limits);
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
@@ -138,14 +140,20 @@ impl Index {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            let mut boundaries = vec![end.offset; entries.len()];
-            for (ordinal, &index) in order.iter().enumerate() {
-                boundaries[index] = order
-                    .get(ordinal + 1)
-                    .map_or(end.offset, |&next| entries[next].directory().position());
+            // The last entry already has the directory offset as its boundary.
+            // Keep the earliest directory-order error even though assignment
+            // proceeds in physical order.
+            let mut first_error = None;
+            for (&index, &next) in order.iter().zip(order.iter().skip(1)) {
+                let boundary = entries[next].directory().position();
+                if let Err(error) = entries[index].set_boundary(boundary)
+                    && first_error.as_ref().is_none_or(|(first, _)| index < *first)
+                {
+                    first_error = Some((index, error));
+                }
             }
-            for (entry, boundary) in entries.iter_mut().zip(boundaries) {
-                entry.set_boundary(boundary)?;
+            if let Some((_, error)) = first_error {
+                return Err(error);
             }
         }
 
@@ -236,8 +244,7 @@ impl CentralDirectory {
     /// Reads the central directory's location and extent from the end records.
     ///
     /// Validates its bounds and entry count, and charges directory and ZIP64 end
-    /// metadata before returning. Failed or cancelled reads leave the budget
-    /// unchanged.
+    /// metadata before returning.
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
@@ -258,9 +265,8 @@ impl CentralDirectory {
         str::from_utf8(&tail[offset + size::END..])
             .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
 
-        let mut pending_budget = *budget;
         let (offset, size, count, boundary) = if let Some(record) =
-            Zip64EndRecord::read_if_present(reader, position, &mut pending_budget).await?
+            Zip64EndRecord::read_if_present(reader, position, budget).await?
         {
             for (small, large, sentinel) in [
                 (
@@ -331,8 +337,8 @@ impl CentralDirectory {
                 return Err(invalid(position, "ZIP64 sentinel without locator"));
             }
 
-            pending_budget.check_entry_count(count)?;
-            pending_budget.charge_metadata(size)?;
+            budget.check_entry_count(count)?;
+            budget.charge_metadata(size)?;
             (offset, size, count, position)
         };
 
@@ -344,7 +350,6 @@ impl CentralDirectory {
             return Err(invalid(offset, "entry count exceeds directory capacity"));
         }
 
-        *budget = pending_budget;
         Ok(Self {
             offset,
             size,
@@ -353,14 +358,11 @@ impl CentralDirectory {
     }
 
     /// Reads the entries from this checked directory and charges their output sizes.
-    ///
-    /// Failed or cancelled reads leave the budget unchanged.
     async fn read_entries<R: AsyncRead + AsyncSeek + Unpin>(
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
     ) -> Result<Vec<IndexedEntry>, Error> {
-        let mut pending_budget = *budget;
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
         // The entry count and directory size have already passed their budgets.
@@ -385,8 +387,7 @@ impl CentralDirectory {
         }
 
         for _ in 0..self.count {
-            let (entry, next) =
-                CentralDirectoryEntry::read(reader, position, end, &mut pending_budget).await?;
+            let (entry, next) = CentralDirectoryEntry::read(reader, position, end, budget).await?;
             entries.push(IndexedEntry::new(entry, self.offset)?);
             position = next;
 
@@ -400,7 +401,6 @@ impl CentralDirectory {
             ));
         }
 
-        *budget = pending_budget;
         Ok(entries)
     }
 }
@@ -471,7 +471,6 @@ impl Zip64EndRecord {
     /// Reads the record if a ZIP64 locator precedes the classic end record.
     ///
     /// Charges both the directory and this record before reading extensions.
-    /// Failed or cancelled reads leave the budget unchanged.
     async fn read_if_present<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         end_position: u64,
@@ -538,14 +537,12 @@ impl Zip64EndRecord {
         }
 
         let directory_size = u64::from_le_bytes(array_at::<40, 8, _>(&header));
-        let mut pending_budget = *budget;
-        pending_budget.check_entry_count(entry_count)?;
-        pending_budget.charge_metadata(directory_size)?;
-        pending_budget.charge_metadata(locator_position - position)?;
+        budget.check_entry_count(entry_count)?;
+        budget.charge_metadata(directory_size)?;
+        budget.charge_metadata(locator_position - position)?;
         Self::check_extensible_sector(reader, position + size::ZIP64_END as u64, locator_position)
             .await?;
 
-        *budget = pending_budget;
         Ok(Some(Self {
             position,
             directory_offset: u64::from_le_bytes(array_at::<48, 8, _>(&header)),
