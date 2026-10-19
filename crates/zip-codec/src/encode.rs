@@ -252,7 +252,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .await
             .map_err(EncodeError::Io)?;
 
-        self.directory.extend_from_slice(&member.central_header());
+        member.append_central_header(&mut self.directory);
         self.count += 1;
 
         Ok(())
