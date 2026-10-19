@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, str};
 
-use flate2::Crc;
+use crc32fast::hash as crc32;
 
 use crate::{
     EntryKind, Error,
@@ -385,9 +385,7 @@ fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<
         return Err(invalid(position, "invalid Unicode extra field"));
     };
 
-    let mut crc = Crc::new();
-    crc.update(original);
-    if u32::from_le_bytes(*expected_crc) != crc.sum() {
+    if u32::from_le_bytes(*expected_crc) != crc32(original) {
         return Err(invalid(position, "Unicode extra field CRC mismatch"));
     }
 
