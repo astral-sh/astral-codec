@@ -1,6 +1,6 @@
 use std::{error::Error, io::Cursor};
 
-use flate2::Crc;
+use crc32fast::hash as crc32;
 use zip_framing::{
     CompressionMethod, Error as FrameError, HostSystem, Index, Limits,
     write::{EntryKind, PendingMember, end_records},
@@ -102,8 +102,7 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
 #[tokio::test]
 async fn serializes_consistent_zip64_records() -> TestResult {
     let payload = b"payload";
-    let mut crc = Crc::new();
-    crc.update(payload);
+    let checksum = crc32(payload);
 
     let header = PendingMember::new(
         "café",
@@ -112,7 +111,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     )?;
     let central_header_size = header.central_header_size();
     let data_offset = header.local_header_size();
-    let member = header.finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
+    let member = header.finish(checksum, payload.len() as u64, payload.len() as u64, 0)?;
     let mut bytes = member.local_header();
     assert_eq!(bytes.len(), data_offset);
     // Keep wire values independent of the constants shared by reader and writer.
@@ -155,7 +154,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     assert_eq!(entry.directory().version_needed(), 45);
     assert_eq!(entry.data_offset(), data_offset as u64);
     assert_eq!(entry.directory().size(), payload.len() as u64);
-    assert_eq!(entry.directory().crc32(), crc.sum());
+    assert_eq!(entry.directory().crc32(), checksum);
 
     Ok(())
 }
