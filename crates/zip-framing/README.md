@@ -28,3 +28,6 @@ Targets PKWARE APPNOTE 6.3.3 with stored/DEFLATE entries and UTF-8 names/comment
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
 directories, and bytes outside declared records are rejected when the affected
 records are checked. Listing alone does not validate unselected local records.
+
+See [ZIP compatibility and open policy questions](../zip-codec/APPNOTE.md)
+for writer conventions and cases where readers can disagree.
