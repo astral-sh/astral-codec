@@ -74,6 +74,8 @@ that call or traversal of every member, malformed unselected local records and
 some gaps or overlaps can remain undiscovered. Extra fields must be bounded,
 complete records with unique identifiers. Unknown extensions remain opaque
 and do not supply effective names or file types.
+The reader recognizes the [WinZip AES extra field](https://www.winzip.com/en/support/aes-encryption/)
+(`0x9901`) and rejects the entry as encrypted.
 
 Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
 accepted without it. Unicode path extra fields must have a valid CRC and agree
