@@ -6,7 +6,7 @@ use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
-    HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
+    ExtraFieldPolicy, HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -28,6 +28,15 @@ async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
     limits: Limits,
 ) -> Result<Index, FrameError> {
     let mut index = Index::read(reader, limits).await?;
+    index.validate_all(reader).await?;
+    Ok(index)
+}
+
+async fn validate_with_extras<R: AsyncRead + AsyncSeek + Unpin>(
+    reader: &mut R,
+) -> Result<Index, FrameError> {
+    let mut index =
+        Index::read_with_policy(reader, Limits::default(), ExtraFieldPolicy::AllowListed).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -260,7 +269,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     }
     .build();
     let mut reader = Cursor::new(archive.bytes);
-    let index = read_validated(&mut reader, Limits::default()).await?;
+    let index = validate_with_extras(&mut reader).await?;
     let entry = index.resolved(0).ok_or("unresolved entry")?;
     assert_eq!(entry.directory().path(), "n".repeat(258));
     assert_eq!(entry.directory().host_system(), HostSystem::Os400);
@@ -407,7 +416,7 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        let index = validate_with_extras(&mut Cursor::new(archive.bytes)).await?;
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), &expected);
         assert!(entry.has_unix_extra());
@@ -592,12 +601,13 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         set16(&mut archive.bytes, 4, version);
         set16(&mut archive.bytes, archive.central + 6, version);
         let mut source = Cursor::new(&archive.bytes);
-        let mut index = Index::read(
+        let mut index = Index::read_with_policy(
             &mut source,
             Limits {
                 metadata_size: (archive.end - payload.len()) as u64,
                 ..Limits::default()
             },
+            ExtraFieldPolicy::AllowListed,
         )
         .await?;
 
@@ -714,6 +724,52 @@ async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult
 }
 
 #[tokio::test]
+async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult {
+    for (identifier, local, directory) in [
+        (0x000d, vec![0; 12], vec![0; 12]),
+        (0x5455, vec![0], vec![0]),
+        (0x5855, vec![0; 12], vec![0; 8]),
+        (0x6375, unicode_data(b""), unicode_data(b"")),
+        (0x7075, unicode_data(b"file"), unicode_data(b"file")),
+        (0x7855, vec![0; 4], Vec::new()),
+        (0x7875, vec![1, 1, 2, 1, 3], vec![1, 1, 2, 1, 3]),
+    ] {
+        for central in [false, true] {
+            let archive = Fixture {
+                local_extra: field(identifier, &local),
+                central_extra: if central {
+                    field(identifier, &directory)
+                } else {
+                    Vec::new()
+                },
+                zip64: true,
+                ..Fixture::default()
+            }
+            .build();
+            if central {
+                validate_with_extras(&mut Cursor::new(&archive.bytes)).await?;
+            }
+            let mut reader = Cursor::new(archive.bytes);
+            let opened = Index::read(&mut reader, Limits::default()).await;
+            let (result, offset) = if central {
+                (opened.map(|_| ()), archive.central as u64)
+            } else {
+                // A field only in the local header is first seen on member access.
+                (opened?.entry(&mut reader, 0).await.map(|_| ()), 0)
+            };
+            assert!(
+                matches!(result,
+                    Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
+                    if position == offset && rejected == identifier
+                ),
+                "{identifier:#06x}, central={central}"
+            );
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_unsupported_extras_in_either_header() {
     for identifier in [
         0x0007, 0x0008, 0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x2605, 0x6c78, 0x756e,
@@ -730,7 +786,7 @@ async fn rejects_unsupported_extras_in_either_header() {
             let offset = if central { archive.central as u64 } else { 0 };
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    validate_with_extras(&mut Cursor::new(archive.bytes)).await,
                     Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
                         if position == offset && rejected == identifier
                 ),
@@ -752,7 +808,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     };
 
     assert_eq!(
-        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+        validate_with_extras(&mut Cursor::new(fixture.build().bytes))
             .await?
             .entries()[0]
             .directory()
@@ -811,7 +867,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
                 fixture.central_extra = field(0x7075, &value);
             }
             assert!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                validate_with_extras(&mut Cursor::new(fixture.build().bytes))
                     .await
                     .is_err(),
                 "Unicode field={value:?}, local={local}"
@@ -840,7 +896,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         }
         .build();
         assert!(matches!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            validate_with_extras(&mut Cursor::new(archive.bytes)).await,
             Err(FrameError::Invalid {
                 reason: "non-UTF-8 filename" | "non-ASCII filename without UTF-8 flag",
                 ..
@@ -1115,8 +1171,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
                 } else {
                     (archive.end as u64, "non-UTF-8 archive comment")
                 };
-                let result =
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+                let result = validate_with_extras(&mut Cursor::new(archive.bytes)).await;
 
                 if valid {
                     assert!(
@@ -1145,7 +1200,12 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        let result = Index::read_with_policy(
+            &mut Cursor::new(archive.bytes),
+            Limits::default(),
+            ExtraFieldPolicy::AllowListed,
+        )
+        .await;
         if length == unicode.len() {
             result?;
         } else {
@@ -1184,7 +1244,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        let result = validate_with_extras(&mut Cursor::new(archive.bytes)).await;
         if let Some(expected) = expected {
             assert!(
                 matches!(result, Err(FrameError::Invalid { reason, .. }) if reason == expected)
@@ -1412,8 +1472,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
             ..Fixture::default()
         };
 
-        let index =
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+        let index = validate_with_extras(&mut Cursor::new(fixture.build().bytes)).await?;
 
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(
@@ -1436,7 +1495,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
                 }
                 .build();
                 assert!(matches!(
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    validate_with_extras(&mut Cursor::new(archive.bytes)).await,
                     Err(FrameError::Unsupported {
                         position: 0,
                         feature: "ambiguous UNIX hard link"
@@ -1461,7 +1520,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         };
 
         assert!(matches!(
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+            validate_with_extras(&mut Cursor::new(fixture.build().bytes)).await,
             Err(FrameError::Invalid { reason, .. }) if reason == expected
         ));
     }
@@ -1484,7 +1543,7 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
             central_extra: field(identifier, &central),
             ..Fixture::default()
         };
-        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+        validate_with_extras(&mut Cursor::new(fixture.build().bytes)).await?;
     }
 
     for (local, central, expected) in [
@@ -1557,7 +1616,7 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
         .build();
         assert!(
             matches!(
-                read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                validate_with_extras(&mut Cursor::new(archive.bytes)).await,
                 Err(FrameError::Invalid { reason, .. }) if reason == expected
             ),
             "{expected}"
@@ -1585,7 +1644,7 @@ async fn validates_info_zip_ownership() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        validate_with_extras(&mut Cursor::new(archive.bytes)).await?;
     }
 
     for data in [
@@ -1607,8 +1666,7 @@ async fn validates_info_zip_ownership() -> TestResult {
             }
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                        .await,
+                    validate_with_extras(&mut Cursor::new(fixture.build().bytes)).await,
                     Err(FrameError::Invalid {
                         reason: "invalid Info-ZIP extra field layout",
                         ..
@@ -1640,7 +1698,7 @@ async fn validates_info_zip_ownership() -> TestResult {
         }
         .build();
         assert!(matches!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            validate_with_extras(&mut Cursor::new(archive.bytes)).await,
             Err(FrameError::Invalid { reason: actual, .. }) if actual == reason
         ));
     }
@@ -1673,7 +1731,12 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read_with_policy(
+        &mut source,
+        Limits::default(),
+        ExtraFieldPolicy::AllowListed,
+    )
+    .await?;
 
     let entries: &[IndexedEntry] = index.entries();
     let directory: &CentralDirectoryEntry = entries[0].directory();
@@ -1727,7 +1790,12 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     ordered.extend_from_slice(&second.bytes[second.central..second.end]);
     ordered.extend_from_slice(&bytes[end..]);
     let mut source = Cursor::new(ordered);
-    let mut ordered = Index::read(&mut source, Limits::default()).await?;
+    let mut ordered = Index::read_with_policy(
+        &mut source,
+        Limits::default(),
+        ExtraFieldPolicy::AllowListed,
+    )
+    .await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
     assert_eq!(
         ordered.entries()[1].record_range(),
@@ -1927,7 +1995,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
             }
 
             assert!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                validate_with_extras(&mut Cursor::new(fixture.build().bytes))
                     .await
                     .is_err(),
                 "extra {extra:?}, local={local}"
@@ -1950,7 +2018,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
                 fixture.central_extra = extra;
             }
             assert!(matches!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                validate_with_extras(&mut Cursor::new(fixture.build().bytes)).await,
                 Err(FrameError::Invalid {
                     reason: "duplicate extra-field identifier",
                     ..
@@ -1966,7 +2034,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
     }
     .build();
     assert!(matches!(
-        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        validate_with_extras(&mut Cursor::new(archive.bytes)).await,
         Err(FrameError::Unsupported {
             feature: "ZIP64 version-2 directory",
             ..
@@ -2131,7 +2199,12 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     ));
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read_with_policy(
+        &mut source,
+        Limits::default(),
+        ExtraFieldPolicy::AllowListed,
+    )
+    .await?;
     assert_eq!(index.entries().len(), names.len());
     for (entry, name) in index.entries().iter().zip(&names) {
         assert_eq!(entry.directory().path(), name);
@@ -2177,12 +2250,13 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
 
     for (budget, valid) in [(exact_budget - 1, false), (exact_budget, true)] {
         let mut source = Observed::new(archive.bytes.clone());
-        let mut index = Index::read(
+        let mut index = Index::read_with_policy(
             &mut source,
             Limits {
                 metadata_size: budget,
                 ..Limits::default()
             },
+            ExtraFieldPolicy::AllowListed,
         )
         .await?;
         if !valid {

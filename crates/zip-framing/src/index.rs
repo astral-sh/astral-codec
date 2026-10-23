@@ -5,7 +5,7 @@ use memchr::{memmem, memrchr};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, Error, Limits, add,
+    Budget, Error, ExtraFieldPolicy, Limits, add,
     constants::{extra, signature, size, version},
     invalid, member_destination,
     record::{RecordReader, array_at},
@@ -69,6 +69,8 @@ pub struct Index {
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
+    /// The same policy applies to the directory and all subsequent local reads.
+    extra_fields: ExtraFieldPolicy,
     /// Scratch space for local records, cleared between resolutions.
     buffer: Vec<u8>,
 }
@@ -90,6 +92,7 @@ impl Index {
     }
 
     /// Indexes the directory and checks bounds derivable from its records.
+    /// Only ZIP64 member extra fields are accepted by default.
     ///
     /// Local headers and descriptors are checked by [`Self::entry`] on access,
     /// or by [`Self::validate_all`]. The source must remain unchanged and be the
@@ -99,13 +102,25 @@ impl Index {
         reader: &mut R,
         limits: Limits,
     ) -> Result<Self, Error> {
+        Self::read_with_policy(reader, limits, ExtraFieldPolicy::default()).await
+    }
+
+    /// Indexes the directory with the given member extra-field policy.
+    /// The same policy applies when reading local headers.
+    pub async fn read_with_policy<R: AsyncRead + AsyncSeek + Unpin>(
+        reader: &mut R,
+        limits: Limits,
+        extra_fields: ExtraFieldPolicy,
+    ) -> Result<Self, Error> {
         // Opening owns this budget until the index is complete. Errors and
         // cancellation discard all charges made by the opening helpers.
         let mut budget = Budget::new(limits);
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
-        let mut entries = end.read_entries(&mut buffered, &mut budget).await?;
+        let mut entries = end
+            .read_entries(&mut buffered, &mut budget, extra_fields)
+            .await?;
 
         if entries.is_sorted_by_key(|entry| entry.directory().position()) {
             if entries
@@ -162,6 +177,7 @@ impl Index {
             resolved: Vec::new(),
             entries,
             budget,
+            extra_fields,
             buffer: Vec::new(),
         })
     }
@@ -198,7 +214,7 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(&mut buffered, &mut pending_budget)
+                    .read_local(&mut buffered, &mut pending_budget, self.extra_fields)
                     .await?;
                 self.budget = pending_budget;
                 slot.insert(resolved)
@@ -376,6 +392,7 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
+        extra_fields: ExtraFieldPolicy,
     ) -> Result<Vec<IndexedEntry>, Error> {
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
@@ -398,7 +415,7 @@ impl CentralDirectory {
             // its boundary. Only a refill needs another asynchronous read.
             let mut bytes = reader.buffered(position, end);
             loop {
-                match CentralDirectoryEntry::parse(bytes, position, budget)? {
+                match CentralDirectoryEntry::parse(bytes, position, budget, extra_fields)? {
                     BufferedEntry::Complete(entry, length) => {
                         entries.push(IndexedEntry::new(entry, self.offset));
                         position += length as u64;

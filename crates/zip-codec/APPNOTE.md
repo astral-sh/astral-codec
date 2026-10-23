@@ -30,8 +30,13 @@ describes the checks the reader enforces.
 
 ## Member extra fields
 
-Section 4.6.2 permits skipping third-party fields by length. We reject any ID
-outside the table in either member header. Identical copies can still change
+By default, the reader accepts only ZIP64 (`0x0001`), which supplies sizes,
+offsets, or disk numbers when the ordinary header uses a sentinel. Our encoder
+uses this field even for small members. `ExtraFieldPolicy::AllowListed` opts in
+to the other seven fields below.
+
+Section 4.6.2 permits skipping third-party fields by length. Both policies
+reject IDs outside the table in either member header. Identical copies can still change
 how another reader interprets a member: [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
 can mark a regular file as a symlink, and ZipIt `0x2605` can supply another name
 and mark the payload as MacBinary (§4.6.4).
