@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::{self, SeekFrom},
     str,
 };
@@ -31,6 +32,15 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
 
     pub(crate) async fn length(&mut self) -> Result<u64, Error> {
         Ok(self.inner.seek(SeekFrom::End(0)).await?)
+    }
+
+    /// Returns the buffered bytes starting at `position`, up to `end`.
+    pub(crate) fn buffered(&self, position: u64, end: u64) -> &[u8] {
+        let window_end = end.min(self.start + self.buffer.len() as u64);
+        if position < self.start || position >= window_end {
+            return &[];
+        }
+        &self.buffer[(position - self.start) as usize..(window_end - self.start) as usize]
     }
 
     /// Borrows a checked span, filling the read-ahead window when necessary.
@@ -159,6 +169,27 @@ pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Returns the case-sensitive destination used to detect duplicate ZIP members.
+///
+/// Empty and `.` components do not change a destination. All other components,
+/// including `..`, are compared literally. This does not validate a path for
+/// filesystem extraction.
+pub fn member_destination(path: &str) -> Cow<'_, str> {
+    let path = path.trim_end_matches('/');
+    if !path.split('/').any(|part| matches!(part, "" | ".")) {
+        return Cow::Borrowed(path);
+    }
+
+    let mut destination = String::with_capacity(path.len());
+    for part in path.split('/').filter(|part| !matches!(*part, "" | ".")) {
+        if !destination.is_empty() {
+            destination.push('/');
+        }
+        destination.push_str(part);
+    }
+    Cow::Owned(destination)
 }
 
 /// General-purpose header flags (APPNOTE 4.4.4).

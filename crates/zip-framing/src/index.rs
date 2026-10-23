@@ -1,18 +1,19 @@
-use std::{cell::RefCell, mem, str};
+use std::{cell::RefCell, collections::HashSet, mem, str};
 
-use memchr::memmem;
+use crc32fast::hash as crc32;
+use memchr::{memmem, memrchr};
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
     Budget, Error, Limits, add,
     constants::{extra, signature, size, version},
-    invalid,
+    invalid, member_destination,
     record::{RecordReader, array_at},
 };
 
 mod entry;
 
-use entry::ResolvedMember;
+use entry::{BufferedEntry, ResolvedMember};
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
 thread_local! {
@@ -139,12 +140,13 @@ impl Index {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            // The last entry already has the directory offset as its boundary.
             // Keep the earliest directory-order error even though assignment
             // proceeds in physical order.
             let mut first_error = None;
-            for (&index, &next) in order.iter().zip(order.iter().skip(1)) {
-                let boundary = entries[next].directory().position();
+            for (ordinal, &index) in order.iter().enumerate() {
+                let boundary = order
+                    .get(ordinal + 1)
+                    .map_or(end.offset, |&next| entries[next].directory().position());
                 if let Err(error) = entries[index].set_boundary(boundary)
                     && first_error.as_ref().is_none_or(|(first, _)| index < *first)
                 {
@@ -391,12 +393,27 @@ impl CentralDirectory {
             }
         }
 
-        for _ in 0..self.count {
-            let (entry, next) = CentralDirectoryEntry::read(reader, position, end, budget).await?;
-            entries.push(IndexedEntry::new(entry, self.offset)?);
-            position = next;
-
-            tokio::task::consume_budget().await;
+        while entries.len() < self.count as usize {
+            // Parse directly from the read-ahead window until a record crosses
+            // its boundary. Only a refill needs another asynchronous read.
+            let mut bytes = reader.buffered(position, end);
+            loop {
+                match CentralDirectoryEntry::parse(bytes, position, budget)? {
+                    BufferedEntry::Complete(entry, length) => {
+                        entries.push(IndexedEntry::new(entry, self.offset));
+                        position += length as u64;
+                        bytes = &bytes[length..];
+                        tokio::task::consume_budget().await;
+                        if entries.len() == self.count as usize {
+                            break;
+                        }
+                    }
+                    BufferedEntry::Incomplete(needed) => {
+                        reader.read_slice(position, needed, end).await?;
+                        break;
+                    }
+                }
+            }
         }
 
         if position != end {
@@ -406,8 +423,81 @@ impl CentralDirectory {
             ));
         }
 
+        // Directory order may differ from local order. Two members with the
+        // same destination would give those orders different overwrite semantics.
+        if entries.len() > 1 && !unique_sibling_groups(&entries).await {
+            let mut destinations = HashSet::with_capacity(entries.len());
+            for entry in &entries {
+                let directory = entry.directory();
+                if !destinations.insert(member_destination(directory.path())) {
+                    return Err(invalid(
+                        directory.position(),
+                        "duplicate member destination",
+                    ));
+                }
+                tokio::task::consume_budget().await;
+            }
+        }
         Ok(entries)
     }
+}
+
+/// Splits off the final component that survives destination normalization.
+fn destination_parts(mut path: &str) -> (&str, &str) {
+    loop {
+        let Some(slash) = memrchr(b'/', path.as_bytes()) else {
+            return ("", if path == "." { "" } else { path });
+        };
+        let (parent, rest) = path.split_at(slash);
+        let name = &rest[1..];
+        if !matches!(name, "" | ".") {
+            return (parent, name);
+        }
+        path = parent;
+    }
+}
+
+/// Proves uniqueness when each parent directory occurs in a single run.
+async fn unique_sibling_groups(entries: &[IndexedEntry]) -> bool {
+    let mut members = entries
+        .iter()
+        .map(|entry| destination_parts(entry.directory().path()))
+        .peekable();
+    let mut parents = Vec::new();
+    let mut siblings = Vec::new();
+    let mut checksums = Vec::new();
+    while let Some((parent, name)) = members.next() {
+        siblings.push(name);
+        while let Some((_, name)) = members.next_if(|(next, _)| *next == parent) {
+            siblings.push(name);
+            if siblings.len().is_multiple_of(128) {
+                tokio::task::consume_budget().await;
+            }
+        }
+        if !siblings.is_sorted_by(|left, right| left < right) {
+            for chunk in siblings.chunks(128) {
+                checksums.extend(chunk.iter().map(|name| crc32(name.as_bytes())));
+                tokio::task::consume_budget().await;
+            }
+            if !distinct_checksums(&mut checksums) {
+                return false;
+            }
+            checksums.clear();
+        }
+        siblings.clear();
+        if !parents.is_empty() || members.peek().is_some() {
+            parents.push(crc32(member_destination(parent).as_bytes()));
+        }
+        tokio::task::consume_budget().await;
+    }
+    distinct_checksums(&mut parents)
+}
+
+// Different checksums prove the strings differ. A match only selects the
+// exact, directory-order check; it never rejects a member by itself.
+fn distinct_checksums(checksums: &mut [u32]) -> bool {
+    checksums.sort_unstable();
+    checksums.windows(2).all(|pair| pair[0] != pair[1])
 }
 
 /// Scans the whole tail: a second EOCD reaching EOF is ambiguous even when the
