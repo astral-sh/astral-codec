@@ -74,7 +74,11 @@ regardless of the member's UTF-8 flag.
 The member adapter supports regular files, directories, symbolic links, and
 the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
 Volume labels, sockets, and conflicting file-type attributes cannot be projected.
-Each member header may contain only the [supported extra fields](APPNOTE.md#member-extra-fields).
+By default, `ZipArchive::open` and `open_with_limits` accept only the ZIP64 member
+extra field. To read [the other supported fields](APPNOTE.md#member-extra-fields),
+including the timestamps and ownership written by Info-ZIP, use
+`ZipArchive::open_with_policy(reader, limits, ExtraFieldPolicy::AllowListed)`.
+Unknown fields are rejected in either mode.
 
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
 the encoder seeks back to fill in the local header's CRC and sizes. No data

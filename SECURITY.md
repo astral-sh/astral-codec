@@ -79,9 +79,10 @@ unselected members, establishing complete nonoverlapping record coverage. Withou
 that call or traversal of every member, malformed unselected local records and
 some gaps or overlaps can remain undiscovered.
 
-Each member extra field must have a [supported identifier](crates/zip-codec/APPNOTE.md#member-extra-fields)
-and fit within its header. The reader rejects duplicate identifiers, conflicting
-metadata, and unsupported fields, even when both headers contain identical copies.
+By default, member headers may contain only the ZIP64 extra field (`0x0001`),
+and only for values marked with ZIP64 sentinels. Readers can opt in to the seven
+other [supported fields](crates/zip-codec/APPNOTE.md#member-extra-fields).
+Both policies reject unknown IDs, duplicate fields, and conflicting metadata.
 
 Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
 accepted without it. Unicode path extra fields must have a valid CRC and agree

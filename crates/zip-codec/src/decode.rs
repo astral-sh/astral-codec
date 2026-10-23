@@ -5,7 +5,9 @@ use std::io::{self, SeekFrom};
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
+use zip_framing::{
+    Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, constants::attributes,
+};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -34,7 +36,7 @@ impl<R> Operation<'_, R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens and validates the central directory using default resource limits.
+    /// Opens with default resource limits and accepts only ZIP64 member extra fields.
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
         Self::open_with_limits(reader, Limits::default()).await
     }
@@ -43,8 +45,18 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     ///
     /// Local records are checked on member access. Use [`Self::validate_all`]
     /// to check metadata for every member before reading any payloads.
-    pub async fn open_with_limits(mut reader: R, limits: Limits) -> Result<Self, DecodeError> {
-        let index = Index::read(&mut reader, limits).await?;
+    pub async fn open_with_limits(reader: R, limits: Limits) -> Result<Self, DecodeError> {
+        Self::open_with_policy(reader, limits, ExtraFieldPolicy::default()).await
+    }
+
+    /// Opens with explicit resource limits and a member extra-field policy.
+    /// Central fields are checked at open; local fields on access or [`Self::validate_all`].
+    pub async fn open_with_policy(
+        mut reader: R,
+        limits: Limits,
+        extra_fields: ExtraFieldPolicy,
+    ) -> Result<Self, DecodeError> {
+        let index = Index::read_with_policy(&mut reader, limits, extra_fields).await?;
 
         Ok(Self {
             state: DecoderState {

@@ -36,7 +36,7 @@ use std::io;
 use thiserror::Error;
 
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
-pub use extra::ExtraHeaderId;
+pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::{DeviceNumbers, EntryKind};
@@ -92,7 +92,7 @@ pub enum Error {
         /// The unsupported feature.
         feature: &'static str,
     },
-    /// A member header contains an extra field outside the supported set.
+    /// A member header contains an extra field excluded by the reader's policy.
     #[error("at byte {position}: unsupported ZIP extra field {identifier:#06x}")]
     UnsupportedExtraField {
         /// Offset of the member header.

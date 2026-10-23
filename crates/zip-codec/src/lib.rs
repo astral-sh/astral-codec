@@ -20,6 +20,6 @@ pub use archive_trait::{
 pub use decode::{DecodeError, ZipArchive, ZipMemberPayload};
 pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, Entry, EntryKind, HostSystem,
-    IndexedEntry, LimitExceeded, Limits,
+    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, Entry, EntryKind, ExtraFieldPolicy,
+    HostSystem, IndexedEntry, LimitExceeded, Limits,
 };

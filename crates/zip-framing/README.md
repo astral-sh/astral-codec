@@ -10,6 +10,10 @@ an already checked entry without I/O. `Index::validate_all` checks
 complete physical coverage, redundant metadata, and member kinds, including
 unselected members. Payload integrity and compression belong to `zip-codec`.
 
+`Index::read` accepts only the ZIP64 extra field in member headers.
+`Index::read_with_policy(reader, limits, ExtraFieldPolicy::AllowListed)` also
+accepts the [seven supported metadata fields](../zip-codec/APPNOTE.md#member-extra-fields).
+
 Kinds include volume labels, sockets, and unknown Unix types even though
 `zip-codec` cannot project them. `EntryKind` carries type-specific PKWARE UNIX
 metadata for symbolic links and device nodes. Framing rejects UNIX file-type

@@ -3,7 +3,7 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, HostSystem, add,
+    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, add,
     constants::{signature, size},
     extra::{Extras, Header},
     invalid,
@@ -170,6 +170,7 @@ impl CentralDirectoryEntry {
         bytes: &[u8],
         position: u64,
         budget: &mut Budget,
+        extra_fields: ExtraFieldPolicy,
     ) -> Result<BufferedEntry, Error> {
         let Some((header, rest)) = bytes.split_first_chunk::<{ size::CENTRAL }>() else {
             return Ok(BufferedEntry::Incomplete(size::CENTRAL));
@@ -195,7 +196,7 @@ impl CentralDirectoryEntry {
             (sizes, offset, Box::default())
         } else {
             let raw_extra = &variable[name_length..name_length + extra_length];
-            let extras = Extras::parse(raw_extra, Header::Central, position)?;
+            let extras = Extras::parse(raw_extra, Header::Central, position, extra_fields)?;
             let (sizes, offset) = extras.central_sizes(common, offset, disk, position)?;
             extras.check_name(path, position)?;
             extras.comment(&variable[name_length + extra_length..], position)?;
@@ -309,6 +310,7 @@ impl IndexedEntry {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
+        extra_fields: ExtraFieldPolicy,
     ) -> Result<ResolvedMember, Error> {
         let directory = &self.directory;
         let boundary = self.boundary;
@@ -332,7 +334,12 @@ impl IndexedEntry {
             )
             .await?;
 
-        let extras = Extras::parse(&variable[name_length..], Header::Local, position)?;
+        let extras = Extras::parse(
+            &variable[name_length..],
+            Header::Local,
+            position,
+            extra_fields,
+        )?;
         let sizes = extras.local_sizes(common, position)?;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
         // Header agreement below also requires identical encoding flags.
@@ -342,7 +349,7 @@ impl IndexedEntry {
         extras.check_name(&directory.path, position)?;
 
         let unix_data = extras.resolve(
-            Extras::parse(&directory.extra, Header::Central, position)?,
+            Extras::parse(&directory.extra, Header::Central, position, extra_fields)?,
             position,
         )?;
 
