@@ -44,6 +44,9 @@ describes the checks the reader enforces.
 
 - **Which member extra fields may we skip?** Section 4.6.2 permits skipping
   third-party fields by length. We check bounds and reject duplicate IDs.
+  We reject [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
+  (`0x6c78`): it can mark an entry as a symlink even when the central
+  directory marks it as a regular file.
   For an unknown ID, copies in both headers must be identical, but a single
   copy is accepted. This says nothing about the meaning of its bytes. For
   example, ZipIt `0x2605` identifies MacBinary-encoded contents and can
