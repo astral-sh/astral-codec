@@ -603,26 +603,19 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
 }
 
 #[tokio::test]
-async fn reads_and_bounds_archive_extra_record() -> TestResult {
-    let mut archive = Fixture {
-        archive_extra: Some(field(0xcafe, &[0x51; 257])),
-        ..Fixture::default()
+async fn rejects_archive_extra_data_records() {
+    for data in [Vec::new(), field(0xcafe, &[0x51; 257])] {
+        let archive = Fixture {
+            archive_extra: Some(data),
+            ..Fixture::default()
+        }
+        .build();
+        assert!(matches!(
+            Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+            Err(FrameError::Unsupported { position, feature: "archive extra data record" })
+                if position == archive.central as u64
+        ));
     }
-    .build();
-
-    let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
-    assert_eq!(index.entries()[0].directory().path(), "file");
-
-    set32(&mut archive.bytes, archive.central + 4, u32::MAX);
-    assert!(matches!(
-        Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
-        Err(FrameError::Invalid {
-            position,
-            reason: "truncated archive extra record"
-        }) if position == archive.central as u64
-    ));
-
-    Ok(())
 }
 
 #[tokio::test]
@@ -1789,35 +1782,8 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
 }
 
 #[tokio::test]
-async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
-    for (extension, valid) in [
-        ([0xef, 0xbe, 0, 0, 0, 0].repeat(2048), true),
-        (vec![0xef], false),
-        (vec![0xef, 0xbe, 1, 0, 0, 0], false),
-    ]
-    .into_iter()
-    .chain(
-        [
-            (0x000fu16, false),
-            (0x0013, true),
-            (0x0014, false),
-            (0x0015, false),
-            (0x0016, false),
-            (0x0017, false),
-            (0x0018, true),
-            (0x0019, false),
-            (0x001a, true),
-            (0x9900, true),
-            (0x9901, false),
-            (0x9902, true),
-        ]
-        .map(|(identifier, valid)| {
-            (
-                [identifier.to_le_bytes().as_slice(), &[0; 4]].concat(),
-                valid,
-            )
-        }),
-    ) {
+async fn rejects_nonempty_zip64_extensible_data_sectors() -> TestResult {
+    for extension in [vec![0xef], vec![0xef, 0xbe, 0, 0, 0, 0]] {
         let archive = Fixture {
             zip64: true,
             zip64_extensions: extension,
@@ -1825,9 +1791,12 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
         }
         .build();
 
-        let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
-
-        assert_eq!(result.is_ok(), valid);
+        let end = archive.zip64_end.ok_or("missing ZIP64 end")? as u64;
+        assert!(matches!(
+            Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Err(FrameError::Unsupported { position, feature: "ZIP64 extensible data sector" })
+                if position == end
+        ));
     }
 
     Ok(())
@@ -1837,12 +1806,9 @@ async fn bounds_and_checks_zip64_extensible_records() -> TestResult {
 async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
     let archive = Fixture {
         zip64: true,
-        zip64_extensions: [0xef, 0xbe, 0, 0, 0, 0].repeat(11_000),
-        archive_comment: vec![b'a'; usize::from(u16::MAX)],
         ..Fixture::default()
     }
     .build();
-    let end_offset = archive.zip64_end.ok_or("missing ZIP64 end")?;
     let directory_budget = (archive.end - 20 - archive.central) as u64;
     let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
     // Directory, ZIP64 end, and local metadata share one cumulative budget.
@@ -1867,13 +1833,9 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
         }
     }
 
-    let mut source = Observed::new(archive.bytes);
-    // The extension exceeds the read-ahead window and requires its own read.
-    // The combined directory and end-record charge must precede that read.
-    source.fail_at = Some(end_offset as u64 + 56);
     assert!(matches!(
-        read_validated(
-            &mut source,
+        Index::read(
+            &mut Cursor::new(archive.bytes),
             Limits {
                 metadata_size: directory_budget - 1,
                 ..Limits::default()
@@ -1882,7 +1844,6 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
         .await,
         Err(FrameError::Limit(LimitExceeded::MetadataSize(limit))) if limit == directory_budget - 1
     ));
-    assert_eq!(source.fail_at, Some(end_offset as u64 + 56));
 
     Ok(())
 }
