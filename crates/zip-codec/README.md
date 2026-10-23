@@ -46,7 +46,6 @@ compression method. Empty files are always stored.
 `ZipArchive::entries` exposes indexed members; call `directory()` on an entry
 to access its central-directory metadata. `ZipArchive::member(index)` selects
 an entry. Sequential iteration resumes after the selected entry.
-`open_with_limits` and `ZipEncoder::with_limits` configure resource budgets.
 
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks
@@ -62,8 +61,9 @@ Errors or cancellation poison the reader.
 Use `next_chunk` for bounded streaming.
 
 `Limits` bounds archive size, entry count, metadata, per-member output, and total
-output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited to
-65,535 bytes. The source must remain unchanged while reading the archive.
+output. Use `with_limits(limits)` on the reader builder or on `ZipEncoder` to
+override the defaults. Payload chunks are capped at 64 KiB. Symbolic-link targets
+are limited to 65,535 bytes. The source must remain unchanged while reading the archive.
 
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
 directories, non-UTF-8 names or comments, ambiguous records, and unaccounted bytes
@@ -74,11 +74,24 @@ regardless of the member's UTF-8 flag.
 The member adapter supports regular files, directories, symbolic links, and
 the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
 Volume labels, sockets, and conflicting file-type attributes cannot be projected.
-By default, `ZipArchive::open` and `open_with_limits` accept only the ZIP64 member
-extra field. To read [the other supported fields](APPNOTE.md#member-extra-fields),
-including the timestamps and ownership written by Info-ZIP, use
-`ZipArchive::open_with_policy(reader, limits, ExtraFieldPolicy::AllowListed)`.
-Unknown fields are rejected in either mode.
+
+By default, the reader accepts only the ZIP64 member extra field. To read
+[the other supported fields](APPNOTE.md#member-extra-fields), including Info-ZIP
+timestamps and ownership, opt in before opening the archive:
+
+```rust,no_run
+# async fn example(reader: tokio::fs::File) -> Result<(), zip_codec::DecodeError> {
+use zip_codec::{ExtraFieldPolicy, ZipArchive};
+
+let archive = ZipArchive::builder(reader)
+    .with_policy(ExtraFieldPolicy::AllowListed)
+    .open()
+    .await?;
+# Ok(())
+# }
+```
+
+Unknown extra fields are rejected in either mode.
 
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
 the encoder seeks back to fill in the local header's CRC and sizes. No data
