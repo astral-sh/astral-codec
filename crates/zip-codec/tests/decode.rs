@@ -12,7 +12,7 @@ use flate2::{Compression, Crc, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip_codec::{
     Archive, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy,
-    Limits, Member, MemberPayload, ZipArchive, extract::ExtractPolicy,
+    LimitExceeded, Limits, Member, MemberPayload, ZipArchive, extract::ExtractPolicy,
 };
 use zip_framing::{
     Error as FrameError,
@@ -660,13 +660,22 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
             ..
         }))
     ));
-    let mut archive = ZipArchive::open_with_policy(
-        Cursor::new(bytes),
-        Limits::default(),
-        ExtraFieldPolicy::AllowListed,
-    )
-    .await?;
+    let builder =
+        || ZipArchive::builder(Cursor::new(bytes)).with_policy(ExtraFieldPolicy::AllowListed);
+    assert!(matches!(
+        builder()
+            .with_limits(Limits {
+                member_size: 0,
+                ..Limits::default()
+            })
+            .open()
+            .await,
+        Err(DecodeError::Framing(FrameError::Limit(
+            LimitExceeded::MemberSize(0)
+        )))
+    ));
 
+    let mut archive = builder().open().await?;
     assert!(
         matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );
@@ -679,12 +688,7 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
         }))
     ));
 
-    let mut archive = ZipArchive::open_with_policy(
-        Cursor::new(bytes),
-        Limits::default(),
-        ExtraFieldPolicy::AllowListed,
-    )
-    .await?;
+    let mut archive = builder().open().await?;
     assert!(
         matches!(archive.member(2).await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );
