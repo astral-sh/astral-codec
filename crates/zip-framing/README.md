@@ -12,9 +12,10 @@ unselected members. Payload integrity and compression belong to `zip-codec`.
 
 Kinds include volume labels, sockets, and unknown Unix types even though
 `zip-codec` cannot project them. `EntryKind` carries type-specific PKWARE UNIX
-metadata, including validated link targets, decoded device numbers, and opaque
-file-type data. `Entry::has_unix_extra()` distinguishes a prefix-only UNIX
-extra field from an absent one. Symbolic links can also store targets in their
+metadata for symbolic links and device nodes. Framing rejects UNIX file-type
+data on other kinds, including possible hard links. `Entry::has_unix_extra()`
+distinguishes a prefix-only UNIX extra field from an absent one.
+Symbolic links can also store targets in their
 payloads, which the codec decodes and validates. The symbolic-link size limit
 belongs to the codec.
 
