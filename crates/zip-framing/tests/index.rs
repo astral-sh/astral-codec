@@ -14,6 +14,13 @@ use support::{Fixture, Observed, Sparse, end_record, field, set16, set32};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
+fn unicode_data(value: &[u8]) -> Vec<u8> {
+    let mut data = vec![1];
+    data.extend(crc32(value).to_le_bytes());
+    data.extend_from_slice(value);
+    data
+}
+
 // Format-validation cases exercise the complete metadata check. Lazy access
 // and its I/O behavior are covered separately below.
 async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
@@ -105,38 +112,44 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
                 central_extra.extend_from_slice(&value.to_le_bytes()[..width]);
             }
         }
-        let mut archive = Fixture {
-            local_extra: if mask & 3 != 0 {
-                field(1, &[17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat())
-            } else {
-                Vec::new()
-            },
-            central_extra: field(1, &central_extra),
-            ..Fixture::default()
-        }
-        .build();
-        set16(&mut archive.bytes, 4, 45);
-        set16(&mut archive.bytes, archive.central + 6, 45);
-        // Different decoded and compressed sizes expose swapped or shifted fields.
-        set16(&mut archive.bytes, 8, 8);
-        set16(&mut archive.bytes, archive.central + 10, 8);
-        set32(&mut archive.bytes, 22, 17);
-        set32(&mut archive.bytes, archive.central + 24, 17);
-        if mask & 3 != 0 {
-            set32(&mut archive.bytes, 18, u32::MAX);
-            set32(&mut archive.bytes, 22, u32::MAX);
-        }
-        for (bit, central) in [(1, 24), (2, 20)] {
-            if mask & bit != 0 {
-                set32(&mut archive.bytes, archive.central + central, u32::MAX);
+        let local_extra = if mask & 3 != 0 {
+            field(1, &[17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat())
+        } else {
+            Vec::new()
+        };
+        let central_extra = field(1, &central_extra);
+        let build = |local_extra, central_extra| {
+            let mut archive = Fixture {
+                local_extra,
+                central_extra,
+                ..Fixture::default()
             }
-        }
-        if mask & 4 != 0 {
-            set32(&mut archive.bytes, archive.central + 42, u32::MAX);
-        }
-        if mask & 8 != 0 {
-            set16(&mut archive.bytes, archive.central + 34, u16::MAX);
-        }
+            .build();
+            set16(&mut archive.bytes, 4, 45);
+            set16(&mut archive.bytes, archive.central + 6, 45);
+            // Different decoded and compressed sizes expose swapped or shifted fields.
+            set16(&mut archive.bytes, 8, 8);
+            set16(&mut archive.bytes, archive.central + 10, 8);
+            set32(&mut archive.bytes, 22, 17);
+            set32(&mut archive.bytes, archive.central + 24, 17);
+            if mask & 3 != 0 {
+                set32(&mut archive.bytes, 18, u32::MAX);
+                set32(&mut archive.bytes, 22, u32::MAX);
+            }
+            for (bit, central) in [(1, 24), (2, 20)] {
+                if mask & bit != 0 {
+                    set32(&mut archive.bytes, archive.central + central, u32::MAX);
+                }
+            }
+            if mask & 4 != 0 {
+                set32(&mut archive.bytes, archive.central + 42, u32::MAX);
+            }
+            if mask & 8 != 0 {
+                set16(&mut archive.bytes, archive.central + 34, u16::MAX);
+            }
+            archive
+        };
+        let archive = build(local_extra.clone(), central_extra.clone());
 
         let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
         let entry = index.resolved(0).ok_or("unresolved entry")?;
@@ -148,23 +161,26 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
             b"payload"
         );
 
-        // A well-formed unknown field cannot substitute for the required ZIP64 field.
-        for position in [0, archive.central] {
-            if position == 0 && mask & 3 == 0 {
+        // Each sentinel still needs its own header's ZIP64 field.
+        for local in [false, true] {
+            if local && local_extra.is_empty() {
                 continue;
             }
-            let mut bytes = archive.bytes.clone();
-            let extra = position + if position == 0 { 30 } else { 46 } + 4;
-            set16(&mut bytes, extra, 0xcafe);
+            let missing = if local {
+                build(Vec::new(), central_extra.clone())
+            } else {
+                build(local_extra.clone(), Vec::new())
+            };
+            let expected = if local { 0 } else { missing.central as u64 };
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(bytes), Limits::default()).await,
+                    read_validated(&mut Cursor::new(missing.bytes), Limits::default()).await,
                     Err(FrameError::Invalid {
-                        position: error_position,
+                        position,
                         reason: "missing or superfluous ZIP64 values",
-                    }) if error_position == position as u64
+                    }) if position == expected
                 ),
-                "mask={mask}, position={position}"
+                "mask={mask}, local={local}"
             );
         }
     }
@@ -231,9 +247,10 @@ async fn reconciles_each_concrete_zip64_end_field() -> TestResult {
 
 #[tokio::test]
 async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
-    let extra = field(0xcafe, &[0x51; 257]);
+    let name = vec![b'n'; 258];
+    let extra = field(0x7075, &unicode_data(&name));
     let archive = Fixture {
-        name: vec![b'n'; 258],
+        name,
         local_extra: extra.clone(),
         central_extra: extra,
         member_comment: vec![b'c'; 259],
@@ -248,7 +265,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     assert_eq!(entry.directory().path(), "n".repeat(258));
     assert_eq!(entry.directory().host_system(), HostSystem::Os400);
     assert_eq!(entry.directory().external_attributes(), 0x1234_5678);
-    assert_eq!(entry.data_offset(), 30 + 258 + 261);
+    assert_eq!(entry.data_offset(), 30 + 258 + (4 + 5 + 258));
     assert_eq!(entry.directory().size(), 7);
 
     Ok(())
@@ -698,35 +715,26 @@ async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult
 
 #[tokio::test]
 async fn rejects_unsupported_extras_in_either_header() {
-    for (identifier, expected) in [
-        (0x0007, "authenticity verification"),
-        (0x0008, "alternate name encoding"),
-        (0x000f, "patch descriptor"),
-        (0x0014, "digital signature"),
-        (0x0015, "digital signature"),
-        (0x0016, "digital signature"),
-        (0x0017, "encryption extra field"),
-        (0x0019, "encryption extra field"),
-        (0x6c78, "libarchive xl file attributes"),
-        (0x756e, "ASi UNIX file attributes"),
-        (0x9901, "encryption extra field"),
+    for identifier in [
+        0x0007, 0x0008, 0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x2605, 0x6c78, 0x756e,
+        0x9901, 0xbeef,
     ] {
-        for local in [false, true] {
-            let mut fixture = Fixture::default();
-            if local {
-                fixture.local_extra = field(identifier, &[]);
-            } else {
-                fixture.central_extra = field(identifier, &[]);
+        let extra = field(identifier, &[]);
+        for (local, central) in [(true, false), (false, true), (true, true)] {
+            let archive = Fixture {
+                local_extra: if local { extra.clone() } else { Vec::new() },
+                central_extra: if central { extra.clone() } else { Vec::new() },
+                ..Fixture::default()
             }
-
-            let archive = fixture.build();
-            let offset = if local { 0 } else { archive.central as u64 };
-            let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
-
+            .build();
+            let offset = if central { archive.central as u64 } else { 0 };
             assert!(
-                matches!(result, Err(FrameError::Unsupported { position, feature })
-                    if position == offset && feature == expected),
-                "{identifier:#x}, local={local}"
+                matches!(
+                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
+                        if position == offset && rejected == identifier
+                ),
+                "{identifier:#06x}, local={local}, central={central}"
             );
         }
     }
@@ -735,7 +743,7 @@ async fn rejects_unsupported_extras_in_either_header() {
 #[tokio::test]
 async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     let name = "café".as_bytes();
-    let unicode = [vec![1], crc32(name).to_le_bytes().to_vec(), name.to_vec()].concat();
+    let unicode = unicode_data(name);
     let fixture = Fixture {
         name: name.to_vec(),
         local_extra: field(0x7075, &unicode),
@@ -1129,12 +1137,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
     // Incomplete Unicode comments remain invalid even when the ordinary comment
     // is usable; do not fall back to treating a recognized field as opaque data.
     let comment = b"comment";
-    let unicode = [
-        vec![1],
-        crc32(comment).to_le_bytes().to_vec(),
-        comment.to_vec(),
-    ]
-    .concat();
+    let unicode = unicode_data(comment);
     for length in (0..5).chain([unicode.len()]) {
         let archive = Fixture {
             member_comment: comment.to_vec(),
@@ -1564,35 +1567,84 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
 }
 
 #[tokio::test]
-async fn requires_complete_agreement_for_opaque_member_extras() {
-    for (local, central, valid) in [
-        (b"same".as_slice(), b"same".as_slice(), true),
-        (b"local", b"other", false),
-        (b"prefix-suffix", b"prefix", false),
+async fn validates_info_zip_ownership() -> TestResult {
+    // Info-ZIP zip 3.0 writes both timestamps and variable-width ownership.
+    let ownership = field(0x7875, &[1, 4, 0xf5, 1, 0, 0, 4, 20, 0, 0, 0]);
+    let short = field(0x7875, &[1, 1, 42, 2, 0xff, 1]);
+    for (local_extra, central_extra) in [
+        (
+            [field(0x5455, &[3; 9]), ownership.clone()].concat(),
+            [ownership.clone(), field(0x5455, &[3; 5])].concat(),
+        ),
+        (short.clone(), Vec::new()),
+        (Vec::new(), short),
     ] {
-        let fixture = Fixture {
-            // Distinct unknown IDs must remain separate keys, independent of
-            // their order in each header or their shared low byte.
-            local_extra: [field(0xbeef, local), field(0xcaef, b"other field")].concat(),
-            central_extra: [field(0xcaef, b"other field"), field(0xbeef, central)].concat(),
+        let archive = Fixture {
+            local_extra,
+            central_extra,
             ..Fixture::default()
-        };
+        }
+        .build();
+        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+    }
 
-        let result =
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await;
-
-        if valid {
-            assert!(result.is_ok());
-        } else {
-            assert!(matches!(
-                result,
-                Err(FrameError::Invalid {
-                    reason: "local and central extra fields disagree",
-                    ..
-                })
-            ));
+    for data in [
+        &[][..],
+        &[2, 1, 1, 1, 2],
+        &[1, 0, 1, 2],
+        &[1, 4, 0],
+        &[1, 1, 1],
+        &[1, 1, 1, 0],
+        &[1, 1, 1, 2, 2],
+        &[1, 1, 1, 1, 2, 3],
+    ] {
+        for local in [false, true] {
+            let mut fixture = Fixture::default();
+            if local {
+                fixture.local_extra = field(0x7875, data);
+            } else {
+                fixture.central_extra = field(0x7875, data);
+            }
+            assert!(
+                matches!(
+                    read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
+                        .await,
+                    Err(FrameError::Invalid {
+                        reason: "invalid Info-ZIP extra field layout",
+                        ..
+                    })
+                ),
+                "data={data:?}, local={local}"
+            );
         }
     }
+
+    for (local_extra, reason) in [
+        (
+            field(0x7875, &[1, 4, 0xf5, 1, 0, 0, 4, 21, 0, 0, 0]),
+            "local and central extra fields disagree",
+        ),
+        (
+            field(0x5855, &[0; 12]),
+            "mixed old and new Info-ZIP UNIX metadata",
+        ),
+        (
+            field(0x7855, &[0; 4]),
+            "mixed old and new Info-ZIP UNIX metadata",
+        ),
+    ] {
+        let archive = Fixture {
+            local_extra,
+            central_extra: ownership.clone(),
+            ..Fixture::default()
+        }
+        .build();
+        assert!(matches!(
+            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Err(FrameError::Invalid { reason: actual, .. }) if actual == reason
+        ));
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1793,7 +1845,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0],
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
-        [field(0xbeef, &[]), field(0xbeef, &[])].concat(),
+        [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {
             let mut fixture = Fixture::default();
@@ -1820,7 +1872,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
                 zip64: true,
                 ..Fixture::default()
             };
-            let extra = [field(1, data), field(0xbeef, &[])].concat();
+            let extra = [field(1, data), field(0x5455, &[0])].concat();
             if local {
                 fixture.local_extra = extra;
             } else {
@@ -1981,7 +2033,8 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
 #[tokio::test]
 async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     let names = ["first".to_owned(), "é".repeat(30_000), "last".to_owned()];
-    let extra = field(0xbeef, &vec![0xa5; 6000]);
+    let comment = vec![b'c'; 6000];
+    let extra = field(0x6375, &unicode_data(&comment));
     let mut bytes = Vec::new();
     let mut directory = Vec::new();
     for name in &names {
@@ -1989,7 +2042,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
             name: name.as_bytes().to_vec(),
             local_extra: extra.clone(),
             central_extra: extra.clone(),
-            member_comment: vec![b'c'; 6000],
+            member_comment: comment.clone(),
             local_offset: bytes.len() as u32,
             ..Fixture::default()
         }
@@ -2040,8 +2093,10 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
 
 #[tokio::test]
 async fn charges_local_metadata_once_after_successful_resolution() -> TestResult {
-    let extra = field(0xbeef, &vec![0; 5000]);
+    let name = vec![b'n'; 5000];
+    let extra = field(0x7075, &unicode_data(&name));
     let archive = Fixture {
+        name,
         local_extra: extra.clone(),
         central_extra: extra,
         ..Fixture::default()

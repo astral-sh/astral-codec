@@ -27,32 +27,33 @@ describes the checks the reader enforces.
   directory. A sentinel in the classic end record still requires a ZIP64
   locator. Our encoder always writes ZIP64 end records.
   [Streaming fixtures](tests/fixtures/generate.py)
-- **Info-ZIP timestamps and ownership.** Section 4.6.1 lists `0x5455`,
-  `0x5855`, and `0x7855`. On macOS, `ditto` writes `0x5855` with two
-  timestamps in each header and a local UID/GID pair (12 bytes locally,
-  8 centrally).
-  Info-ZIP `zip` writes `0x5455` with only the modification time repeated
-  centrally, alongside the newer ownership field `0x7875`. These metadata
-  fields do not affect the decoded member type, payload, or permissions.
-  Framing also checks the layout of `0x7855` (16-bit UID/GID locally and an
-  empty central marker). It requires a local copy for central `0x5455` and
-  `0x7855`, and rejects `0x5855` alongside either. Info-ZIP specifies that
-  the newer fields take precedence. Rejecting the combination is our policy.
-  [Info-ZIP field layouts](https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt)
+
+## Member extra fields
+
+Section 4.6.2 permits skipping third-party fields by length. We reject any ID
+outside the table in either member header. Identical copies can still change
+how another reader interprets a member: [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
+can mark a regular file as a symlink, and ZipIt `0x2605` can supply another name
+and mark the payload as MacBinary (§4.6.4).
+
+| ID | Field | What we check |
+| --- | --- | --- |
+| `0x0001` | ZIP64 | Sizes, offsets, and disk numbers correspond to sentinels in the header (§4.5.3). |
+| `0x000d` | PKWARE UNIX | The field has its fixed prefix, copies agree, and any file-type data matches the member kind (§4.5.7). |
+| `0x6375`, `0x7075` | Unicode comment and path | The CRC and UTF-8 text agree with the ordinary comment or filename (§§4.6.8–9). |
+| `0x5455` | Info-ZIP extended timestamps | Flags account for the timestamps; a central copy must agree with the local flags and modification time, if present. |
+| `0x5855` | Original Info-ZIP UNIX | Each copy carries two timestamps. They must agree across headers; the local field may also carry a 16-bit UID and GID. |
+| `0x7855` | Info-ZIP 16-bit ownership | The local field carries a UID and GID; an empty central marker requires a local copy. |
+| `0x7875` | Info-ZIP variable-width ownership | Version 1 carries a UID and GID, each with a nonzero byte length. The two values must fill the field and copies must agree. |
+
+macOS `ditto` writes `0x5855`; Info-ZIP `zip` writes `0x5455` and `0x7875` together.
+We validate these [Info-ZIP layouts](https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt)
+without applying timestamps or ownership. We reject `0x5855` alongside any
+newer Info-ZIP timestamp or ownership field, and reject `0x7855` alongside
+`0x7875`, rather than choosing which copy takes precedence.
 
 ## Open policy questions
 
-- **Which member extra fields may we skip?** Section 4.6.2 permits skipping
-  third-party fields by length. We check bounds and reject duplicate IDs.
-  We reject [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
-  (`0x6c78`): it can mark an entry as a symlink even when the central
-  directory marks it as a regular file.
-  For an unknown ID, copies in both headers must be identical, but a single
-  copy is accepted. This says nothing about the meaning of its bytes. For
-  example, ZipIt `0x2605` identifies MacBinary-encoded contents and can
-  supply another filename (§4.6.4). We expose the ordinary name and payload.
-  An allowlist would exclude such fields. To keep reading ordinary Info-ZIP
-  archives, we would first need to recognize its `0x7875` ownership field.
 - **What makes a directory?** The reader accepts a trailing `/`, a Unix
   directory mode, or the DOS directory bit. It reads DOS attributes on MS-DOS,
   Unix, OS/2 HPFS, Windows NTFS, VFAT, and Darwin entries. An empty Unix

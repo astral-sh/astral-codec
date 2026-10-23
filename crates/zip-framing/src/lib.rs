@@ -91,6 +91,14 @@ pub enum Error {
         /// The unsupported feature.
         feature: &'static str,
     },
+    /// A member header contains an extra field outside the supported set.
+    #[error("at byte {position}: unsupported ZIP extra field {identifier:#06x}")]
+    UnsupportedExtraField {
+        /// Offset of the member header.
+        position: u64,
+        /// Extra-field identifier from the header.
+        identifier: u16,
+    },
     /// A configured resource budget was exceeded.
     #[error(transparent)]
     Limit(#[from] LimitExceeded),
