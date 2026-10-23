@@ -46,6 +46,8 @@ pub enum ExtraHeaderId {
     InfoZipUnix,
     /// Info-ZIP Unicode comment.
     UnicodeComment,
+    /// libarchive's experimental `xl` field for central-directory attributes.
+    LibarchiveXl,
     /// Info-ZIP Unicode path.
     UnicodePath,
     /// ASi UNIX mode and symbolic-link metadata.
@@ -74,6 +76,7 @@ impl From<u16> for ExtraHeaderId {
             0x5455 => Self::ExtendedTimestamp,
             0x5855 => Self::InfoZipUnix,
             0x6375 => Self::UnicodeComment,
+            0x6c78 => Self::LibarchiveXl,
             0x7075 => Self::UnicodePath,
             0x756e => Self::AsiUnix,
             0x7855 => Self::InfoZipUnixNew,
@@ -99,6 +102,7 @@ impl From<ExtraHeaderId> for u16 {
             ExtraHeaderId::ExtendedTimestamp => 0x5455,
             ExtraHeaderId::InfoZipUnix => 0x5855,
             ExtraHeaderId::UnicodeComment => 0x6375,
+            ExtraHeaderId::LibarchiveXl => 0x6c78,
             ExtraHeaderId::UnicodePath => 0x7075,
             ExtraHeaderId::AsiUnix => 0x756e,
             ExtraHeaderId::InfoZipUnixNew => 0x7855,
@@ -149,6 +153,7 @@ impl<'a> Extras<'a> {
                 | ExtraHeaderId::EncryptionRecipients
                 | ExtraHeaderId::Aes => Some("encryption extra field"),
                 ExtraHeaderId::ExtendedLanguageEncoding => Some("alternate name encoding"),
+                ExtraHeaderId::LibarchiveXl => Some("libarchive xl file attributes"),
                 ExtraHeaderId::AsiUnix => Some("ASi UNIX file attributes"),
                 _ => None,
             };

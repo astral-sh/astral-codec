@@ -51,7 +51,9 @@ and Info-ZIP `zip` declares 1.0 even with extra fields (§4.4.28).
 **Skip unknown extra fields?** APPNOTE permits skipping fields by length
 (§4.6.2). We accept unknown IDs in either header and require matching bytes
 when both carry the field. ZipIt's `0x2605` can supply another filename and
-mark the payload as MacBinary (§4.6.4).
+mark the payload as MacBinary (§4.6.4). We reject `0x6c78` because
+[libarchive](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
+can read it as a symlink even when the directory says regular file.
 An allowlist would rule that out. It would need to include Info-ZIP's
 `0x7875` ownership field to keep reading archives written by `zip`.
 

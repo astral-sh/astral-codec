@@ -707,6 +707,7 @@ async fn rejects_unsupported_extras_in_either_header() {
         (0x0016, "digital signature"),
         (0x0017, "encryption extra field"),
         (0x0019, "encryption extra field"),
+        (0x6c78, "libarchive xl file attributes"),
         (0x756e, "ASi UNIX file attributes"),
         (0x9901, "encryption extra field"),
     ] {
