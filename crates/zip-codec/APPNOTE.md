@@ -71,10 +71,6 @@ describes the checks the reader enforces.
 
 ## Proposed restrictions
 
-- **Unicode comments.** The CRC in `0x6375` covers the original member comment.
-  It can be correct while the Unicode text differs (§4.6.8).
-  The reader already requires UTF-8 for both. Require the same text and check
-  a local copy against the validated central field.
 - **Archive-level extensions.** The reader parses the archive extra data
   record using member-field rules and accepts unknown ZIP64 extensible data
   sector IDs. The former has security-related uses (§7.5.2). The latter has
