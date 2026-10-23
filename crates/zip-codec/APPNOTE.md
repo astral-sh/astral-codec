@@ -11,6 +11,9 @@ describes the checks the reader enforces.
   For a symlink, §4.5.7 puts the target in the PKWARE UNIX field (`0x000d`).
   Info-ZIP, libarchive, and our encoder write it in the payload. Member
   selection requires the targets to match when both forms are present.
+  A symlink with a PKWARE UNIX field must supply a target there. Framing
+  rejects a target on a regular or untyped file because it cannot distinguish
+  a hard link from a regular file with unexpected metadata.
 - **Empty DEFLATE streams.** Section 4.3.8 says an empty file or directory has
   no file data. Python can write a two-byte DEFLATE stream that decodes to
   zero bytes for either. The reader checks the stream boundary, decoded size,
@@ -68,12 +71,6 @@ describes the checks the reader enforces.
 
 ## Proposed restrictions
 
-- **UNIX file types.** A target in `0x000d` can turn a regular or untyped file
-  into a hard link whose payload can overwrite the target on extraction. Section
-  4.5.7 names hard links but gives no independent type marker or replacement
-  semantics. Reject this ambiguity, incomplete device numbers, UNIX type data
-  on unrelated kinds, and volume labels that override another type. The ASi UNIX
-  field (`0x756e`) can also supply a second mode or symlink target.
 - **Unicode comments.** The CRC in `0x6375` covers the original member comment.
   It can be correct while the Unicode text differs (§4.6.8).
   The reader already requires UTF-8 for both. Require the same text and check

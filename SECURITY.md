@@ -79,8 +79,10 @@ The reader recognizes the [WinZip AES extra field](https://www.winzip.com/en/sup
 
 Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
 accepted without it. Unicode path extra fields must have a valid CRC and agree
-with the raw filename. APPNOTE Unix link metadata is interpreted, and a symbolic
-link's extra-field target must agree with its payload when both are present.
+with the raw filename. A symbolic link's UNIX extra-field target must agree
+with its payload when both are present. A regular file or an entry with no
+declared type may carry the fixed UNIX metadata, but a nonempty file-type
+field is ambiguous and causes rejection. ZIP extraction never creates hard links.
 Filesystem containment and configurable name/link policy remain in `archive-trait`.
 
 Archive and member comments must be UTF-8, even without the UTF-8 flag. This
