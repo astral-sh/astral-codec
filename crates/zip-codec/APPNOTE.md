@@ -34,6 +34,10 @@ describes the checks the reader enforces.
   Info-ZIP `zip` writes `0x5455` with only the modification time repeated
   centrally, alongside the newer ownership field `0x7875`. These metadata
   fields do not affect the decoded member type, payload, or permissions.
+  Framing also checks the layout of `0x7855` (16-bit UID/GID locally and an
+  empty central marker). It requires a local copy for central `0x5455` and
+  `0x7855`, and rejects `0x5855` alongside either. Info-ZIP specifies that
+  the newer fields take precedence. Rejecting the combination is our policy.
   [Info-ZIP field layouts](https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt)
 
 ## Open policy questions
@@ -68,10 +72,3 @@ describes the checks the reader enforces.
   label (minimum 1.1 in §4.4.3.2). Framing could reject unlisted versions
   and enforce the volume-label minimum. Requiring an exact feature/version
   match would reject ordinary Python archives.
-
-## Proposed restrictions
-
-- **Info-ZIP field reconciliation.** The current prefix checks accept a
-  seven-byte `0x5855` central field, which ends partway through a timestamp.
-  Validate the documented local and central layouts of `0x5855`, `0x5455`,
-  and `0x7855` before comparing the shared values.
