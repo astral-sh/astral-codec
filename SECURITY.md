@@ -85,9 +85,10 @@ declared type may carry the fixed UNIX metadata, but a nonempty file-type
 field is ambiguous and causes rejection. ZIP extraction never creates hard links.
 Filesystem containment and configurable name/link policy remain in `archive-trait`.
 
-Archive and member comments must be UTF-8, even without the UTF-8 flag. This
-restricts binary comment data; UTF-8 alone does not exclude all embedded ZIP
-records.
+Archive and member comments must be UTF-8, even without the UTF-8 flag.
+A Unicode comment extra field must agree with the central directory's member
+comment. A local copy requires an identical central extra field. UTF-8 alone
+does not exclude all embedded ZIP records.
 
 File contents are checked during consumption. Successful completion requires the
 declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload

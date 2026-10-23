@@ -1165,6 +1165,38 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
         }
     }
 
+    let unicode_comment = |bytes: &[u8]| field(0x6375, bytes);
+    for (local_extra, central_extra, expected) in [
+        (unicode_comment(&unicode), unicode_comment(&unicode), None),
+        (
+            unicode_comment(&unicode),
+            Vec::new(),
+            Some("local Unicode comment has no central copy"),
+        ),
+        // Correct CRC for "comment", but the Unicode text is empty.
+        (
+            Vec::new(),
+            unicode_comment(&unicode[..5]),
+            Some("Unicode comment disagrees with member comment"),
+        ),
+    ] {
+        let archive = Fixture {
+            member_comment: comment.to_vec(),
+            local_extra,
+            central_extra,
+            ..Fixture::default()
+        }
+        .build();
+        let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        if let Some(expected) = expected {
+            assert!(
+                matches!(result, Err(FrameError::Invalid { reason, .. }) if reason == expected)
+            );
+        } else {
+            result?;
+        }
+    }
+
     Ok(())
 }
 
