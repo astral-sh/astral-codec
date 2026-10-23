@@ -89,8 +89,9 @@ Filesystem containment and configurable name/link policy remain in `archive-trai
 
 Archive and member comments must be UTF-8, even without the UTF-8 flag.
 A Unicode comment extra field must agree with the central directory's member
-comment. A local copy requires an identical central extra field. UTF-8 alone
-does not exclude all embedded ZIP records.
+comment. A local copy requires an identical central extra field. When an archive
+has a comment, no second end-of-central-directory signature may follow the real
+one: readers that search backward could otherwise select a different directory.
 
 File contents are checked during consumption. Successful completion requires the
 declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload
