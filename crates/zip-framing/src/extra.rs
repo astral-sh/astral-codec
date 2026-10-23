@@ -12,6 +12,17 @@ use crate::{
 /// Version of the Info-ZIP Unicode path and comment fields.
 const UNICODE_VERSION: u8 = 1;
 
+/// Which extra fields a reader accepts in local and central member headers.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum ExtraFieldPolicy {
+    /// Accept only ZIP64 values required by the member header's sentinel fields.
+    #[default]
+    Zip64Only,
+    /// Accept all fields in [`ExtraHeaderId`], with their layout and agreement checks.
+    AllowListed,
+}
+
 /// A supported ZIP member extra-field identifier. The discriminant is the wire value.
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
 #[non_exhaustive]
@@ -75,7 +86,12 @@ pub(crate) enum Header {
 }
 
 impl<'a> Extras<'a> {
-    pub(crate) fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
+    pub(crate) fn parse(
+        mut bytes: &'a [u8],
+        header: Header,
+        position: u64,
+        policy: ExtraFieldPolicy,
+    ) -> Result<Self, Error> {
         let mut zip64 = None;
         let mut fields = BTreeMap::new();
 
@@ -91,12 +107,17 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated extra-field data"));
             };
 
-            let identifier =
-                ExtraHeaderId::try_from(u16::from_le_bytes([identifier_low, identifier_high]))
-                    .map_err(|identifier| Error::UnsupportedExtraField {
-                        position,
-                        identifier,
-                    })?;
+            let identifier = u16::from_le_bytes([identifier_low, identifier_high]);
+            let identifier = match policy {
+                ExtraFieldPolicy::Zip64Only => {
+                    (identifier == u16::from(ExtraHeaderId::Zip64)).then_some(ExtraHeaderId::Zip64)
+                }
+                ExtraFieldPolicy::AllowListed => ExtraHeaderId::try_from(identifier).ok(),
+            }
+            .ok_or(Error::UnsupportedExtraField {
+                position,
+                identifier,
+            })?;
 
             let previous = if identifier == ExtraHeaderId::Zip64 {
                 zip64.replace(data)
