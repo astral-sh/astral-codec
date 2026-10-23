@@ -458,44 +458,38 @@ fn destination_parts(mut path: &str) -> (&str, &str) {
 }
 
 /// Proves uniqueness when each parent directory occurs in a single run.
-async fn unique_sibling_groups(mut entries: &[IndexedEntry]) -> bool {
+async fn unique_sibling_groups(entries: &[IndexedEntry]) -> bool {
+    let mut members = entries
+        .iter()
+        .map(|entry| destination_parts(entry.directory().path()))
+        .peekable();
     let mut parents = Vec::new();
-    let mut names = Vec::new();
-    while let Some((first, rest)) = entries.split_first() {
-        let (parent, mut previous) = destination_parts(first.directory().path());
-        let mut sorted = true;
-        let mut count = 1usize;
-        for entry in rest {
-            let (next_parent, name) = destination_parts(entry.directory().path());
-            if next_parent != parent {
-                break;
-            }
-            sorted &= previous < name;
-            previous = name;
-            count += 1;
-            if count.is_multiple_of(128) {
+    let mut siblings = Vec::new();
+    let mut checksums = Vec::new();
+    while let Some((parent, name)) = members.next() {
+        siblings.push(name);
+        while let Some((_, name)) = members.next_if(|(next, _)| *next == parent) {
+            siblings.push(name);
+            if siblings.len().is_multiple_of(128) {
                 tokio::task::consume_budget().await;
             }
         }
-        let (siblings, remaining) = entries.split_at(count);
-        if !sorted {
-            for entry in siblings {
-                let (_, name) = destination_parts(entry.directory().path());
-                names.push(crc32(name.as_bytes()));
+        if !siblings.is_sorted_by(|left, right| left < right) {
+            for chunk in siblings.chunks(128) {
+                checksums.extend(chunk.iter().map(|name| crc32(name.as_bytes())));
                 tokio::task::consume_budget().await;
             }
-            if !distinct_checksums(&mut names) {
+            if !distinct_checksums(&mut checksums) {
                 return false;
             }
-            names.clear();
+            checksums.clear();
         }
-        if !parents.is_empty() || !remaining.is_empty() {
+        siblings.clear();
+        if !parents.is_empty() || members.peek().is_some() {
             parents.push(crc32(member_destination(parent).as_bytes()));
         }
-        entries = remaining;
         tokio::task::consume_budget().await;
     }
-
     distinct_checksums(&mut parents)
 }
 
