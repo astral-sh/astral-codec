@@ -114,18 +114,24 @@ pub(crate) struct Extras<'a> {
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum Header {
+    Local,
+    Central,
+}
+
 impl<'a> Extras<'a> {
-    pub(crate) fn parse(mut bytes: &'a [u8], position: u64) -> Result<Self, Error> {
+    pub(crate) fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
         let mut zip64 = None;
         let mut fields = BTreeMap::new();
 
         while !bytes.is_empty() {
-            let Some((header, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
+            let Some((prefix, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
             else {
                 return Err(invalid(position, "truncated extra-field header"));
             };
 
-            let [identifier_low, identifier_high, length_low, length_high] = *header;
+            let [identifier_low, identifier_high, length_low, length_high] = *prefix;
             let identifier =
                 ExtraHeaderId::from(u16::from_le_bytes([identifier_low, identifier_high]));
             let length = usize::from(u16::from_le_bytes([length_low, length_high]));
@@ -161,6 +167,27 @@ impl<'a> Extras<'a> {
 
             if identifier == ExtraHeaderId::Unix && data.len() < extra::UNIX_PREFIX_SIZE {
                 return Err(invalid(position, "truncated UNIX extra field"));
+            }
+            // Info-ZIP defines different layouts for the two member headers.
+            let valid = match (identifier, header) {
+                (ExtraHeaderId::ExtendedTimestamp, _) => {
+                    let Some((&flags, times)) = data.split_first() else {
+                        return Err(invalid(position, "missing Info-ZIP timestamp flags"));
+                    };
+                    let stored = match header {
+                        Header::Local => flags,
+                        Header::Central => flags & 1,
+                    };
+                    flags & !0b111 == 0 && times.len() == 4 * stored.count_ones() as usize
+                }
+                (ExtraHeaderId::InfoZipUnix, Header::Local) => matches!(data.len(), 8 | 12),
+                (ExtraHeaderId::InfoZipUnix, Header::Central) => data.len() == 8,
+                (ExtraHeaderId::InfoZipUnixNew, Header::Local) => data.len() == 4,
+                (ExtraHeaderId::InfoZipUnixNew, Header::Central) => data.is_empty(),
+                _ => true,
+            };
+            if !valid {
+                return Err(invalid(position, "invalid Info-ZIP extra field layout"));
             }
 
             bytes = remaining;
@@ -302,6 +329,29 @@ impl<'a> Extras<'a> {
         central: Extras<'_>,
         position: u64,
     ) -> Result<Option<Vec<u8>>, Error> {
+        let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
+        if has(ExtraHeaderId::InfoZipUnix)
+            && (has(ExtraHeaderId::ExtendedTimestamp) || has(ExtraHeaderId::InfoZipUnixNew))
+        {
+            return Err(invalid(
+                position,
+                "mixed old and new Info-ZIP UNIX metadata",
+            ));
+        }
+
+        // These central forms describe timestamps or ownership in the local header.
+        for identifier in [
+            ExtraHeaderId::ExtendedTimestamp,
+            ExtraHeaderId::InfoZipUnixNew,
+        ] {
+            if central.fields.contains_key(&identifier) && !self.fields.contains_key(&identifier) {
+                return Err(invalid(
+                    position,
+                    "central Info-ZIP field has no local copy",
+                ));
+            }
+        }
+
         for (identifier, local) in &self.fields {
             let Some(other) = central.fields.get(identifier) else {
                 // Only the central header has the original member comment.
@@ -314,15 +364,12 @@ impl<'a> Extras<'a> {
                 continue;
             };
 
-            // Some Info-ZIP fields have shorter central forms. APPNOTE 4.5.7
-            // defines no such form for the PKWARE UNIX field, so it uses the
-            // default equality check. ZIP64 values are compared separately.
+            // The validated Info-ZIP central forms contain only the shared
+            // leading fields. The PKWARE UNIX field has one layout (APPNOTE 4.5.7).
             let equal = match *identifier {
-                ExtraHeaderId::InfoZipUnix => local.get(..other.len()) == Some(*other),
-                ExtraHeaderId::ExtendedTimestamp => {
-                    local.first() == other.first() && local.get(..other.len()) == Some(*other)
-                }
-                ExtraHeaderId::InfoZipUnixNew => other.is_empty() || local == other,
+                ExtraHeaderId::InfoZipUnix
+                | ExtraHeaderId::ExtendedTimestamp
+                | ExtraHeaderId::InfoZipUnixNew => local.starts_with(other),
                 _ => local == other,
             };
             if !equal {

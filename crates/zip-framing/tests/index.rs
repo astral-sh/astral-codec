@@ -1463,6 +1463,9 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 async fn reconciles_shortened_info_zip_extras() -> TestResult {
     for (identifier, local, central) in [
         (0x5855, vec![1; 12], vec![1; 8]),
+        (0x5855, vec![1; 8], vec![1; 8]),
+        (0x5455, vec![3; 9], vec![3; 5]),
+        (0x5455, vec![2; 5], vec![2]),
         (0x5455, vec![7; 13], vec![7; 5]),
         (0x7855, vec![1; 4], Vec::new()),
     ] {
@@ -1472,24 +1475,84 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
             ..Fixture::default()
         };
         read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
-
-        let fixture = Fixture {
-            local_extra: field(identifier, &local),
-            central_extra: field(identifier, &[0]),
-            ..Fixture::default()
-        };
-        assert!(
-            matches!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
-                Err(FrameError::Invalid {
-                    reason: "local and central extra fields disagree",
-                    ..
-                })
-            ),
-            "extra {identifier:#x}"
-        );
     }
 
+    for (local, central, expected) in [
+        (
+            field(0x5855, &[1; 12]),
+            field(0x5855, &[1; 7]),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            field(0x5855, &[1; 10]),
+            Vec::new(),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            field(0x5855, &[1; 12]),
+            field(0x5855, &[2; 8]),
+            "local and central extra fields disagree",
+        ),
+        (
+            field(0x5455, &[3; 9]),
+            field(0x5455, &[3]),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            field(0x5455, &[8; 5]),
+            Vec::new(),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            field(0x5455, &[]),
+            Vec::new(),
+            "missing Info-ZIP timestamp flags",
+        ),
+        (
+            field(0x5455, &[3; 9]),
+            field(0x5455, &[1; 5]),
+            "local and central extra fields disagree",
+        ),
+        (
+            field(0x7855, &[1; 4]),
+            field(0x7855, &[1; 4]),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            field(0x7855, &[1; 2]),
+            Vec::new(),
+            "invalid Info-ZIP extra field layout",
+        ),
+        (
+            Vec::new(),
+            field(0x7855, &[]),
+            "central Info-ZIP field has no local copy",
+        ),
+        (
+            Vec::new(),
+            field(0x5455, &[3; 5]),
+            "central Info-ZIP field has no local copy",
+        ),
+        (
+            field(0x5855, &[0; 12]),
+            field(0x5455, &[1; 5]),
+            "mixed old and new Info-ZIP UNIX metadata",
+        ),
+    ] {
+        let archive = Fixture {
+            local_extra: local,
+            central_extra: central,
+            ..Fixture::default()
+        }
+        .build();
+        assert!(
+            matches!(
+                read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                Err(FrameError::Invalid { reason, .. }) if reason == expected
+            ),
+            "{expected}"
+        );
+    }
     Ok(())
 }
 
