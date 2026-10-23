@@ -40,6 +40,7 @@ pub use extra::ExtraHeaderId;
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::{DeviceNumbers, EntryKind};
+pub use record::member_destination;
 
 /// A supported ZIP compression method.
 ///

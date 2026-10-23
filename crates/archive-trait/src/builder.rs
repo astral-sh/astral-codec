@@ -6,6 +6,7 @@
 mod traversal;
 
 use std::{
+    borrow::Cow,
     collections::VecDeque,
     io::{self, Read},
     mem,
@@ -358,6 +359,10 @@ pub trait ArchiveBuilder: Sized {
     /// Formats without additional settings can use [`EntryMetadata`] directly.
     type FileOptions: From<EntryMetadata>;
 
+    /// The slash-separated path used by [`Builder`] for collision checks.
+    /// The default compares paths literally. Write hooks receive the original path.
+    const COLLISION_KEY: fn(&str) -> Cow<'_, str> = |path| Cow::Borrowed(path);
+
     /// Wraps this format writer in a builder using default policy.
     ///
     /// Implementors should not override this default implementation.
@@ -448,10 +453,11 @@ impl<B: ArchiveBuilder> Builder<B> {
         }
 
         let path = path.to_owned();
+        let key = B::COLLISION_KEY(&path);
         let reservation = self
             .state
             .entries
-            .preflight_entry(&path, ArchivedEntry::NonDirectory)?;
+            .preflight_entry(&key, ArchivedEntry::NonDirectory)?;
         let mut payload = payload.into();
         if payload.started {
             return Err(BuildError::FilePayloadAlreadyRead);
@@ -468,7 +474,7 @@ impl<B: ArchiveBuilder> Builder<B> {
         payload.swap_buffer(&mut self.state.source_buffer);
         self.resolve_hook(result)?;
 
-        self.state.entries.commit_entry(&path, reservation);
+        self.state.entries.commit_entry(&key, reservation);
         Ok(())
     }
 
@@ -496,15 +502,16 @@ impl<B: ArchiveBuilder> Builder<B> {
             });
         }
         let path = path.to_owned();
+        let key = B::COLLISION_KEY(&path);
         let reservation = self
             .state
             .entries
-            .preflight_entry(&path, ArchivedEntry::Directory { explicit: true })?;
+            .preflight_entry(&key, ArchivedEntry::Directory { explicit: true })?;
         self.state.begin_write();
         let result = self.backend.write_directory_member(&path).await;
         self.state.complete_write();
         self.resolve_hook(result)?;
-        self.state.entries.commit_entry(&path, reservation);
+        self.state.entries.commit_entry(&key, reservation);
         Ok(())
     }
 
@@ -629,10 +636,11 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
     traversal: &mut DirectoryBuild<'_>,
 ) -> Result<(), BuildFailure<B::Error>> {
     for entry in entries {
+        let key = B::COLLISION_KEY(&entry.archive_path);
         let reservation = traversal
             .entries
             .preflight_entry(
-                &entry.archive_path,
+                &key,
                 if matches!(&entry.kind, PreparedTraversalKind::Directory) {
                     ArchivedEntry::Directory { explicit: true }
                 } else {
@@ -685,9 +693,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                     .await?;
             }
         }
-        traversal
-            .entries
-            .commit_entry(&entry.archive_path, reservation);
+        traversal.entries.commit_entry(&key, reservation);
         traversal.emitted = true;
     }
     Ok(())
