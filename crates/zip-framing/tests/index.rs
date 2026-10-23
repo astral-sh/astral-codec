@@ -1770,17 +1770,24 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 #[tokio::test]
 async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
     for (names, duplicate) in [
-        (["d/config", "d/config"], true),
-        (["./d/config", "d/./config"], true),
-        (["d/config", "d//config"], true),
-        (["d/config/", "d/config"], true),
-        (["d/./", "d/file"], false),
-        (["d/.config", "d/config"], false),
-        (["d/Config", "d/config"], false),
+        (&["d/config", "d/config"][..], true),
+        (&["./d/config", "d/./config"], true),
+        (&["d/config", "d//config"], true),
+        (&["d/config/", "d/config"], true),
+        (&["d/config/./", "e/config", "d/config"], true),
+        (&["d/config", "d/other", "d/config"], true),
+        (&["d/config", "e/config", "d/other"], false),
+        (&["d/./", "d/file"], false),
+        (&["d/.config", "d/config"], false),
+        (&["d/Config", "d/config"], false),
+        (&["d/../config", "config"], false),
+        // These spellings have the same CRC-32, both as parents and as leaves.
+        (&["plumless/config", "buckeroo/config"], false),
+        (&["d/buckeroo", "d/plumless"], false),
     ] {
         let mut bytes = Vec::new();
         let mut headers = Vec::new();
-        for path in names {
+        for &path in names {
             let kind = if path.ends_with('/') {
                 WriteEntryKind::Directory
             } else {
@@ -1795,12 +1802,16 @@ async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
             bytes.extend(member.local_header());
             headers.push(member.central_header());
         }
-        // A central-directory reader visits the second local member first.
+        // Directory order is the reverse of physical order.
         let offset = bytes.len() as u64;
         for header in headers.into_iter().rev() {
             bytes.extend(header);
         }
-        bytes.extend(end_records(2, offset, bytes.len() as u64 - offset)?);
+        bytes.extend(end_records(
+            names.len() as u64,
+            offset,
+            bytes.len() as u64 - offset,
+        )?);
 
         let mut source = Cursor::new(bytes);
         let result = Index::read(&mut source, Limits::default()).await;
@@ -1818,7 +1829,10 @@ async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
         } else {
             let mut index = result?;
             index.validate_all(&mut source).await?;
-            assert_eq!(index.entries()[1].directory().path(), names[0]);
+            assert_eq!(
+                index.entries()[names.len() - 1].directory().path(),
+                names[0]
+            );
         }
     }
     Ok(())
