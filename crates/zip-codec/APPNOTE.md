@@ -71,11 +71,6 @@ describes the checks the reader enforces.
 
 ## Proposed restrictions
 
-- **Archive-level extensions.** The reader parses the archive extra data
-  record using member-field rules and accepts unknown ZIP64 extensible data
-  sector IDs. The former has security-related uses (§7.5.2). The latter has
-  its own ID namespace (§4.3.14.4, Appendix C). Reject these unsupported
-  records at archive open.
 - **Info-ZIP field reconciliation.** The current prefix checks accept a
   seven-byte `0x5855` central field, which ends partway through a timestamp.
   Validate the documented local and central layouts of `0x5855`, `0x5455`,

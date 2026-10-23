@@ -4,9 +4,8 @@ use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, Error, ExtraHeaderId, Limits, add,
+    Budget, Error, Limits, add,
     constants::{extra, signature, size, version},
-    extra::Extras,
     invalid,
     record::{RecordReader, array_at},
 };
@@ -368,21 +367,14 @@ impl CentralDirectory {
         // The entry count and directory size have already passed their budgets.
         let mut entries = Vec::with_capacity(self.count as usize);
 
-        // The archive extra record is part of the directory's declared size.
-        if self.size >= size::ARCHIVE_EXTRA as u64 {
-            let mut header = [0; size::ARCHIVE_EXTRA];
-            reader.read_at(position, &mut header, end).await?;
-            if u32::from_le_bytes(array_at::<0, 4, _>(&header)) == signature::ARCHIVE_EXTRA {
-                let length = u32::from_le_bytes(array_at::<4, 4, _>(&header)) as usize;
-                if add(position, size::ARCHIVE_EXTRA as u64 + length as u64)? > end {
-                    return Err(invalid(position, "truncated archive extra record"));
-                }
-
-                let bytes = reader
-                    .read_vec(position + size::ARCHIVE_EXTRA as u64, length, end)
-                    .await?;
-                Extras::parse(&bytes, position)?;
-                position += size::ARCHIVE_EXTRA as u64 + length as u64;
+        if self.size >= size::SIGNATURE as u64 {
+            let mut signature = [0; size::SIGNATURE];
+            reader.read_at(position, &mut signature, end).await?;
+            if u32::from_le_bytes(signature) == signature::ARCHIVE_EXTRA {
+                return Err(Error::Unsupported {
+                    position,
+                    feature: "archive extra data record",
+                });
             }
         }
 
@@ -455,7 +447,7 @@ fn find_end(tail: &[u8], tail_start: u64) -> Result<(usize, [u8; size::END]), Er
     })
 }
 
-/// A ZIP64 end record with a validated locator, fixed fields, and extensible sector.
+/// A ZIP64 end record with a validated locator and an empty extensible data sector.
 struct Zip64EndRecord {
     /// The absolute offset of the ZIP64 end record.
     position: u64,
@@ -470,7 +462,7 @@ struct Zip64EndRecord {
 impl Zip64EndRecord {
     /// Reads the record if a ZIP64 locator precedes the classic end record.
     ///
-    /// Charges both the directory and this record before reading extensions.
+    /// Charges both the directory and this record to the metadata budget.
     async fn read_if_present<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         end_position: u64,
@@ -521,6 +513,12 @@ impl Zip64EndRecord {
         if u16::from_le_bytes(array_at::<14, 2, _>(&header)) != version::ZIP64 {
             return Err(invalid(position, "invalid ZIP64 extraction version"));
         }
+        if end_size != size::ZIP64_END_BODY as u64 {
+            return Err(Error::Unsupported {
+                position,
+                feature: "ZIP64 extensible data sector",
+            });
+        }
 
         if u32::from_le_bytes(array_at::<16, 4, _>(&header)) != 0
             || u32::from_le_bytes(array_at::<20, 4, _>(&header)) != 0
@@ -540,8 +538,6 @@ impl Zip64EndRecord {
         budget.check_entry_count(entry_count)?;
         budget.charge_metadata(directory_size)?;
         budget.charge_metadata(locator_position - position)?;
-        Self::check_extensible_sector(reader, position + size::ZIP64_END as u64, locator_position)
-            .await?;
 
         Ok(Some(Self {
             position,
@@ -549,67 +545,5 @@ impl Zip64EndRecord {
             directory_size,
             entry_count,
         }))
-    }
-
-    async fn check_extensible_sector<R: AsyncRead + AsyncSeek + Unpin>(
-        reader: &mut RecordReader<'_, R>,
-        mut position: u64,
-        end: u64,
-    ) -> Result<(), Error> {
-        let length = end
-            .checked_sub(position)
-            .ok_or_else(|| invalid(position, "invalid ZIP64 extension bounds"))?;
-        let length = usize::try_from(length)
-            .map_err(|_| invalid(position, "ZIP64 extensions exceed addressable memory"))?;
-        // Buffer extensions once so tiny fields cannot force millions of seeks.
-        let buffer = reader.read_vec(position, length, end).await?;
-
-        let mut bytes = buffer.as_slice();
-        let mut records = 0usize;
-        while !bytes.is_empty() {
-            let Some((header, remaining)) = bytes.split_first_chunk::<{ size::ZIP64_EXTENSION }>()
-            else {
-                return Err(invalid(position, "truncated ZIP64 extension header"));
-            };
-
-            let [
-                identifier_low,
-                identifier_high,
-                length_0,
-                length_1,
-                length_2,
-                length_3,
-            ] = *header;
-            match ExtraHeaderId::from(u16::from_le_bytes([identifier_low, identifier_high])) {
-                ExtraHeaderId::PatchDescriptor
-                | ExtraHeaderId::Pkcs7Store
-                | ExtraHeaderId::X509File
-                | ExtraHeaderId::X509Directory
-                | ExtraHeaderId::StrongEncryption
-                | ExtraHeaderId::EncryptionRecipients
-                | ExtraHeaderId::Aes => {
-                    return Err(Error::Unsupported {
-                        position,
-                        feature: "ZIP64 security or patch extension",
-                    });
-                }
-                _ => {}
-            }
-
-            let length = u32::from_le_bytes([length_0, length_1, length_2, length_3]) as usize;
-            bytes = remaining
-                .get(length..)
-                .ok_or_else(|| invalid(position, "truncated ZIP64 extension"))?;
-            position += size::ZIP64_EXTENSION as u64 + length as u64;
-            records += 1;
-
-            // Parsing buffered records performs no I/O. Periodically yield to give
-            // other tasks a chance to run while processing many small extensions.
-            if records.is_multiple_of(1024) {
-                tokio::task::consume_budget().await;
-            }
-        }
-
-        Ok(())
     }
 }

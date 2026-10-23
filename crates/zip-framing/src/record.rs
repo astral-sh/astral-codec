@@ -33,22 +33,6 @@ impl<'a, R: AsyncRead + AsyncSeek + Unpin> RecordReader<'a, R> {
         Ok(self.inner.seek(SeekFrom::End(0)).await?)
     }
 
-    /// Checks the requested span before allocating and reading its bytes.
-    pub(crate) async fn read_vec(
-        &mut self,
-        position: u64,
-        length: usize,
-        end: u64,
-    ) -> Result<Vec<u8>, Error> {
-        if add(position, length as u64)? > end {
-            return Err(invalid(position, "record extends beyond its container"));
-        }
-
-        let mut bytes = vec![0; length];
-        self.read_at(position, &mut bytes, end).await?;
-        Ok(bytes)
-    }
-
     /// Borrows a checked span, filling the read-ahead window when necessary.
     pub(crate) async fn read_slice(
         &mut self,
@@ -395,15 +379,6 @@ mod tests {
         let mut reader = RecordReader::new(&mut source, 4, &mut buffer);
 
         // An allocation of this size would fail before any I/O could occur.
-        assert!(matches!(
-            reader.read_vec(0, usize::MAX, 4).await,
-            Err(Error::Invalid {
-                position: 0,
-                reason: "record extends beyond its container",
-            })
-        ));
-        assert_eq!(reader.read_vec(1, 2, 4).await?, [2, 3]);
-
         assert!(matches!(
             reader.read_slice(0, usize::MAX, 4).await,
             Err(Error::Invalid {
