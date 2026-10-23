@@ -261,8 +261,21 @@ impl CentralDirectory {
 
         let (offset, end) = find_end(tail, tail_start)?;
         let position = tail_start + offset as u64;
-        str::from_utf8(&tail[offset + size::END..])
-            .map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
+        let comment = &tail[offset + size::END..];
+        // Readers such as Python's zipfile search backward for the last EOCD
+        // signature when there is a comment, even if its length is wrong.
+        if !comment.is_empty()
+            && let Some(shadow) = memmem::find(
+                &tail[offset + size::SIGNATURE..],
+                &signature::END.to_le_bytes(),
+            )
+        {
+            return Err(invalid(
+                position + (size::SIGNATURE + shadow) as u64,
+                "ambiguous end records",
+            ));
+        }
+        str::from_utf8(comment).map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
 
         let (offset, size, count, boundary) = if let Some(record) =
             Zip64EndRecord::read_if_present(reader, position, budget).await?
