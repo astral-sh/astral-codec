@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem, str};
+use std::{cell::RefCell, collections::HashSet, mem, str};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -6,7 +6,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use crate::{
     Budget, Error, Limits, add,
     constants::{extra, signature, size, version},
-    invalid,
+    invalid, member_destination,
     record::{RecordReader, array_at},
 };
 
@@ -406,6 +406,21 @@ impl CentralDirectory {
             ));
         }
 
+        // Directory order may differ from local order. Two members with the
+        // same destination would give those orders different overwrite semantics.
+        if entries.len() > 1 {
+            let mut destinations = HashSet::with_capacity(entries.len());
+            for entry in &entries {
+                let directory = entry.directory();
+                if !destinations.insert(member_destination(directory.path())) {
+                    return Err(invalid(
+                        directory.position(),
+                        "duplicate member destination",
+                    ));
+                }
+                tokio::task::consume_budget().await;
+            }
+        }
         Ok(entries)
     }
 }

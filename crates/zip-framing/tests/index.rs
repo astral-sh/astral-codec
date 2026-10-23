@@ -1768,6 +1768,63 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 }
 
 #[tokio::test]
+async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
+    for (names, duplicate) in [
+        (["d/config", "d/config"], true),
+        (["./d/config", "d/./config"], true),
+        (["d/config", "d//config"], true),
+        (["d/config/", "d/config"], true),
+        (["d/./", "d/file"], false),
+        (["d/.config", "d/config"], false),
+        (["d/Config", "d/config"], false),
+    ] {
+        let mut bytes = Vec::new();
+        let mut headers = Vec::new();
+        for path in names {
+            let kind = if path.ends_with('/') {
+                WriteEntryKind::Directory
+            } else {
+                WriteEntryKind::File { executable: false }
+            };
+            let member = PendingMember::new(path, CompressionMethod::Stored, kind)?.finish(
+                0,
+                0,
+                0,
+                bytes.len() as u64,
+            )?;
+            bytes.extend(member.local_header());
+            headers.push(member.central_header());
+        }
+        // A central-directory reader visits the second local member first.
+        let offset = bytes.len() as u64;
+        for header in headers.into_iter().rev() {
+            bytes.extend(header);
+        }
+        bytes.extend(end_records(2, offset, bytes.len() as u64 - offset)?);
+
+        let mut source = Cursor::new(bytes);
+        let result = Index::read(&mut source, Limits::default()).await;
+        if duplicate {
+            assert!(
+                matches!(
+                    result,
+                    Err(FrameError::Invalid {
+                        position: 0,
+                        reason: "duplicate member destination"
+                    })
+                ),
+                "{names:?}"
+            );
+        } else {
+            let mut index = result?;
+            index.validate_all(&mut source).await?;
+            assert_eq!(index.entries()[1].directory().path(), names[0]);
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
     let size = u64::from(u32::MAX) + 1;
     let member = PendingMember::new(

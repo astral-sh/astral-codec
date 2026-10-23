@@ -226,6 +226,30 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
     Ok(())
 }
 
+#[tokio::test]
+async fn rejects_aliased_destinations_before_writing() -> TestResult {
+    let mut builder = ZipEncoder::new(Cursor::new(Vec::new())).builder();
+    builder
+        .add_file("d/./config", &b"first"[..], EntryMetadata::default())
+        .await?;
+    assert!(matches!(
+        builder.add_file("d/config", &b"second"[..], EntryMetadata::default()).await,
+        Err(BuildError::PathCollision { path }) if path == "d/config"
+    ));
+
+    // An explicit directory can still follow a member that implied it.
+    builder.add_directory("d/").await?;
+    assert!(matches!(
+        builder.add_directory("d").await,
+        Err(BuildError::PathCollision { path }) if path == "d"
+    ));
+    let mut archive = ZipArchive::open(builder.finish_into_inner().await?.into_inner()).await?;
+    archive.validate_all().await?;
+    assert_eq!(archive.entries().len(), 2);
+    assert_eq!(archive.entries()[0].directory().path(), "d/./config");
+    Ok(())
+}
+
 #[derive(Default)]
 struct FailingWriter {
     inner: Cursor<Vec<u8>>,

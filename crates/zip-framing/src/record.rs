@@ -1,4 +1,5 @@
 use std::{
+    borrow::Cow,
     io::{self, SeekFrom},
     str,
 };
@@ -159,6 +160,27 @@ pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
     }
 
     Ok(())
+}
+
+/// Returns the case-sensitive destination used to detect duplicate ZIP members.
+///
+/// Empty and `.` components do not change a destination. All other components,
+/// including `..`, are compared literally. This does not validate a path for
+/// filesystem extraction.
+pub fn member_destination(path: &str) -> Cow<'_, str> {
+    let path = path.trim_end_matches('/');
+    if !path.split('/').any(|part| matches!(part, "" | ".")) {
+        return Cow::Borrowed(path);
+    }
+
+    let mut destination = String::with_capacity(path.len());
+    for part in path.split('/').filter(|part| !matches!(*part, "" | ".")) {
+        if !destination.is_empty() {
+            destination.push('/');
+        }
+        destination.push_str(part);
+    }
+    Cow::Owned(destination)
 }
 
 /// General-purpose header flags (APPNOTE 4.4.4).
