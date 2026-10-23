@@ -19,11 +19,6 @@ pub enum EntryKind {
         /// The target from the PKWARE UNIX extra field, if any.
         unix_target: Option<String>,
     },
-    /// A hard link with a nonempty target in the UNIX extra field.
-    HardLink {
-        /// The target from the PKWARE UNIX extra field.
-        target: String,
-    },
     /// A character device.
     CharacterDevice {
         /// Device numbers from the PKWARE UNIX extra field, if any.
@@ -37,21 +32,13 @@ pub enum EntryKind {
     /// A named pipe.
     Fifo,
     /// A UNIX socket.
-    Socket {
-        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
-        unix_data: Option<Vec<u8>>,
-    },
+    Socket,
     /// A DOS volume label.
-    VolumeLabel {
-        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
-        unix_data: Option<Vec<u8>>,
-    },
+    VolumeLabel,
     /// An unrecognized UNIX file type, masked from the mode.
     Unknown {
         /// The masked UNIX file-type bits.
         mode: u16,
-        /// Nonempty file-type data from the PKWARE UNIX extra field, if any.
-        unix_data: Option<Vec<u8>>,
     },
 }
 
@@ -61,11 +48,6 @@ impl EntryKind {
         unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
     ) -> Result<Self, Error> {
-        let unix_data = unix_data.filter(|data| !data.is_empty());
-        if attributes.dos_volume_label {
-            return Ok(Self::VolumeLabel { unix_data });
-        }
-
         let position = directory.position();
         let file_type = match (
             UnixFileType::from(attributes.unix_mode),
@@ -75,15 +57,20 @@ impl EntryKind {
             (file_type, false) => file_type,
             _ => return Err(invalid(position, "inconsistent file attributes")),
         };
+        if attributes.dos_volume_label && file_type != UnixFileType::Unspecified {
+            return Err(invalid(position, "inconsistent file attributes"));
+        }
 
-        if matches!(
-            file_type,
-            UnixFileType::Directory
-                | UnixFileType::CharacterDevice
-                | UnixFileType::BlockDevice
-                | UnixFileType::Fifo
-                | UnixFileType::Socket
-        ) && (directory.size() != 0 || directory.crc32() != 0)
+        if (attributes.dos_volume_label
+            || matches!(
+                file_type,
+                UnixFileType::Directory
+                    | UnixFileType::CharacterDevice
+                    | UnixFileType::BlockDevice
+                    | UnixFileType::Fifo
+                    | UnixFileType::Socket
+            ))
+            && (directory.size() != 0 || directory.crc32() != 0)
         {
             return Err(invalid(position, "non-file member has payload data"));
         }
@@ -99,19 +86,8 @@ impl EntryKind {
             return Err(invalid(position, "empty symbolic-link target"));
         }
 
-        if matches!(file_type, UnixFileType::Directory | UnixFileType::Fifo) && unix_data.is_some()
-        {
-            return Err(invalid(position, "unexpected UNIX file-type data"));
-        }
-
+        let has_type_data = unix_data.as_ref().is_some_and(|data| !data.is_empty());
         Ok(match file_type {
-            UnixFileType::Unspecified | UnixFileType::Regular => match unix_data {
-                Some(data) => Self::HardLink {
-                    target: parse_link_target(data, position)?,
-                },
-                None => Self::File,
-            },
-            UnixFileType::Directory => Self::Directory,
             UnixFileType::SymbolicLink => Self::SymbolicLink {
                 unix_target: unix_data
                     .map(|data| parse_link_target(data, position))
@@ -123,9 +99,22 @@ impl EntryKind {
             UnixFileType::BlockDevice => Self::BlockDevice {
                 numbers: DeviceNumbers::parse(unix_data, position)?,
             },
+            // APPNOTE 4.5.7 gives hard links a target but no distinct file type.
+            UnixFileType::Unspecified | UnixFileType::Regular
+                if has_type_data && !attributes.dos_volume_label =>
+            {
+                return Err(Error::Unsupported {
+                    position,
+                    feature: "ambiguous UNIX hard link",
+                });
+            }
+            _ if has_type_data => return Err(invalid(position, "unexpected UNIX file-type data")),
+            UnixFileType::Unspecified if attributes.dos_volume_label => Self::VolumeLabel,
+            UnixFileType::Unspecified | UnixFileType::Regular => Self::File,
+            UnixFileType::Directory => Self::Directory,
             UnixFileType::Fifo => Self::Fifo,
-            UnixFileType::Socket => Self::Socket { unix_data },
-            UnixFileType::Unknown(mode) => Self::Unknown { mode, unix_data },
+            UnixFileType::Socket => Self::Socket,
+            UnixFileType::Unknown(mode) => Self::Unknown { mode },
         })
     }
 }
@@ -157,6 +146,9 @@ impl DeviceNumbers {
 }
 
 fn parse_link_target(data: Vec<u8>, position: u64) -> Result<String, Error> {
+    if data.is_empty() {
+        return Err(invalid(position, "empty symbolic-link target"));
+    }
     let target =
         String::from_utf8(data).map_err(|_| invalid(position, "non-UTF-8 UNIX link target"))?;
     if target.contains('\0') {
