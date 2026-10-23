@@ -73,11 +73,11 @@ must exactly fill its assigned span. Checked local metadata is cached.
 `ZipArchive::validate_all` checks every member's metadata and file type, including
 unselected members, establishing complete nonoverlapping record coverage. Without
 that call or traversal of every member, malformed unselected local records and
-some gaps or overlaps can remain undiscovered. Extra fields must be bounded,
-complete records with unique identifiers. Unknown extensions remain opaque
-and do not supply effective names or file types.
-The reader recognizes the [WinZip AES extra field](https://www.winzip.com/en/support/aes-encryption/)
-(`0x9901`) and rejects the entry as encrypted.
+some gaps or overlaps can remain undiscovered.
+
+Each member extra field must have a [supported identifier](crates/zip-codec/APPNOTE.md#member-extra-fields)
+and fit within its header. The reader rejects duplicate identifiers, conflicting
+metadata, and unsupported fields, even when both headers contain identical copies.
 
 Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
 accepted without it. Unicode path extra fields must have a valid CRC and agree

@@ -74,7 +74,7 @@ regardless of the member's UTF-8 flag.
 The member adapter supports regular files, directories, symbolic links, and
 the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
 Volume labels, sockets, and conflicting file-type attributes cannot be projected.
-Unknown extra fields are checked as bounded records and otherwise ignored.
+Each member header may contain only the [supported extra fields](APPNOTE.md#member-extra-fields).
 
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
 the encoder seeks back to fill in the local header's CRC and sizes. No data
