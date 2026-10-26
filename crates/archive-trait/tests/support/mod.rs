@@ -89,6 +89,8 @@ pub mod entry {
         MemberMetadata {
             path: path.to_owned(),
             position: 0,
+            mtime: None,
+            pax_vendor_records: Default::default(),
         }
     }
 }

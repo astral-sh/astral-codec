@@ -5,11 +5,11 @@
 //! as file-system paths. [`ArchiveTrait::extract_in`] validates and normalizes
 //! them as specified by [`crate::extract::ExtractPolicy`].
 
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 
 use archive_trait::{
     Archive as ArchiveTrait, Member, MemberMetadata, MemberPayload as MemberPayloadTrait,
-    SpecialKind,
+    PaxVendorValue, SpecialKind,
 };
 use tar_framing::{
     ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
@@ -576,7 +576,13 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
             return Err(error);
         }
 
-        match project_member(frame) {
+        match project_member(
+            frame,
+            !matches!(
+                self.policy.pax_policy.vendor_extension_policy,
+                PaxVendorExtensionPolicy::RejectUnknown
+            ),
+        ) {
             Ok(member) => Ok(Some(member)),
             Err(error) => {
                 self.fused = true;
@@ -588,6 +594,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
 fn project_member<'a, R>(
     frame: MemberFrame<'a, R>,
+    retain_vendor_records: bool,
 ) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
     let position = frame.header.position;
     let kind = frame.header.kind;
@@ -609,7 +616,39 @@ fn project_member<'a, R>(
     } else {
         String::new()
     };
-    let metadata = MemberMetadata { path, position };
+    let mut metadata = MemberMetadata {
+        path,
+        position,
+        mtime: frame.header.mtime,
+        pax_vendor_records: BTreeMap::new(),
+    };
+    if let MemberExtensions::Pax(state) = &frame.extensions {
+        metadata.mtime = match state.effective_record(&PaxKeyword::Mtime) {
+            Some(PaxRecord::Mtime(PaxValue::Value(value))) => Some(*value),
+            Some(PaxRecord::Mtime(PaxValue::Deleted)) => None,
+            _ => metadata.mtime,
+        };
+        // The default policy rejects all vendor records. Avoid scanning inherited
+        // global state for every member when no vendor snapshot can be needed.
+        if retain_vendor_records {
+            for record in state.effective_records() {
+                if let PaxRecord::Vendor {
+                    vendor,
+                    name,
+                    value,
+                } = record
+                {
+                    metadata.pax_vendor_records.insert(
+                        format!("{vendor}.{name}"),
+                        match value {
+                            PaxValue::Value(value) => PaxVendorValue::Value(value.clone()),
+                            PaxValue::Deleted => PaxVendorValue::Deleted,
+                        },
+                    );
+                }
+            }
+        }
+    }
 
     Ok(match kind {
         UstarKind::Regular | UstarKind::Contiguous => Member::File {

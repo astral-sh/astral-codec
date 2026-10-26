@@ -1,7 +1,7 @@
 //! PAX record parsing, active-global updates, and per-member metadata state.
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt,
     str::FromStr,
     sync::Arc,
@@ -254,6 +254,25 @@ impl<'global> PaxState<'global> {
             .as_ref()
             .map(|extension| extension.records.as_ref());
         Self::effective_record_from(local_records, self.global_records, keyword)
+    }
+
+    /// Returns each effective keyword's final record, including deletions.
+    ///
+    /// Local records override the active global state, and the last local
+    /// record for a repeated keyword wins. Inherited global records are
+    /// included even when no new global extension precedes this member.
+    /// The iteration order is unspecified.
+    pub fn effective_records(&self) -> impl Iterator<Item = &PaxRecord> {
+        let mut seen = HashSet::new();
+        self.local_extension
+            .iter()
+            .flat_map(|extension| extension.records().iter().rev())
+            .chain(
+                self.global_records
+                    .into_iter()
+                    .flat_map(|global| global.records.as_slice()),
+            )
+            .filter(move |record| seen.insert(record.keyword()))
     }
 
     pub(super) fn effective_size<'records>(
@@ -763,6 +782,18 @@ mod tests {
                 expected: Some(comment("global")),
             },
             Case {
+                name: "last global duplicate wins",
+                global: vec![comment("first"), comment("last")],
+                local: None,
+                expected: Some(comment("last")),
+            },
+            Case {
+                name: "global deletion",
+                global: vec![comment("global"), PaxRecord::Comment(PaxValue::Deleted)],
+                local: None,
+                expected: Some(PaxRecord::Comment(PaxValue::Deleted)),
+            },
+            Case {
                 name: "local overrides global",
                 global: vec![comment("global")],
                 local: Some(vec![comment("local")]),
@@ -794,6 +825,12 @@ mod tests {
                 "{}",
                 case.name
             );
+            assert_eq!(
+                state.effective_records().collect::<Vec<_>>(),
+                case.expected.iter().collect::<Vec<_>>(),
+                "{}",
+                case.name
+            );
         }
 
         let state = PaxState::new(
@@ -819,6 +856,54 @@ mod tests {
                 (11, PaxKind::Local),
             ]
         );
+    }
+
+    #[test]
+    fn iterates_effective_records_from_inherited_and_local_state() {
+        let deleted = PaxRecord::Vendor {
+            vendor: text("Acme"),
+            name: text("deleted"),
+            value: PaxValue::Deleted,
+        };
+        let global = global_state(vec![
+            vendor("inherited", "global"),
+            vendor("overridden", "global"),
+            vendor("deleted", "global"),
+            PaxRecord::Comment(PaxValue::Deleted),
+        ]);
+        let state = PaxState::new(
+            global.as_ref(),
+            Vec::new(),
+            Some(extension(
+                0,
+                PaxKind::Local,
+                vec![
+                    vendor("overridden", "first"),
+                    vendor("overridden", "last"),
+                    deleted.clone(),
+                    vendor("local", "value"),
+                    vendor("attribute", "lowercase"),
+                    vendor("Attribute", "uppercase"),
+                ],
+            )),
+        );
+        let actual = state.effective_records().collect::<Vec<_>>();
+        let expected = [
+            vendor("inherited", "global"),
+            vendor("overridden", "last"),
+            deleted,
+            PaxRecord::Comment(PaxValue::Deleted),
+            vendor("local", "value"),
+            vendor("attribute", "lowercase"),
+            vendor("Attribute", "uppercase"),
+        ];
+        assert_eq!(actual.len(), expected.len());
+        for record in &expected {
+            assert!(
+                actual.contains(&record),
+                "missing effective record: {record:?}"
+            );
+        }
     }
 
     #[test]

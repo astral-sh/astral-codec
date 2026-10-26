@@ -16,9 +16,11 @@ pub mod extract;
 mod name;
 
 use std::{
+    collections::BTreeMap,
     io,
     marker::PhantomData,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 
 use thiserror::Error;
@@ -35,6 +37,35 @@ pub struct MemberMetadata {
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
+    /// The effective modification time in integral seconds since the Unix epoch.
+    ///
+    /// TAR decoders apply pax overrides before exposing this value. An explicit
+    /// pax deletion yields `None`, without falling back to the ordinary header.
+    /// Fractional seconds are discarded by the TAR decoder.
+    pub mtime: Option<u64>,
+    /// An owned snapshot of effective vendor-namespaced pax records.
+    ///
+    /// Keys are complete, case-sensitive keywords such as `Acme.attribute`.
+    /// Values retain their original bytes and explicit deletion state. Standard
+    /// pax records are not included. An empty map means no vendor records apply.
+    ///
+    /// TAR decoders populate this map after validating their decode policy and
+    /// resolving local-over-global and last-record-wins precedence. Map order
+    /// is keyword order, not the order of records in the archive. Vendor-specific
+    /// interpretation remains the caller's responsibility.
+    pub pax_vendor_records: BTreeMap<String, PaxVendorValue>,
+}
+
+/// The effective value of one vendor-namespaced pax record.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum PaxVendorValue {
+    /// This record sets or overrides the attribute with uninterpreted bytes.
+    Value(Arc<[u8]>),
+    /// This record explicitly deletes the attribute.
+    ///
+    /// A deletion differs from a missing keyword: it prevents fallback to an
+    /// inherited value for the same keyword.
+    Deleted,
 }
 
 /// A special-file kind that generic extraction deliberately rejects.
