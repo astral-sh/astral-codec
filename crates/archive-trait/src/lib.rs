@@ -45,27 +45,97 @@ pub struct MemberMetadata {
     pub mtime: Option<u64>,
     /// An owned snapshot of effective vendor-namespaced pax records.
     ///
-    /// Keys are complete, case-sensitive keywords such as `Acme.attribute`.
-    /// Values retain their original bytes and explicit deletion state. Standard
-    /// pax records are not included. An empty map means no vendor records apply.
-    ///
-    /// TAR decoders populate this map after validating their decode policy and
-    /// resolving local-over-global and last-record-wins precedence. Map order
-    /// is keyword order, not the order of records in the archive. Vendor-specific
-    /// interpretation remains the caller's responsibility.
-    pub pax_vendor_records: BTreeMap<String, PaxVendorValue>,
+    /// TAR decoders populate this snapshot after validating their decode policy
+    /// and resolving local-over-global and last-record-wins precedence.
+    /// It is empty when the decoder does not retain vendor metadata or when no
+    /// vendor records apply to this member.
+    /// Vendor-specific interpretation remains the caller's responsibility.
+    pub pax_vendor_records: PaxVendorRecords,
 }
 
 /// The effective value of one vendor-namespaced pax record.
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum PaxVendorValue {
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PaxVendorValue<T> {
     /// This record sets or overrides the attribute with uninterpreted bytes.
-    Value(Arc<[u8]>),
+    Value(T),
     /// This record explicitly deletes the attribute.
     ///
     /// A deletion differs from a missing keyword: it prevents fallback to an
     /// inherited value for the same keyword.
     Deleted,
+}
+
+/// An owned, read-only snapshot of effective vendor-namespaced pax records.
+///
+/// Keys are complete, case-sensitive keywords such as `Acme.attribute`. Values
+/// retain their original bytes and explicit deletion state. Standard pax records
+/// are not included. The snapshot remains valid after advancing the archive.
+///
+/// Format decoders can construct snapshots with [`FromIterator`]. Construction
+/// does not validate TAR policy or resolve global/local scope; the decoder must
+/// do that first. If a keyword appears more than once, the last value wins.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct PaxVendorRecords {
+    records: BTreeMap<String, PaxVendorValue<Arc<[u8]>>>,
+}
+
+impl PaxVendorRecords {
+    /// Returns the effective value for a complete, case-sensitive keyword.
+    ///
+    /// `None` means the keyword is absent from this snapshot, whereas
+    /// `Some(PaxVendorValue::Deleted)` means it was explicitly deleted.
+    pub fn get(&self, keyword: &str) -> Option<PaxVendorValue<&[u8]>> {
+        self.records.get(keyword).map(Self::borrow_value)
+    }
+
+    /// Visits each effective keyword once, including explicit deletions.
+    ///
+    /// Iteration order is unspecified and does not represent archive order.
+    pub fn iter(&self) -> impl Iterator<Item = (&str, PaxVendorValue<&[u8]>)> {
+        self.records
+            .iter()
+            .map(|(keyword, value)| (keyword.as_str(), Self::borrow_value(value)))
+    }
+
+    /// Returns the number of effective keywords, including deletions.
+    pub fn len(&self) -> usize {
+        self.records.len()
+    }
+
+    /// Returns whether the snapshot contains no effective vendor records.
+    pub fn is_empty(&self) -> bool {
+        self.records.is_empty()
+    }
+
+    fn borrow_value(value: &PaxVendorValue<Arc<[u8]>>) -> PaxVendorValue<&[u8]> {
+        match value {
+            PaxVendorValue::Value(bytes) => PaxVendorValue::Value(bytes.as_ref()),
+            PaxVendorValue::Deleted => PaxVendorValue::Deleted,
+        }
+    }
+}
+
+impl<K, V> FromIterator<(K, PaxVendorValue<V>)> for PaxVendorRecords
+where
+    K: Into<String>,
+    V: Into<Arc<[u8]>>,
+{
+    fn from_iter<T: IntoIterator<Item = (K, PaxVendorValue<V>)>>(records: T) -> Self {
+        Self {
+            records: records
+                .into_iter()
+                .map(|(keyword, value)| {
+                    (
+                        keyword.into(),
+                        match value {
+                            PaxVendorValue::Value(bytes) => PaxVendorValue::Value(bytes.into()),
+                            PaxVendorValue::Deleted => PaxVendorValue::Deleted,
+                        },
+                    )
+                })
+                .collect(),
+        }
+    }
 }
 
 /// A special-file kind that generic extraction deliberately rejects.

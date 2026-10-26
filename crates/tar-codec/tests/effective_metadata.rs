@@ -1,6 +1,6 @@
 pub mod support;
 
-use std::{collections::BTreeMap, error::Error, io, sync::Arc};
+use std::{error::Error, io, sync::Arc};
 
 use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum};
 use tar_codec::{
@@ -48,6 +48,9 @@ async fn metadata_preserves_header_mtime_including_zero_and_absence() -> TestRes
             };
             assert_eq!(metadata.mtime, expected, "{format:?}");
             assert!(metadata.pax_vendor_records.is_empty());
+            assert_eq!(metadata.pax_vendor_records.len(), 0);
+            assert_eq!(metadata.pax_vendor_records.get("Acme.attribute"), None);
+            assert!(metadata.pax_vendor_records.iter().next().is_none());
             payload.skip().await?;
             assert!(members.next().await?.is_none());
         }
@@ -91,6 +94,50 @@ async fn metadata_mtime_resolves_inheritance_overrides_and_deletions() -> TestRe
 }
 
 #[tokio::test]
+async fn retaining_vendor_metadata_is_optional_without_changing_mtime_or_payload() -> TestResult {
+    let mut records = vendor_record("attribute", b"value");
+    records.extend(pax_record(PaxKeyword::Mtime, "123"));
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .pax(b'x', &records)
+        .ustar("file", b'0', b"payload", "", 0o644);
+    let bytes = archive.finish();
+
+    for disable_explicitly in [false, true] {
+        let mut archive = TarArchive::new(bytes.as_slice()).with_policy(
+            DecodePolicy::default().pax_policy(
+                PaxDecodePolicy::default()
+                    .vendor_extension_policy(PaxVendorExtensionPolicy::ignore(["Acme"])),
+            ),
+        );
+        if disable_explicitly {
+            archive = archive
+                .retain_pax_vendor_records(true)
+                .retain_pax_vendor_records(false);
+        }
+        let mut members = archive.members();
+        let Some(Member::File {
+            metadata,
+            mut payload,
+            ..
+        }) = members.next().await?
+        else {
+            return Err(io::Error::other("expected file with omitted vendor metadata").into());
+        };
+        assert!(metadata.pax_vendor_records.is_empty());
+        assert_eq!(metadata.mtime, Some(123));
+        let mut contents = Vec::new();
+        let mut chunk = Vec::new();
+        while payload.next_chunk(&mut chunk, 3).await? {
+            contents.extend_from_slice(&chunk);
+        }
+        assert_eq!(contents, b"payload");
+        assert!(members.next().await?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn vendor_metadata_snapshots_resolve_scope_and_preserve_payloads() -> TestResult {
     let mut global = vendor_record("attribute", b"global");
     global.extend(vendor_record("inherited", b"kept"));
@@ -111,6 +158,7 @@ async fn vendor_metadata_snapshots_resolve_scope_and_preserve_payloads() -> Test
         .ustar("inherited-deletion", b'0', b"payload", "", 0o644);
     let bytes = archive.finish();
     let mut members = TarArchive::new(bytes.as_slice())
+        .retain_pax_vendor_records(true)
         .with_policy(
             DecodePolicy::default().pax_policy(
                 PaxDecodePolicy::default()
@@ -120,11 +168,11 @@ async fn vendor_metadata_snapshots_resolve_scope_and_preserve_payloads() -> Test
         .members();
     let mut snapshots = Vec::new();
     let expected_values = [
-        PaxVendorValue::Value(Arc::from(b"local".as_slice())),
-        PaxVendorValue::Value(Arc::from(b"global".as_slice())),
+        PaxVendorValue::Value(b"local".as_slice()),
+        PaxVendorValue::Value(b"global".as_slice()),
         PaxVendorValue::Deleted,
-        PaxVendorValue::Value(Arc::from(b"global".as_slice())),
-        PaxVendorValue::Value(Arc::from(b"replacement".as_slice())),
+        PaxVendorValue::Value(b"global".as_slice()),
+        PaxVendorValue::Value(b"replacement".as_slice()),
         PaxVendorValue::Deleted,
         PaxVendorValue::Deleted,
     ];
@@ -138,15 +186,21 @@ async fn vendor_metadata_snapshots_resolve_scope_and_preserve_payloads() -> Test
         else {
             return Err(io::Error::other("expected file with vendor metadata").into());
         };
+        assert_eq!(metadata.pax_vendor_records.len(), 2);
+        assert!(!metadata.pax_vendor_records.is_empty());
+        assert_eq!(metadata.pax_vendor_records.get("Acme.missing"), None);
         assert_eq!(
-            metadata.pax_vendor_records,
-            BTreeMap::from([
-                ("Acme.attribute".to_owned(), expected.clone()),
-                (
-                    "Acme.inherited".to_owned(),
-                    PaxVendorValue::Value(Arc::from(b"kept".as_slice())),
-                ),
-            ]),
+            metadata.pax_vendor_records.get("Acme.attribute"),
+            Some(*expected),
+        );
+        let mut records: Vec<_> = metadata.pax_vendor_records.iter().collect();
+        records.sort_unstable_by_key(|(key, _)| *key);
+        assert_eq!(
+            records,
+            [
+                ("Acme.attribute", *expected),
+                ("Acme.inherited", PaxVendorValue::Value(b"kept".as_slice())),
+            ],
         );
         let mut contents = Vec::new();
         let mut chunk = Vec::new();
@@ -161,7 +215,7 @@ async fn vendor_metadata_snapshots_resolve_scope_and_preserve_payloads() -> Test
     for (snapshot, expected) in snapshots.iter().zip(expected_values) {
         assert_eq!(
             snapshot.pax_vendor_records.get("Acme.attribute"),
-            Some(&expected)
+            Some(expected)
         );
     }
     Ok(())
@@ -180,6 +234,7 @@ async fn allowed_duplicate_metadata_uses_the_last_record() -> TestResult {
             .ustar("file", b'0', b"", "", 0o644);
         let bytes = archive.finish();
         let mut members = TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
             .with_policy(
                 DecodePolicy::default().pax_policy(
                     PaxDecodePolicy::default()
@@ -195,12 +250,14 @@ async fn allowed_duplicate_metadata_uses_the_last_record() -> TestResult {
             return Err(io::Error::other("expected file with duplicate metadata").into());
         };
         assert_eq!(metadata.mtime, Some(200));
+        assert_eq!(metadata.pax_vendor_records.len(), 1);
         assert_eq!(
-            metadata.pax_vendor_records,
-            BTreeMap::from([(
-                "Acme.attribute".to_owned(),
-                PaxVendorValue::Value(Arc::from(b"last".as_slice())),
-            )]),
+            metadata.pax_vendor_records.get("Acme.attribute"),
+            Some(PaxVendorValue::Value(b"last".as_slice())),
+        );
+        assert_eq!(
+            metadata.pax_vendor_records.iter().collect::<Vec<_>>(),
+            [("Acme.attribute", PaxVendorValue::Value(b"last".as_slice()))],
         );
         payload.skip().await?;
         assert!(members.next().await?.is_none());
@@ -217,6 +274,7 @@ async fn vendor_metadata_preserves_bytes_when_policy_allows_them() -> TestResult
         .ustar("file", b'0', b"", "", 0o644);
     let bytes = archive.finish();
     let mut members = TarArchive::new(bytes.as_slice())
+        .retain_pax_vendor_records(true)
         .with_policy(
             DecodePolicy::default().pax_policy(
                 PaxDecodePolicy::default()
@@ -231,12 +289,25 @@ async fn vendor_metadata_preserves_bytes_when_policy_allows_them() -> TestResult
     else {
         return Err(io::Error::other("expected file with binary vendor metadata").into());
     };
+    assert_eq!(metadata.pax_vendor_records.len(), 1);
     assert_eq!(
-        metadata.pax_vendor_records,
-        BTreeMap::from([(
-            "Acme.metadata.Content-Type".to_owned(),
-            PaxVendorValue::Value(Arc::from(value.as_slice())),
-        )]),
+        metadata
+            .pax_vendor_records
+            .get("Acme.metadata.Content-Type"),
+        Some(PaxVendorValue::Value(value.as_slice())),
+    );
+    assert_eq!(
+        metadata
+            .pax_vendor_records
+            .get("Acme.metadata.content-type"),
+        None,
+    );
+    assert_eq!(
+        metadata.pax_vendor_records.iter().collect::<Vec<_>>(),
+        [(
+            "Acme.metadata.Content-Type",
+            PaxVendorValue::Value(value.as_slice())
+        )],
     );
     payload.skip().await?;
     assert!(members.next().await?.is_none());
@@ -282,6 +353,7 @@ async fn metadata_policy_rejections_precede_projection_and_fuse_iteration() -> T
             .ustar("later", b'0', b"", "", 0o644);
         let bytes = archive.finish();
         let mut members = TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
             .with_policy(DecodePolicy::default().pax_policy(policy))
             .members();
         assert!(matches!(
@@ -304,6 +376,7 @@ async fn overwritten_invalid_vendor_values_still_fail_policy() -> TestResult {
             .ustar("rejected", b'0', b"", "", 0o644);
         let bytes = archive.finish();
         let mut members = TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
             .with_policy(
                 DecodePolicy::default().pax_policy(
                     PaxDecodePolicy::default()

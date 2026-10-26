@@ -5,11 +5,11 @@
 //! as file-system paths. [`ArchiveTrait::extract_in`] validates and normalizes
 //! them as specified by [`crate::extract::ExtractPolicy`].
 
-use std::collections::{BTreeMap, HashSet};
+use std::collections::HashSet;
 
 use archive_trait::{
     Archive as ArchiveTrait, Member, MemberMetadata, MemberPayload as MemberPayloadTrait,
-    PaxVendorValue, SpecialKind,
+    PaxVendorRecords, PaxVendorValue, SpecialKind,
 };
 use tar_framing::{
     ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
@@ -34,6 +34,7 @@ pub use tar_framing::{
 pub struct TarArchive<R> {
     reader: TarReader<R>,
     policy: DecodePolicy,
+    retain_pax_vendor_records: bool,
     fused: bool,
 }
 
@@ -43,6 +44,7 @@ impl<R> TarArchive<R> {
         Self {
             reader: TarReader::new(reader),
             policy: DecodePolicy::default(),
+            retain_pax_vendor_records: false,
             fused: false,
         }
     }
@@ -61,6 +63,24 @@ impl<R> TarArchive<R> {
             .max_gnu_extension_size(policy.max_gnu_extension_size);
         self.reader = self.reader.with_policy(stream_policy);
         self.policy = policy;
+        self
+    }
+
+    /// Controls whether members retain effective vendor-namespaced pax records.
+    ///
+    /// Retention is disabled by default. Enabling it populates
+    /// [`MemberMetadata::pax_vendor_records`] with an owned snapshot for each
+    /// member, including inherited global records. This scans the effective
+    /// pax state for each member and allocates snapshot storage for retained
+    /// vendor records. Values share their underlying bytes rather than copying
+    /// them.
+    ///
+    /// This does not relax [`DecodePolicy`]. Vendor namespaces must also be
+    /// permitted by [`PaxDecodePolicy::vendor_extension_policy`]. The effective
+    /// [`MemberMetadata::mtime`] is available regardless of this setting.
+    /// Call before reading any members.
+    pub fn retain_pax_vendor_records(mut self, retain: bool) -> Self {
+        self.retain_pax_vendor_records = retain;
         self
     }
 }
@@ -578,10 +598,11 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
         match project_member(
             frame,
-            !matches!(
-                self.policy.pax_policy.vendor_extension_policy,
-                PaxVendorExtensionPolicy::RejectUnknown
-            ),
+            self.retain_pax_vendor_records
+                && !matches!(
+                    self.policy.pax_policy.vendor_extension_policy,
+                    PaxVendorExtensionPolicy::RejectUnknown
+                ),
         ) {
             Ok(member) => Ok(Some(member)),
             Err(error) => {
@@ -620,7 +641,7 @@ fn project_member<'a, R>(
         path,
         position,
         mtime: frame.header.mtime,
-        pax_vendor_records: BTreeMap::new(),
+        pax_vendor_records: PaxVendorRecords::default(),
     };
     if let MemberExtensions::Pax(state) = &frame.extensions {
         metadata.mtime = match state.effective_record(&PaxKeyword::Mtime) {
@@ -631,22 +652,26 @@ fn project_member<'a, R>(
         // The default policy rejects all vendor records. Avoid scanning inherited
         // global state for every member when no vendor snapshot can be needed.
         if retain_vendor_records {
-            for record in state.effective_records() {
-                if let PaxRecord::Vendor {
-                    vendor,
-                    name,
-                    value,
-                } = record
-                {
-                    metadata.pax_vendor_records.insert(
+            metadata.pax_vendor_records = state
+                .effective_records()
+                .filter_map(|record| {
+                    let PaxRecord::Vendor {
+                        vendor,
+                        name,
+                        value,
+                    } = record
+                    else {
+                        return None;
+                    };
+                    Some((
                         format!("{vendor}.{name}"),
                         match value {
                             PaxValue::Value(value) => PaxVendorValue::Value(value.clone()),
                             PaxValue::Deleted => PaxVendorValue::Deleted,
                         },
-                    );
-                }
-            }
+                    ))
+                })
+                .collect();
         }
     }
 
