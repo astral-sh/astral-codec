@@ -10,14 +10,18 @@ repository = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
 
+[features]
+default = ["fs"]
+fs = ["dep:cap-std", "dep:walkdir", "dep:windows-sys", "tokio/fs", "tokio/rt", "tokio/sync"]
+
 [dependencies]
-cap-std = { workspace = true }
+cap-std = { workspace = true, optional = true }
 thiserror = { workspace = true }
-tokio = { workspace = true, features = ["fs", "io-util", "rt", "sync"] }
-walkdir = { workspace = true }
+tokio = { workspace = true, features = ["io-util"] }
+walkdir = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { workspace = true }
+windows-sys = { workspace = true, optional = true }
 
 [target.'cfg(windows)'.dev-dependencies]
 junction = { workspace = true }
@@ -25,6 +29,18 @@ junction = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt"] }
+
+[[test]]
+name = "builder"
+required-features = ["fs"]
+
+[[test]]
+name = "extract"
+required-features = ["fs"]
+
+[[test]]
+name = "links"
+required-features = ["fs"]
 
 [lib]
 doctest = false

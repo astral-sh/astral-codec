@@ -10,6 +10,10 @@ repository = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }
 
+[features]
+default = ["fs"]
+fs = ["archive-trait/fs"]
+
 [dependencies]
 archive-trait = { workspace = true }
 tar-framing = { workspace = true }
@@ -23,9 +27,30 @@ tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "time"] }
 
+[[test]]
+name = "comparison"
+required-features = ["fs"]
+
+[[test]]
+name = "encode"
+required-features = ["fs"]
+
+[[test]]
+name = "extract"
+required-features = ["fs"]
+
+[[test]]
+name = "links"
+required-features = ["fs"]
+
+[[test]]
+name = "metadata"
+required-features = ["fs"]
+
 [[bench]]
 name = "comparison"
 harness = false
+required-features = ["fs"]
 
 [lib]
 doctest = false

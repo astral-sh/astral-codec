@@ -15,7 +15,7 @@ version.workspace = true
 publish = false
 
 [dependencies]
-tar-codec = { workspace = true }
+tar-codec = { workspace = true, features = ["fs"] }
 tar-framing = { workspace = true }
 
 async-compression = { workspace = true }

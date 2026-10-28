@@ -4,28 +4,35 @@
 //! [`ArchiveBuilder::builder`] to reuse high-level entry addition, recursive
 //! filesystem traversal, validation, and source streaming.
 //! Archive formats implement [`Archive`] by projecting their entries into
-//! [`Member`] values. The default [`Archive::extract_in`] implementation then
-//! applies common extraction policy and filesystem behavior.
+//! [`Member`] values.
+#![cfg_attr(
+    feature = "fs",
+    doc = "The default [`Archive::extract_in`] implementation then applies",
+    doc = "common extraction policy and filesystem behavior."
+)]
 //!
 //! Extraction assumes unique access to the destination directory. Concurrent
 //! mutation of that directory is outside the threat model.
 
 pub mod builder;
 mod component_tree;
+#[cfg(feature = "fs")]
 pub mod extract;
 mod name;
 
+use std::marker::PhantomData;
+#[cfg(feature = "fs")]
 use std::{
     io,
-    marker::PhantomData,
     path::{Path, PathBuf},
 };
 
+#[cfg(feature = "fs")]
 use thiserror::Error;
 
-pub use builder::{
-    ArchiveBuilder, BuildError, Builder, EntryMetadata, FilePayload, TraversalError,
-};
+#[cfg(feature = "fs")]
+pub use builder::TraversalError;
+pub use builder::{ArchiveBuilder, BuildError, Builder, EntryMetadata, FilePayload};
 pub use name::{NameValidator, default_name_validator};
 
 /// Common metadata for one archive member.
@@ -257,6 +264,8 @@ pub trait Archive: Sized {
 
     /// Securely extracts this archive beneath `destination` under `policy`.
     ///
+    /// This method requires the `fs` feature.
+    ///
     /// `destination` is created if it does not already exist. Symbolic links
     /// are preserved by default on platforms that support native creation;
     /// hard links require explicit opt-in through [`extract::LinkPolicy`].
@@ -275,6 +284,7 @@ pub trait Archive: Sized {
     /// Extraction is streamwise: a late error can leave a partially extracted
     /// destination. Callers requiring all-or-nothing behavior should extract
     /// into a new temporary directory and atomically rename it afterward.
+    #[cfg(feature = "fs")]
     async fn extract_in<P: AsRef<Path>>(
         self,
         destination: P,
@@ -285,6 +295,7 @@ pub trait Archive: Sized {
 }
 
 /// A valid member feature rejected by the selected [`extract::ExtractPolicy`].
+#[cfg(feature = "fs")]
 #[derive(Clone, Debug, Eq, PartialEq, Error)]
 pub enum ExtractPolicyViolation {
     /// An effective member name or link target was rejected.
@@ -307,6 +318,7 @@ pub enum ExtractPolicyViolation {
 }
 
 /// An error produced while securely extracting an archive.
+#[cfg(feature = "fs")]
 #[derive(Debug, Error)]
 pub enum ExtractError<E> {
     /// Reading or decoding the underlying archive failed.
@@ -376,6 +388,7 @@ pub enum ExtractError<E> {
     },
 }
 
+#[cfg(feature = "fs")]
 impl<E> ExtractError<E> {
     fn policy_violation(position: u64, violation: ExtractPolicyViolation) -> Self {
         Self::PolicyViolation {
