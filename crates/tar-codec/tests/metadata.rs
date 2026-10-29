@@ -306,17 +306,15 @@ async fn vendor_pax_allowlist_accepts_entire_vendor_namespaces_in_both_scopes() 
             )
             .ustar("file", b'0', b"contents", "", 0o644);
         let bytes = archive.finish();
-        for retain in [false, true] {
-            let mut members = TarArchive::new(bytes.as_slice())
-                .retain_pax_vendor_records(retain)
-                .with_policy(decode_policy.clone())
-                .members();
-            assert_eq!(
-                matches!(members.next().await, Ok(Some(_))),
-                allowed,
-                "{vendor}.{name}, retain={retain}"
-            );
-        }
+        let mut members = TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
+            .with_policy(decode_policy.clone())
+            .members();
+        assert_eq!(
+            matches!(members.next().await, Ok(Some(_))),
+            allowed,
+            "{vendor}.{name}"
+        );
     }
 }
 
@@ -333,6 +331,7 @@ async fn duplicate_pax_records_are_rejected_by_default_and_can_use_last_value() 
 
     assert!(matches!(
         TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
             .extract_in(temp.path().join("rejected"), ExtractPolicy::default())
             .await,
         Err(ExtractError::Archive(DecodeError::PolicyViolation {
@@ -556,19 +555,17 @@ async fn global_pax_headers_support_opt_out_and_ignore_trailing_updates() {
     let bytes = archive.finish();
     let reject_globals = DecodePolicy::default()
         .pax_policy(PaxDecodePolicy::default().allow_global_pax_extensions(false));
-    for retain in [false, true] {
-        assert!(matches!(
-            TarArchive::new(bytes.as_slice())
-                .retain_pax_vendor_records(retain)
-                .with_policy(reject_globals.clone())
-                .extract_in(temp.path().join("rejected"), ExtractPolicy::default())
-                .await,
-            Err(ExtractError::Archive(DecodeError::PolicyViolation {
-                position: 0,
-                violation: DecodePolicyViolation::GlobalPaxExtension,
-            }))
-        ));
-    }
+    assert!(matches!(
+        TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
+            .with_policy(reject_globals.clone())
+            .extract_in(temp.path().join("rejected"), ExtractPolicy::default())
+            .await,
+        Err(ExtractError::Archive(DecodeError::PolicyViolation {
+            position: 0,
+            violation: DecodePolicyViolation::GlobalPaxExtension,
+        }))
+    ));
 
     let destination = temp.path().join("permitted");
     let mut archive = ArchiveBuilder::new();

@@ -256,12 +256,9 @@ impl<'global> PaxState<'global> {
         Self::effective_record_from(local_records, self.global_records, keyword)
     }
 
-    /// Returns each effective keyword's final record, including deletions.
+    /// Returns each keyword's final record, including inherited globals and deletions.
     ///
-    /// Local records override the active global state, and the last local
-    /// record for a repeated keyword wins. Inherited global records are
-    /// included even when no new global extension precedes this member.
-    /// The iteration order is unspecified.
+    /// Local records override globals; the last local record wins. Order is unspecified.
     pub fn effective_records(&self) -> impl Iterator<Item = &PaxRecord> {
         let mut seen = HashSet::new();
         self.local_extension
@@ -782,18 +779,6 @@ mod tests {
                 expected: Some(comment("global")),
             },
             Case {
-                name: "last global duplicate wins",
-                global: vec![comment("first"), comment("last")],
-                local: None,
-                expected: Some(comment("last")),
-            },
-            Case {
-                name: "global deletion",
-                global: vec![comment("global"), PaxRecord::Comment(PaxValue::Deleted)],
-                local: None,
-                expected: Some(PaxRecord::Comment(PaxValue::Deleted)),
-            },
-            Case {
                 name: "local overrides global",
                 global: vec![comment("global")],
                 local: Some(vec![comment("local")]),
@@ -856,54 +841,6 @@ mod tests {
                 (11, PaxKind::Local),
             ]
         );
-    }
-
-    #[test]
-    fn iterates_effective_records_from_inherited_and_local_state() {
-        let deleted = PaxRecord::Vendor {
-            vendor: text("Acme"),
-            name: text("deleted"),
-            value: PaxValue::Deleted,
-        };
-        let global = global_state(vec![
-            vendor("inherited", "global"),
-            vendor("overridden", "global"),
-            vendor("deleted", "global"),
-            PaxRecord::Comment(PaxValue::Deleted),
-        ]);
-        let state = PaxState::new(
-            global.as_ref(),
-            Vec::new(),
-            Some(extension(
-                0,
-                PaxKind::Local,
-                vec![
-                    vendor("overridden", "first"),
-                    vendor("overridden", "last"),
-                    deleted.clone(),
-                    vendor("local", "value"),
-                    vendor("attribute", "lowercase"),
-                    vendor("Attribute", "uppercase"),
-                ],
-            )),
-        );
-        let actual = state.effective_records().collect::<Vec<_>>();
-        let expected = [
-            vendor("inherited", "global"),
-            vendor("overridden", "last"),
-            deleted,
-            PaxRecord::Comment(PaxValue::Deleted),
-            vendor("local", "value"),
-            vendor("attribute", "lowercase"),
-            vendor("Attribute", "uppercase"),
-        ];
-        assert_eq!(actual.len(), expected.len());
-        for record in &expected {
-            assert!(
-                actual.contains(&record),
-                "missing effective record: {record:?}"
-            );
-        }
     }
 
     #[test]

@@ -37,19 +37,11 @@ pub struct MemberMetadata {
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
-    /// The effective modification time in integral seconds since the Unix epoch.
+    /// Effective Unix modification time in seconds, with fractions discarded.
     ///
-    /// TAR decoders apply pax overrides before exposing this value. An explicit
-    /// pax deletion yields `None`, without falling back to the ordinary header.
-    /// Fractional seconds are discarded by the TAR decoder.
+    /// TAR pax overrides apply; a deletion yields `None` without header fallback.
     pub mtime: Option<u64>,
-    /// An owned snapshot of effective vendor-namespaced pax records.
-    ///
-    /// TAR decoders populate this snapshot after validating their decode policy
-    /// and resolving local-over-global and last-record-wins precedence.
-    /// It is empty when the decoder does not retain vendor metadata or when no
-    /// vendor records apply to this member.
-    /// Vendor-specific interpretation remains the caller's responsibility.
+    /// Effective vendor pax records, empty unless the decoder retains them.
     pub pax_vendor_records: PaxVendorRecords,
 }
 
@@ -58,38 +50,29 @@ pub struct MemberMetadata {
 pub enum PaxVendorValue<T> {
     /// This record sets or overrides the attribute with uninterpreted bytes.
     Value(T),
-    /// This record explicitly deletes the attribute.
-    ///
-    /// A deletion differs from a missing keyword: it prevents fallback to an
-    /// inherited value for the same keyword.
+    /// Explicit deletion, which prevents fallback to an inherited value.
     Deleted,
 }
 
-/// An owned, read-only snapshot of effective vendor-namespaced pax records.
+/// An owned, read-only vendor pax snapshot, valid after advancing the archive.
 ///
-/// Keys are complete, case-sensitive keywords such as `Acme.attribute`. Values
-/// retain their original bytes and explicit deletion state. Standard pax records
-/// are not included. The snapshot remains valid after advancing the archive.
-///
-/// Format decoders construct snapshots with [`FromIterator`] after validating
-/// decode policy and resolving record precedence.
+/// Keys are complete, case-sensitive keywords such as `Acme.attribute`.
+/// Values preserve raw bytes and deletions; standard pax records are excluded.
+/// Decoders construct snapshots with [`FromIterator`] after validating policy
+/// and resolving local-over-global and last-record-wins precedence.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaxVendorRecords {
     records: BTreeMap<String, PaxVendorValue<Arc<[u8]>>>,
 }
 
 impl PaxVendorRecords {
-    /// Returns the effective value for a complete, case-sensitive keyword.
-    ///
-    /// `None` means the keyword is absent from this snapshot, whereas
-    /// `Some(PaxVendorValue::Deleted)` means it was explicitly deleted.
+    /// Looks up a complete keyword; `None` is absent, distinct from
+    /// `Some(PaxVendorValue::Deleted)`.
     pub fn get(&self, keyword: &str) -> Option<PaxVendorValue<&[u8]>> {
         self.records.get(keyword).map(Self::borrow_value)
     }
 
-    /// Visits each effective keyword once, including explicit deletions.
-    ///
-    /// Iteration order is unspecified and does not represent archive order.
+    /// Visits effective keywords, including deletions, in unspecified order.
     pub fn iter(&self) -> impl Iterator<Item = (&str, PaxVendorValue<&[u8]>)> {
         self.records
             .iter()

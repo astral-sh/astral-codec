@@ -66,18 +66,13 @@ impl<R> TarArchive<R> {
         self
     }
 
-    /// Controls whether members retain effective vendor-namespaced pax records.
+    /// Retains effective vendor pax snapshots for each member; disabled by default.
     ///
-    /// Retention is disabled by default. Enabling it populates
-    /// [`MemberMetadata::pax_vendor_records`] with an owned snapshot for each
-    /// member, including inherited global records. This scans the effective
-    /// pax state for each member and allocates snapshot storage for retained
-    /// vendor records. Values share their underlying bytes rather than copying
-    /// them.
-    ///
-    /// This does not relax [`DecodePolicy`]. Vendor namespaces must also be
-    /// permitted by [`PaxDecodePolicy::vendor_extension_policy`]. The effective
-    /// [`MemberMetadata::mtime`] is available regardless of this setting.
+    /// Adds per-member scans and allocations, including inherited global records.
+    /// Values share their underlying bytes. This does not relax [`DecodePolicy`];
+    /// vendor namespaces must be permitted by
+    /// [`PaxDecodePolicy::vendor_extension_policy`]. [`MemberMetadata::mtime`]
+    /// is available regardless of this setting.
     /// Call before reading any members.
     pub fn retain_pax_vendor_records(mut self, retain: bool) -> Self {
         self.retain_pax_vendor_records = retain;
@@ -649,8 +644,6 @@ fn project_member<'a, R>(
             Some(PaxRecord::Mtime(PaxValue::Deleted)) => None,
             _ => metadata.mtime,
         };
-        // The default policy rejects all vendor records. Avoid scanning inherited
-        // global state for every member when no vendor snapshot can be needed.
         if retain_vendor_records {
             metadata.pax_vendor_records = state
                 .effective_records()
