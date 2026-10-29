@@ -71,9 +71,8 @@ pub enum PaxVendorValue<T> {
 /// retain their original bytes and explicit deletion state. Standard pax records
 /// are not included. The snapshot remains valid after advancing the archive.
 ///
-/// Format decoders can construct snapshots with [`FromIterator`]. Construction
-/// does not validate TAR policy or resolve global/local scope; the decoder must
-/// do that first. If a keyword appears more than once, the last value wins.
+/// Format decoders construct snapshots with [`FromIterator`] after validating
+/// decode policy and resolving record precedence.
 #[derive(Clone, Debug, Default, Eq, PartialEq)]
 pub struct PaxVendorRecords {
     records: BTreeMap<String, PaxVendorValue<Arc<[u8]>>>,
@@ -115,25 +114,10 @@ impl PaxVendorRecords {
     }
 }
 
-impl<K, V> FromIterator<(K, PaxVendorValue<V>)> for PaxVendorRecords
-where
-    K: Into<String>,
-    V: Into<Arc<[u8]>>,
-{
-    fn from_iter<T: IntoIterator<Item = (K, PaxVendorValue<V>)>>(records: T) -> Self {
+impl FromIterator<(String, PaxVendorValue<Arc<[u8]>>)> for PaxVendorRecords {
+    fn from_iter<T: IntoIterator<Item = (String, PaxVendorValue<Arc<[u8]>>)>>(records: T) -> Self {
         Self {
-            records: records
-                .into_iter()
-                .map(|(keyword, value)| {
-                    (
-                        keyword.into(),
-                        match value {
-                            PaxVendorValue::Value(bytes) => PaxVendorValue::Value(bytes.into()),
-                            PaxVendorValue::Deleted => PaxVendorValue::Deleted,
-                        },
-                    )
-                })
-                .collect(),
+            records: records.into_iter().collect(),
         }
     }
 }

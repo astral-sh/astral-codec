@@ -233,6 +233,23 @@ async fn allowed_duplicate_metadata_uses_the_last_record() -> TestResult {
             .pax(scope, &records)
             .ustar("file", b'0', b"", "", 0o644);
         let bytes = archive.finish();
+        let mut rejected = TarArchive::new(bytes.as_slice())
+            .retain_pax_vendor_records(true)
+            .with_policy(
+                DecodePolicy::default().pax_policy(
+                    PaxDecodePolicy::default()
+                        .vendor_extension_policy(PaxVendorExtensionPolicy::ignore(["Acme"])),
+                ),
+            )
+            .members();
+        assert!(matches!(
+            rejected.next().await,
+            Err(DecodeError::PolicyViolation {
+                position: 0,
+                violation: DecodePolicyViolation::DuplicatePaxRecord { keyword },
+            }) if keyword == "Acme.attribute"
+        ));
+        assert!(rejected.next().await?.is_none());
         let mut members = TarArchive::new(bytes.as_slice())
             .retain_pax_vendor_records(true)
             .with_policy(
@@ -311,57 +328,6 @@ async fn vendor_metadata_preserves_bytes_when_policy_allows_them() -> TestResult
     );
     payload.skip().await?;
     assert!(members.next().await?.is_none());
-    Ok(())
-}
-
-#[tokio::test]
-async fn metadata_policy_rejections_precede_projection_and_fuse_iteration() -> TestResult {
-    let allow_vendor = PaxDecodePolicy::default()
-        .vendor_extension_policy(PaxVendorExtensionPolicy::ignore(["Acme"]));
-    let mut duplicates = vendor_record("attribute", b"first");
-    duplicates.extend(vendor_record("attribute", b"last"));
-    let cases = [
-        (
-            b'x',
-            vendor_record("attribute", b"value"),
-            PaxDecodePolicy::default(),
-            DecodePolicyViolation::PaxVendorExtension {
-                vendor: "Acme".to_owned(),
-                name: "attribute".to_owned(),
-            },
-        ),
-        (
-            b'x',
-            duplicates,
-            allow_vendor.clone(),
-            DecodePolicyViolation::DuplicatePaxRecord {
-                keyword: "Acme.attribute".to_owned(),
-            },
-        ),
-        (
-            b'g',
-            vendor_record("attribute", b"value"),
-            allow_vendor.allow_global_pax_extensions(false),
-            DecodePolicyViolation::GlobalPaxExtension,
-        ),
-    ];
-    for (scope, records, policy, expected) in cases {
-        let mut archive = ArchiveBuilder::new();
-        archive
-            .pax(scope, &records)
-            .ustar("rejected", b'0', b"payload", "", 0o644)
-            .ustar("later", b'0', b"", "", 0o644);
-        let bytes = archive.finish();
-        let mut members = TarArchive::new(bytes.as_slice())
-            .retain_pax_vendor_records(true)
-            .with_policy(DecodePolicy::default().pax_policy(policy))
-            .members();
-        assert!(matches!(
-            members.next().await,
-            Err(DecodeError::PolicyViolation { position: 0, violation }) if violation == expected
-        ));
-        assert!(members.next().await?.is_none());
-    }
     Ok(())
 }
 

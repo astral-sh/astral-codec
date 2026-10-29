@@ -67,48 +67,13 @@ Unlike encoding, decoding/extraction has two policy layers:
 - Use `extract::ExtractPolicy` to control various aspects of how archives become
   real paths on the host filesystem.
 
-Reading member metadata:
-
-`Member::metadata()` exposes the effective `mtime` in unsigned, integral Unix
-seconds. PAX overrides and deletions are resolved before returning the member;
-fractional seconds are discarded by the current decoder.
-
-Vendor PAX snapshots are disabled by default, even when the decode policy permits
-vendor extensions. Applications that need them must opt in separately:
-
-```rust
-use tar_codec::{
-    Archive as _, DecodePolicy, Member, MemberPayload as _, PaxDecodePolicy,
-    PaxVendorExtensionPolicy, PaxVendorValue, TarArchive,
-};
-
-let policy = DecodePolicy::default().pax_policy(
-    PaxDecodePolicy::default()
-        .vendor_extension_policy(PaxVendorExtensionPolicy::ignore(["Acme"])),
-);
-let mut members = TarArchive::new(reader)
-    .with_policy(policy)
-    .retain_pax_vendor_records(true)
-    .members();
-
-while let Some(member) = members.next().await? {
-    match member.metadata().pax_vendor_records.get("Acme.attribute") {
-        Some(PaxVendorValue::Value(_bytes)) => { /* interpret the bytes */ }
-        Some(PaxVendorValue::Deleted) => { /* explicitly deleted */ }
-        None => { /* absent from the snapshot */ }
-    }
-    if let Member::File { payload, .. } | Member::HardLink { payload, .. } = member {
-        payload.skip().await?;
-    }
-}
-```
-
-Snapshots offer read-only `get` and `iter` access and can outlive the current
-member. Capturing them preserves the existing policy checks, but adds work and
-allocations for every member, including inherited global metadata. Ordinary
-extraction can leave retention disabled. The application remains responsible for
-interpreting vendor values; retained records are not filesystem attributes applied
-by `extract_in`.
+`Member::metadata()` exposes the effective `mtime` in integral Unix seconds.
+To retain effective vendor PAX records, enable
+`TarArchive::retain_pax_vendor_records(true)` and permit their namespaces through
+`PaxDecodePolicy::vendor_extension_policy`. Snapshots provide read-only `get` and
+`iter` access, preserving raw bytes and explicit deletions for the application to
+interpret. Retention is disabled by default and adds per-member work and
+allocations, including for inherited global metadata.
 
 ## Performance
 
@@ -121,18 +86,3 @@ tar libraries for Rust, including [tar] and [astral-tokio-tar].
 See [BENCHMARKS] for current benchmarks.
 
 [BENCHMARKS]: ./BENCHMARKS.md
-
-The metadata benchmarks isolate in-memory decoding from filesystem I/O and
-fixture construction. They compare ordinary decoding, allowing vendor records
-without retaining them, and explicitly retaining and reading effective metadata.
-Fixtures use 1,024 members with 64-byte payloads and local or inherited global
-vendor records.
-
-```shell
-# Wall-clock timing without allocation instrumentation.
-cargo bench -p tar-codec --bench metadata --locked
-
-# The same workloads with allocation statistics; do not use these times for
-# uninstrumented performance comparisons.
-cargo bench -p tar-codec --bench metadata_allocations --locked
-```
