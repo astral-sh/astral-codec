@@ -12,6 +12,7 @@ use tar_framing::{
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
+use tokio::io::AsyncRead;
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -477,4 +478,25 @@ async fn policy_errors_fuse_member_iteration() -> TestResult {
     ));
     assert!(members.next().await?.is_none());
     Ok(())
+}
+
+/// Driving `next_member` directly yields `Send` futures for borrowing `Send`
+/// readers, so callers can decode on multi-threaded executors.
+#[expect(dead_code)]
+fn decode_futures_are_send(reader: &mut (dyn AsyncRead + Send + Unpin)) {
+    fn assert_send<T: Send>(_: &T) {}
+
+    let future = async move {
+        let mut archive = TarArchive::new(reader);
+        while let Some(member) = archive.next_member().await? {
+            if let Member::File { mut payload, .. } = member {
+                let mut buffer = Vec::new();
+                if payload.next_chunk(&mut buffer, 1024).await? {
+                    payload.skip().await?;
+                }
+            }
+        }
+        Ok::<_, DecodeError>(())
+    };
+    assert_send(&future);
 }

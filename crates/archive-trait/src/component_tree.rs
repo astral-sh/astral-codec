@@ -107,6 +107,7 @@ where
         }
     }
 
+    #[cfg(any(test, feature = "fs"))]
     pub(crate) fn clear_state(&mut self, node: NodeId) {
         let Some(node) = self.nodes.get_mut(node.0) else {
             return;
@@ -121,6 +122,7 @@ where
         }
     }
 
+    #[cfg(any(test, feature = "fs"))]
     pub(crate) fn has_active_children(&self, node: NodeId) -> bool {
         self.nodes
             .get(node.0)
