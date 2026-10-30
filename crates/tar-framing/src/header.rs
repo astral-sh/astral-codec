@@ -70,6 +70,9 @@ pub const USTAR_IDENTITY: &[u8; 8] = b"ustar\x0000";
 /// block uses a strict superset of the ustar typeflags.
 pub const GNU_IDENTITY: &[u8; 8] = b"ustar  \0";
 
+/// The signature in the final four bytes of an xstar header.
+pub(crate) const XSTAR_MAGIC: &[u8; 4] = b"tar\0";
+
 /// A tar header block (pax, ustar, or GNU) is exactly 512 bytes,
 /// so the logical maximum checksum is `255*512 = 130,560`. However,
 /// the checksum field *itself* is treated as 8 ASCII spaces when

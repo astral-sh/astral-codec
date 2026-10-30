@@ -78,6 +78,9 @@ pub enum FrameErrorInner {
         /// The bytes found in the combined magic/version fields.
         found: [u8; 8],
     },
+    /// A header carried the xstar format signature.
+    #[error("unsupported xstar header")]
+    UnsupportedXstarHeader,
     /// A header checksum was malformed or did not match its contents.
     #[error("invalid tar checksum: stored {expected:?}, computed {actual}")]
     InvalidChecksum {
