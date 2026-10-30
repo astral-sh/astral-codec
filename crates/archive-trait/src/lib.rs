@@ -30,11 +30,13 @@ pub use name::{NameValidator, default_name_validator};
 
 /// Common metadata for one archive member.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemberMetadata {
+pub struct MemberMetadata<M = ()> {
     /// The archive-relative member path before extraction normalization.
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
+    /// Format-specific metadata, which may borrow the archive reader.
+    pub format: M,
 }
 
 /// A special-file kind that generic extraction deliberately rejects.
@@ -50,11 +52,11 @@ pub enum SpecialKind {
 
 /// One format-neutral archive member.
 #[derive(Debug)]
-pub enum Member<P> {
+pub enum Member<P, M = ()> {
     /// A regular file with a streaming payload.
     File {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The logical, decoded payload size in bytes.
         ///
         /// `payload` must yield exactly this many bytes before completing
@@ -68,19 +70,19 @@ pub enum Member<P> {
     /// A directory.
     Directory {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
     },
     /// A symbolic link.
     SymbolicLink {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The archive-provided link target.
         target: String,
     },
     /// A hard link, optionally followed by replacement payload bytes.
     HardLink {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The archive-provided link target.
         target: String,
         /// The logical, decoded replacement-payload size in bytes.
@@ -94,15 +96,15 @@ pub enum Member<P> {
     /// A parsed special file that cannot be extracted safely.
     Special {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The special-file kind.
         kind: SpecialKind,
     },
 }
 
-impl<P> Member<P> {
+impl<P, M> Member<P, M> {
     /// Returns this member's common metadata.
-    pub fn metadata(&self) -> &MemberMetadata {
+    pub fn metadata(&self) -> &MemberMetadata<M> {
         match self {
             Self::File { metadata, .. }
             | Self::Directory { metadata }
@@ -112,7 +114,7 @@ impl<P> Member<P> {
         }
     }
 
-    fn lend_payload<'a>(self) -> Member<LentPayload<'a, P>> {
+    fn lend_payload<'a>(self) -> Member<LentPayload<'a, P>, M> {
         match self {
             Self::File {
                 metadata,
@@ -218,10 +220,11 @@ impl<A: Archive> Members<A> {
     /// Returns the next archive member.
     ///
     /// The returned payload borrows this cursor, so the cursor cannot advance
-    /// until that member is dropped or consumed.
+    /// until that member is dropped or consumed. Format metadata may also
+    /// borrow the cursor, including for members without a payload.
     pub async fn next<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>>>, A::Error> {
+    ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>, A::Metadata<'a>>>, A::Error> {
         Ok(self.archive.next_member().await?.map(Member::lend_payload))
     }
 }
@@ -234,6 +237,10 @@ impl<A: Archive> Members<A> {
 pub trait Archive: Sized {
     /// The archive-format error returned during member iteration.
     type Error;
+    /// Format-specific metadata lent by each member.
+    type Metadata<'a>
+    where
+        Self: 'a;
     /// The streaming payload type lent by each file member.
     type Payload<'a>: MemberPayload<Error = Self::Error>
     where
@@ -248,7 +255,7 @@ pub trait Archive: Sized {
     /// contract even when a concrete payload type does not retain its lifetime.
     async fn next_member<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
+    ) -> Result<Option<Member<Self::Payload<'a>, Self::Metadata<'a>>>, Self::Error>;
 
     /// Consumes this archive and returns its lending member cursor.
     fn members(self) -> Members<Self> {

@@ -1,7 +1,7 @@
 //! PAX record parsing, active-global updates, and per-member metadata state.
 
 use std::{
-    collections::{HashMap, hash_map::Entry},
+    collections::{HashMap, HashSet, hash_map::Entry},
     fmt,
     str::FromStr,
     sync::Arc,
@@ -254,6 +254,29 @@ impl<'global> PaxState<'global> {
             .as_ref()
             .map(|extension| extension.records.as_ref());
         Self::effective_record_from(local_records, self.global_records, keyword)
+    }
+
+    /// Returns each keyword's final record, including inherited globals and deletions.
+    ///
+    /// Local records override globals; the last local record wins. Order is unspecified.
+    pub fn effective_records(&self) -> impl Iterator<Item = &PaxRecord> {
+        let mut seen = HashSet::new();
+        let mut local = self
+            .local_extension
+            .iter()
+            .flat_map(|extension| extension.records().iter().rev());
+        let mut global = self
+            .global_records
+            .into_iter()
+            .flat_map(|global| global.records.as_slice());
+        std::iter::from_fn(move || {
+            local
+                .find(|record| seen.insert(record.keyword()))
+                .or_else(|| {
+                    // Global records are already unique; only local overrides can hide them.
+                    global.find(|record| seen.is_empty() || !seen.contains(&record.keyword()))
+                })
+        })
     }
 
     pub(super) fn effective_size<'records>(
@@ -791,6 +814,12 @@ mod tests {
             assert_eq!(
                 state.effective_record(&PaxKeyword::Comment),
                 case.expected.as_ref(),
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                state.effective_records().collect::<Vec<_>>(),
+                case.expected.iter().collect::<Vec<_>>(),
                 "{}",
                 case.name
             );

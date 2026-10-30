@@ -67,6 +67,14 @@ Unlike encoding, decoding/extraction has two policy layers:
 - Use `extract::ExtractPolicy` to control various aspects of how archives become
   real paths on the host filesystem.
 
+`Member::metadata().format` exposes `TarMetadata`: the effective `mtime()` in
+integral Unix seconds and policy-validated PAX state. `PaxState::effective_record`
+and `effective_records` resolve precedence and preserve explicit deletions.
+Metadata is always available without constructing a per-member snapshot. The
+PAX view borrows the archive reader; copy any values needed after advancing to
+the next member. Vendor namespaces must still be permitted through
+`PaxDecodePolicy::vendor_extension_policy`.
+
 ## Performance
 
 tar-codec aims to be as fast as (or substantially faster than) other

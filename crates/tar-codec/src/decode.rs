@@ -12,7 +12,7 @@ use archive_trait::{
     SpecialKind,
 };
 use tar_framing::{
-    ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
+    ArchiveFormat, FrameError, PaxKind, StreamPolicy, UstarKind,
     logical::{MemberExtensions, MemberFrame, MemberPayload as FramingMemberPayload, TarReader},
 };
 use thiserror::Error;
@@ -20,7 +20,7 @@ use tokio::io::AsyncRead;
 
 pub use tar_framing::{
     DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE,
-    DEFAULT_MAX_PAX_EXTENSION_SIZE,
+    DEFAULT_MAX_PAX_EXTENSION_SIZE, PaxKeyword, PaxRecord, PaxState, PaxValue,
 };
 
 /// This type reads one structurally valid pax or GNU tar archive in one pass.
@@ -62,6 +62,34 @@ impl<R> TarArchive<R> {
         self.reader = self.reader.with_policy(stream_policy);
         self.policy = policy;
         self
+    }
+}
+
+/// Policy-validated TAR metadata borrowing the current member's PAX state.
+///
+/// Copy any values needed after advancing the archive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TarMetadata<'a> {
+    header_mtime: Option<u64>,
+    /// PAX state, absent for GNU members. Queries resolve local-over-global
+    /// precedence and preserve explicit deletions. Vendor values retain their raw bytes.
+    pub pax: Option<PaxState<'a>>,
+}
+
+impl TarMetadata<'_> {
+    /// Effective Unix modification time in seconds, with fractions discarded.
+    ///
+    /// PAX overrides apply; a deletion yields `None` without header fallback.
+    pub fn mtime(&self) -> Option<u64> {
+        match self
+            .pax
+            .as_ref()
+            .and_then(|state| state.effective_record(&PaxKeyword::Mtime))
+        {
+            Some(PaxRecord::Mtime(PaxValue::Value(value))) => Some(*value),
+            Some(PaxRecord::Mtime(PaxValue::Deleted)) => None,
+            _ => self.header_mtime,
+        }
     }
 }
 
@@ -547,6 +575,10 @@ impl<R: AsyncRead + Unpin> MemberPayloadTrait for TarMemberPayload<'_, R> {
 
 impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     type Error = DecodeError;
+    type Metadata<'a>
+        = TarMetadata<'a>
+    where
+        Self: 'a;
     type Payload<'a>
         = TarMemberPayload<'a, R>
     where
@@ -554,7 +586,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
     async fn next_member<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error> {
+    ) -> Result<Option<Member<Self::Payload<'a>, Self::Metadata<'a>>>, Self::Error> {
         if self.fused {
             return Ok(None);
         }
@@ -588,7 +620,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
 fn project_member<'a, R>(
     frame: MemberFrame<'a, R>,
-) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
+) -> Result<Member<TarMemberPayload<'a, R>, TarMetadata<'a>>, DecodeError> {
     let position = frame.header.position;
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
@@ -609,7 +641,18 @@ fn project_member<'a, R>(
     } else {
         String::new()
     };
-    let metadata = MemberMetadata { path, position };
+    let pax = match frame.extensions {
+        MemberExtensions::Pax(state) => Some(state),
+        MemberExtensions::Gnu { .. } => None,
+    };
+    let metadata = MemberMetadata {
+        path,
+        position,
+        format: TarMetadata {
+            header_mtime: frame.header.mtime,
+            pax,
+        },
+    };
 
     Ok(match kind {
         UstarKind::Regular | UstarKind::Contiguous => Member::File {
