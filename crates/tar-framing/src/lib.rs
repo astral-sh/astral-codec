@@ -95,9 +95,7 @@
 //! Because pax and GNU both use ustar as their baseline, any compatibility aspect of pax
 //! that is derived from ustar also applies during GNU tar decoding.
 //!
-//! tar-framing rejects any header with the xstar signature (`tar\0` at byte offset 508).
-//! xstar stores access and change times in the last 24 bytes of the ustar path prefix.
-//! A ustar reader can therefore include those timestamps in the member path.
+//! tar-framing does not support tar families other than pax and GNU. That includes the "legacy" (V7) and star families.
 //!
 //! tar-framing accepts wholly NUL `mode`, `uid`, `gid`, and `mtime` fields by default for
 //! compatibility with real-world writers in both families. These fields are represented as
