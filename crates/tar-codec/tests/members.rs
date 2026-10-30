@@ -8,7 +8,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
+    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
@@ -106,6 +106,26 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
     }
     assert!(members.next().await?.is_none());
     Ok(())
+}
+
+#[tokio::test]
+async fn rejects_pax_sizes_with_leading_zeros() {
+    for (typeflag, size) in [(b'x', "0777"), (b'g', "00")] {
+        let mut archive = ArchiveBuilder::new();
+        archive
+            .pax(typeflag, &pax_record(PaxKeyword::Size, size))
+            .ustar("a", b'0', b"", "", 0o644);
+        let bytes = archive.finish();
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice()).members().next().await,
+            Err(DecodeError::Framing(FrameError {
+                position: 0,
+                inner: FrameErrorInner::InvalidPaxRecord {
+                    source: PaxError::InvalidInteger { keyword: "size", value },
+                },
+            })) if value == size
+        ));
+    }
 }
 
 /// In tar-minefield F34 and F35, the hard-link payload is itself a valid member header.

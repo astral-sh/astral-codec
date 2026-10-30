@@ -649,12 +649,14 @@ impl PaxValue<u64> {
             return Ok(Self::Deleted);
         }
 
-        decimal_u64(value)
-            .map(Self::Value)
-            .ok_or_else(|| PaxError::InvalidInteger {
-                keyword,
-                value: value.to_owned(),
-            })
+        let invalid = || PaxError::InvalidInteger {
+            keyword,
+            value: value.to_owned(),
+        };
+        if keyword == "size" && matches!(value.as_bytes(), [b'0', _, ..]) {
+            return Err(invalid());
+        }
+        decimal_u64(value).map(Self::Value).ok_or_else(invalid)
     }
 
     fn parse_time(keyword: &'static str, value: &[u8]) -> Result<Self, PaxError> {
@@ -913,7 +915,7 @@ mod tests {
             ("charset", "BINARY"),
             ("comment", "a=b"),
             ("ctime", "17.500"),
-            ("gid", "7"),
+            ("gid", "07"),
             ("gname", "group"),
             ("hdrcharset", UTF8_HDRCHARSET),
             ("linkpath", "target"),
@@ -922,7 +924,7 @@ mod tests {
             ("realtime.deadline", "soon"),
             ("security.label", "secure"),
             ("size", "0"),
-            ("uid", "8"),
+            ("uid", "08"),
             ("uname", "user"),
             ("Acme.attribute", "custom"),
         ];
