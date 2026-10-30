@@ -668,7 +668,8 @@ mod tests {
         stream::DataOwner,
         test_support::{
             ChunkedReader, append_block, append_gnu, append_pax, append_payload, append_terminator,
-            cancel_pending, gnu_header, header, ready, ready_ok, record, set_checksum,
+            cancel_pending, gnu_base256_header, gnu_header, header, ready, ready_ok, record,
+            set_checksum,
         },
     };
 
@@ -1377,41 +1378,61 @@ mod tests {
     }
 
     #[test]
-    fn resumes_cancelled_member_payload_chunk_with_either_read_api() {
-        let payload = (0..BLOCK_SIZE * 2 + 17)
-            .map(|index| u8::try_from(index % 251).expect("test byte should fit"))
-            .collect::<Vec<_>>();
-        let (bytes, next_member_position) = member_followed_by_empty_member(&payload);
+    fn honors_chunk_target_after_cancelled_payload_read() {
+        let mut contents = [b'a'; BLOCK_SIZE + 1];
+        contents[BLOCK_SIZE] = b'b';
+        for cancel_block in [true, false] {
+            let (bytes, next_position) = member_followed_by_empty_member(&contents);
+            ready_ok(async {
+                let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 1));
+                let mut payload = next_member(&mut reader).await?.payload;
+                let mut chunk = Vec::new();
+                if cancel_block {
+                    cancel_pending(payload.next_block());
+                } else {
+                    cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE));
+                }
 
-        ready_ok(async {
-            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
-            {
-                let mut member = next_member(&mut reader).await?;
+                assert!(payload.next_chunk(&mut chunk, contents.len()).await?);
+                assert_eq!(chunk, contents);
+                assert!(!payload.next_chunk(&mut chunk, contents.len()).await?);
+                let next = next_member(&mut reader).await?;
+                assert_eq!(next.header.position, next_position);
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
+    fn resumes_cancelled_member_payload_chunk_with_either_read_api() {
+        let contents = (0..251_u8)
+            .cycle()
+            .take(BLOCK_SIZE * 2 + 17)
+            .collect::<Vec<_>>();
+        // After one block, the retry can use the buffered suffix or need more input.
+        for (cancelled_target, retry_target) in
+            [(contents.len(), 1), (BLOCK_SIZE * 2, contents.len())]
+        {
+            let (bytes, next_position) = member_followed_by_empty_member(&contents);
+            ready_ok(async {
+                let mut reader =
+                    TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
+                let mut payload = next_member(&mut reader).await?.payload;
                 let mut cancelled_buffer = vec![b'x'; 17];
-                cancel_pending(
-                    member
-                        .payload
-                        .next_chunk(&mut cancelled_buffer, payload.len()),
-                );
+                cancel_pending(payload.next_chunk(&mut cancelled_buffer, cancelled_target));
                 assert!(cancelled_buffer.is_empty());
 
-                let first = member
-                    .payload
-                    .next_block()
-                    .await?
-                    .expect("cancelled chunk should resume as a payload block");
-                let mut resumed_buffer = vec![b'y'; 23];
-                assert!(member.payload.next_chunk(&mut resumed_buffer, 1).await?);
-                let mut observed = first.block[..first.len].to_vec();
-                observed.extend_from_slice(&resumed_buffer);
-                assert_eq!(observed, payload);
-                assert!(!member.payload.next_chunk(&mut resumed_buffer, 1).await?);
-            }
-
-            let member = next_member(&mut reader).await?;
-            assert_eq!(member.header.position, next_member_position);
-            Ok(())
-        });
+                let first = payload.next_block().await?.expect("expected a block");
+                assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
+                let mut chunk = vec![b'y'; 23];
+                assert!(payload.next_chunk(&mut chunk, retry_target).await?);
+                assert_eq!(chunk, contents[BLOCK_SIZE..]);
+                assert!(!payload.next_chunk(&mut chunk, retry_target).await?);
+                let next = next_member(&mut reader).await?;
+                assert_eq!(next.header.position, next_position);
+                Ok(())
+            });
+        }
     }
 
     #[test]
@@ -1447,6 +1468,29 @@ mod tests {
             let member = next_member(&mut reader).await?;
             assert_eq!(member.header.position, next_member_position);
             drop(member);
+            assert!(reader.next_frame().await?.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reports_chunk_size_overflow_at_the_start_of_a_retried_chunk() {
+        let mut bytes = gnu_base256_header(b'0', u64::MAX).to_vec();
+        append_payload(&mut bytes, b"payload");
+        ready_ok(async {
+            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 1));
+            let mut payload = next_member(&mut reader).await?.payload;
+            let mut chunk = Vec::new();
+            cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE));
+            let error = payload
+                .next_chunk(&mut chunk, usize::MAX)
+                .await
+                .expect_err("the rounded chunk size should overflow");
+            assert!(matches!(
+                error.inner,
+                FrameErrorInner::ArithmeticOverflow { .. }
+            ));
+            assert_eq!(error.position, BLOCK_SIZE as u64);
             assert!(reader.next_frame().await?.is_none());
             Ok(())
         });

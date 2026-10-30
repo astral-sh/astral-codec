@@ -611,22 +611,22 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         buffer: &mut Vec<u8>,
         target_len: usize,
     ) -> Result<usize, FrameError> {
-        // A cancelled block read retains its partial physical block here. Finish
-        // and deliver it before starting a direct chunk so no bytes are lost.
-        if self.member_chunk.state.is_none() && self.block_len != 0 {
-            let (_, block, meaningful_len) = self.read_member_block().await?;
-            buffer.clear();
-            buffer.extend_from_slice(&block[..meaningful_len]);
-            return Ok(meaningful_len);
-        }
-        if self.member_chunk.state.is_none() {
-            let result = self.start_member_chunk(buffer, target_len);
+        let mut prefix_len = 0;
+        loop {
+            if self.member_chunk.state.is_none() {
+                let result = self.start_member_chunk(buffer, target_len, prefix_len);
+                self.fail_on_error(result)?;
+            }
+            let result = self.complete_member_chunk().await;
             self.fail_on_error(result)?;
+            let result = self.take_member_chunk(buffer);
+            prefix_len = self.fail_on_error(result)?;
+            if prefix_len >= target_len || matches!(self.state, State::AwaitingHeader) {
+                return Ok(prefix_len);
+            }
+            // The chunk retained across cancellation was too short. Keep its
+            // undelivered blocks in the buffer as the prefix of this request.
         }
-        let result = self.complete_member_chunk().await;
-        self.fail_on_error(result)?;
-        let result = self.take_member_chunk(buffer);
-        self.fail_on_error(result)
     }
 
     fn fail_on_error<T>(&mut self, result: Result<T, FrameError>) -> Result<T, FrameError> {
@@ -636,13 +636,15 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         result
     }
 
+    /// `buffer[..prefix_len]` holds complete payload blocks immediately before `self.position`.
     fn start_member_chunk(
         &mut self,
         buffer: &mut Vec<u8>,
         target_len: usize,
+        prefix_len: usize,
     ) -> Result<(), FrameError> {
         let member_remaining = match &self.state {
-            State::ReadingMember { remaining } => *remaining,
+            State::ReadingMember { remaining } => remaining + prefix_len as u64,
             _ => {
                 return Err(FrameError::unexpected_order(
                     self.position,
@@ -651,16 +653,9 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 ));
             }
         };
-        if self.block_len != 0 {
-            return Err(FrameError::unexpected_order(
-                self.position,
-                "aligned ordinary member payload",
-                "partially buffered physical block",
-            ));
-        }
-
+        let start_position = self.position - prefix_len as u64;
         let target_len = u64::try_from(target_len.max(BLOCK_SIZE)).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk target length")
+            FrameError::arithmetic_overflow(start_position, "member payload chunk target length")
         })?;
         let physical_len = member_remaining
             .min(target_len)
@@ -668,16 +663,19 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             .checked_mul(BLOCK_SIZE as u64)
             .ok_or_else(|| {
                 FrameError::arithmetic_overflow(
-                    self.position,
+                    start_position,
                     "member payload chunk physical length",
                 )
             })?;
         let meaningful_len = member_remaining.min(physical_len);
         let physical_len = usize::try_from(physical_len).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk physical length")
+            FrameError::arithmetic_overflow(start_position, "member payload chunk physical length")
         })?;
         let meaningful_len = usize::try_from(meaningful_len).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk meaningful length")
+            FrameError::arithmetic_overflow(
+                start_position,
+                "member payload chunk meaningful length",
+            )
         })?;
 
         // Move the caller's reusable allocation into persistent storage before
@@ -687,12 +685,18 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         if self.member_chunk.buffer.len() != physical_len {
             self.member_chunk.buffer.resize(physical_len, 0);
         }
-        self.member_chunk.start_position = self.position;
+        // A cancelled block read can leave the start of a block in the stream.
+        let block_len = std::mem::take(&mut self.block_len);
+        let filled = prefix_len + block_len;
+        if block_len != 0 {
+            self.member_chunk.buffer[prefix_len..filled].copy_from_slice(&self.block[..block_len]);
+        }
+        self.member_chunk.start_position = start_position;
         self.member_chunk.physical_len = physical_len;
         self.member_chunk.meaningful_len = meaningful_len;
         self.member_chunk.state = Some(MemberChunkState::Reading {
             member_remaining,
-            filled: 0,
+            filled,
         });
         Ok(())
     }
