@@ -145,6 +145,23 @@ impl<R> MemberFrame<'_, R> {
         Ok(path)
     }
 
+    /// Returns whether the ordinary header or its extensions supply a link target.
+    ///
+    /// A pax `linkpath` deletion does not supply a target. A populated ordinary
+    /// `linkname` still counts even if a pax record overrides or deletes it.
+    pub fn has_link_target(&self) -> bool {
+        if !self.header.link_name.is_empty() {
+            return true;
+        }
+        match &self.extensions {
+            MemberExtensions::Pax(state) => matches!(
+                state.effective_record(&PaxKeyword::LinkPath),
+                Some(PaxRecord::LinkPath(PaxValue::Value(_)))
+            ),
+            MemberExtensions::Gnu { long_link, .. } => long_link.is_some(),
+        }
+    }
+
     /// Returns the effective member link target after applying pax or GNU metadata.
     ///
     /// An explicit pax deletion is an error because it also removes the

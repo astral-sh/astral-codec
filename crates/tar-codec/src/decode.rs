@@ -4,6 +4,9 @@
 //! It does not normalize these values for extraction. Do not use them directly
 //! as file-system paths. [`ArchiveTrait::extract_in`] validates and normalizes
 //! them as specified by [`crate::extract::ExtractPolicy`].
+//!
+//! Only hard links and symbolic links may carry a link target, whether in the
+//! ordinary header or in extension metadata.
 
 use std::collections::HashSet;
 
@@ -517,6 +520,14 @@ pub enum DecodeError {
         /// Metadata field being decoded.
         field: &'static str,
     },
+    /// A member other than a hard link or symbolic link specifies a link target.
+    #[error("at byte {position}: member type {kind:?} cannot have a link target")]
+    UnexpectedLinkTarget {
+        /// Source member header position.
+        position: u64,
+        /// The member type identified by the header.
+        kind: UstarKind,
+    },
     /// A structurally valid tar feature was rejected by decode policy.
     #[error("at byte {position}: decode policy rejected input: {violation}")]
     PolicyViolation {
@@ -621,6 +632,8 @@ fn project_member<'a, R>(
                 position,
                 field: "linkpath",
             })?
+    } else if frame.has_link_target() {
+        return Err(DecodeError::UnexpectedLinkTarget { position, kind });
     } else {
         String::new()
     };

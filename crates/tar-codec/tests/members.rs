@@ -109,6 +109,54 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
 }
 
 #[tokio::test]
+async fn rejects_header_linknames_on_non_link_members() {
+    for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
+        for typeflag in [0, b'0', b'3', b'4', b'5', b'6', b'7'] {
+            let block = header(format, "a", typeflag, 0, "target", 0o644);
+            assert!(
+                matches!(
+                    TarArchive::new(block.as_slice()).members().next().await,
+                    Err(DecodeError::UnexpectedLinkTarget { position: 0, .. })
+                ),
+                "{format:?} typeflag {typeflag}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
+async fn rejects_pax_linkpaths_on_non_link_members() {
+    let policy = DecodePolicy::default()
+        .pax_policy(PaxDecodePolicy::default().allow_global_pax_member_metadata(true));
+    for (extension, linkpath, linkname) in [
+        (b'x', "target", ""),
+        (b'g', "target", ""),
+        (b'x', "", "target"),
+        (b'x', "", ""),
+    ] {
+        let mut archive = ArchiveBuilder::new();
+        archive
+            .pax(extension, &pax_record(PaxKeyword::LinkPath, linkpath))
+            .ustar("a", b'0', b"", linkname, 0o644);
+        let bytes = archive.finish();
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(policy.clone())
+            .members();
+        if linkpath.is_empty() && linkname.is_empty() {
+            assert!(matches!(
+                members.next().await,
+                Ok(Some(Member::File { .. }))
+            ));
+        } else {
+            assert!(matches!(
+                members.next().await,
+                Err(DecodeError::UnexpectedLinkTarget { position: 1024, .. })
+            ));
+        }
+    }
+}
+
+#[tokio::test]
 async fn rejects_pax_sizes_with_leading_zeros() {
     for (typeflag, size) in [(b'x', "0777"), (b'g', "00")] {
         let mut archive = ArchiveBuilder::new();
