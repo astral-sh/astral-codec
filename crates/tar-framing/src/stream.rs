@@ -205,7 +205,9 @@ impl HeaderFrame {
                 PaxValue::Deleted => Err(FrameError::deleted_pax_metadata(position, "size")),
             },
         )?;
-        validate_pax_member_size(position, kind, declared_size, effective_size)?;
+        // For payload-free members, a zero pax size must not hide a nonzero ustar size.
+        validate_member_size(position, kind, declared_size)?;
+        validate_member_size(position, kind, effective_size)?;
 
         Ok(Self {
             position,
@@ -237,7 +239,7 @@ impl HeaderFrame {
                 "non-link ordinary member",
             ));
         }
-        validate_gnu_member_size(position, kind, declared_size)?;
+        validate_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
                 position,
@@ -1395,36 +1397,11 @@ impl TryFromFramed<u8> for UstarKind {
     }
 }
 
-fn validate_pax_member_size(
-    position: u64,
-    kind: UstarKind,
-    declared_size: u64,
-    effective_size: u64,
-) -> Result<(), FrameError> {
-    match kind {
-        // PAX permits a nonzero physical hardlink size and allows pax `size`
-        // records to override it, so the effective size controls framing.
-        // This is a broadening of what ustar allows; ustar requires
-        // hardlink members to have `size=0`.
-        UstarKind::Regular | UstarKind::HardLink | UstarKind::Contiguous => Ok(()),
-        UstarKind::SymbolicLink
-        | UstarKind::CharacterDevice
-        | UstarKind::BlockDevice
-        | UstarKind::Directory
-        | UstarKind::Fifo => {
-            // NOTE: Observe that we're strict about directory entries having
-            // `size=0`, even though ustar/pax says that they may have a nonzero
-            // size as an allocation hint (which, in turn, does not affect framing).
-            // We do this to avoid a common differential where some parsers incorrectly
-            // honor the directory entry's size during framing.
-            // TODO: Make this configurable? Doing so seems very risky.
-            validate_payload_free_size(position, kind, declared_size)?;
-            validate_payload_free_size(position, kind, effective_size)
-        }
+fn validate_member_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
+    if size == 0 {
+        return Ok(());
     }
-}
 
-fn validate_gnu_member_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
     match kind {
         UstarKind::Regular | UstarKind::Contiguous => Ok(()),
         UstarKind::HardLink
@@ -1432,18 +1409,10 @@ fn validate_gnu_member_size(position: u64, kind: UstarKind, size: u64) -> Result
         | UstarKind::CharacterDevice
         | UstarKind::BlockDevice
         | UstarKind::Directory
-        | UstarKind::Fifo => validate_payload_free_size(position, kind, size),
-    }
-}
-
-fn validate_payload_free_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
-    if size == 0 {
-        Ok(())
-    } else {
-        Err(FrameError::at(
+        | UstarKind::Fifo => Err(FrameError::at(
             position,
             FrameErrorInner::InvalidMemberSize { kind, size },
-        ))
+        )),
     }
 }
 
@@ -2040,31 +2009,6 @@ mod tests {
     }
 
     #[test]
-    fn frames_pax_hard_link_bodies_from_header_or_size_override() {
-        for (case, declared_size, override_size, header_index, data_index) in [
-            ("physical size", 3, None, 0, 1),
-            ("pax size", 0, Some("3"), 2, 3),
-            ("pax size overrides physical size", 1, Some("3"), 2, 3),
-        ] {
-            let mut bytes = Vec::new();
-            if let Some(override_size) = override_size {
-                append_pax(&mut bytes, b'x', &record("size", override_size));
-            }
-            append_block(&mut bytes, &header(b'1', declared_size));
-            append_payload(&mut bytes, b"abc");
-            append_terminator(&mut bytes);
-
-            let frames = collect(bytes, BLOCK_SIZE);
-            let header = header_frame(&frames, header_index);
-            assert_eq!(header.format, ArchiveFormat::Pax, "{case}");
-            assert_eq!(header.kind, UstarKind::HardLink, "{case}");
-            assert_eq!(header.declared_size, declared_size, "{case}");
-            assert_eq!(header.effective_size, 3, "{case}");
-            assert_eq!(data_frame(&frames, data_index).len, 3, "{case}");
-        }
-    }
-
-    #[test]
     fn zero_data_block_is_not_a_terminator() {
         let mut bytes = Vec::new();
         append_block(&mut bytes, &header(b'0', BLOCK_SIZE as u64));
@@ -2161,8 +2105,9 @@ mod tests {
     #[test]
     fn rejects_nonzero_physical_sizes_for_payload_free_members() {
         for (format, block, kind) in [
-            (ArchiveFormat::Pax, header(b'2', 1), UstarKind::SymbolicLink),
+            (ArchiveFormat::Pax, header(b'1', 1), UstarKind::HardLink),
             (ArchiveFormat::Gnu, gnu_header(b'1', 1), UstarKind::HardLink),
+            (ArchiveFormat::Pax, header(b'2', 1), UstarKind::SymbolicLink),
             (
                 ArchiveFormat::Gnu,
                 gnu_header(b'2', 1),
@@ -2211,6 +2156,7 @@ mod tests {
     fn rejects_nonzero_declared_or_effective_pax_sizes_for_payload_free_members() {
         for (case, declared_size, override_size) in [("effective", 0, "1"), ("declared", 1, "0")] {
             for (typeflag, kind) in [
+                (b'1', UstarKind::HardLink),
                 (b'2', UstarKind::SymbolicLink),
                 (b'3', UstarKind::CharacterDevice),
                 (b'4', UstarKind::BlockDevice),

@@ -34,7 +34,7 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
         .ustar("contiguous", b'7', b"contiguous", "", 0o644)
         .ustar("directory", b'5', b"", "", 0o755)
         .ustar("symbolic", b'2', b"", "file", 0o777)
-        .ustar("hard", b'1', b"replacement", "file", 0o644)
+        .ustar("hard", b'1', b"", "file", 0o644)
         .ustar("character", b'3', b"", "", 0o644)
         .ustar("block", b'4', b"", "", 0o644)
         .ustar("fifo", b'6', b"", "", 0o644);
@@ -88,8 +88,8 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
     };
     assert_eq!(metadata.path, "hard");
     assert_eq!(target, "file");
-    assert_eq!(size, 11);
-    assert_eq!(read_payload(payload).await?, b"replacement");
+    assert_eq!(size, 0);
+    assert!(read_payload(payload).await?.is_empty());
 
     for (path, kind) in [
         ("character", SpecialKind::CharacterDevice),

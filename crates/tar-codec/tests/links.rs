@@ -1,19 +1,19 @@
 pub mod support;
 
+use std::io;
 #[cfg(unix)]
-use std::{io, os::unix::net::UnixListener, path::Path};
+use std::{os::unix::net::UnixListener, path::Path};
 
-use support::{ArchiveBuilder, single_pax_member};
 #[cfg(unix)]
-use support::{pax_record, symlink_file};
+use support::symlink_file;
+use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, single_pax_member};
 #[cfg(not(unix))]
 use tar_codec::ExtractPolicyViolation;
 use tar_codec::{
-    Archive as _, ExtractError, TarArchive,
+    Archive as _, DecodeError, ExtractError, TarArchive,
     extract::{ExtractPolicy, LinkPolicy},
 };
-#[cfg(unix)]
-use tar_framing::PaxKeyword;
+use tar_framing::{FrameError, FrameErrorInner, PaxKeyword, UstarKind};
 use tempfile::tempdir;
 
 #[cfg(unix)]
@@ -850,23 +850,51 @@ async fn case_folded_deferred_symlinks_honor_overwrite_policy() {
     );
 }
 
+/// In tar-minefield F34 and F35, the next block is also a valid member header.
 #[tokio::test]
-async fn hard_links_require_prior_archive_targets_and_apply_linkdata() {
+async fn rejects_hard_link_sizes_before_overwriting_the_target() -> io::Result<()> {
+    let policy = ExtractPolicy::default().link_policy(LinkPolicy::default().allow_hard_links(true));
+    for (declared_size, pax_size) in [(512, None), (0, Some("512"))] {
+        let mut archive = ArchiveBuilder::new();
+        archive.ustar("target", b'0', b"keep", "", 0o644);
+        if let Some(size) = pax_size {
+            archive.pax(b'x', &pax_record(PaxKeyword::Size, size));
+        }
+        archive
+            .block(&header(
+                ArchiveFormat::Pax,
+                "link",
+                b'1',
+                declared_size,
+                "target",
+                0o644,
+            ))
+            .ustar("smuggled", b'0', b"", "", 0o644);
+        let bytes = archive.finish();
+        let destination = tempdir()?;
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice())
+                .extract_in(destination.path(), policy)
+                .await,
+            Err(ExtractError::Archive(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidMemberSize {
+                    kind: UstarKind::HardLink,
+                    size: 512
+                },
+                ..
+            })))
+        ));
+        assert_eq!(std::fs::read(destination.path().join("target"))?, b"keep");
+        assert!(!destination.path().join("link").exists());
+        assert!(!destination.path().join("smuggled").exists());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn hard_links_require_prior_archive_targets() {
     let temp = tempdir().unwrap();
     let policy = ExtractPolicy::default().link_policy(LinkPolicy::default().allow_hard_links(true));
-    let destination = temp.path().join("linkdata");
-    let mut archive = ArchiveBuilder::new();
-    archive
-        .ustar("a", b'0', b"old", "", 0o644)
-        .ustar("b", b'1', b"new", "a", 0o644);
-    let bytes = archive.finish();
-    TarArchive::new(bytes.as_slice())
-        .extract_in(&destination, policy)
-        .await
-        .unwrap();
-    assert_eq!(std::fs::read(destination.join("a")).unwrap(), b"new");
-    assert_eq!(std::fs::read(destination.join("b")).unwrap(), b"new");
-
     let unresolved = single_pax_member("b", b'1', b"", "a", 0o644);
     assert!(matches!(
         TarArchive::new(unresolved.as_slice())
@@ -890,29 +918,22 @@ async fn hard_links_require_prior_archive_targets_and_apply_linkdata() {
     let destination = temp.path().join("different-mode");
     let mut archive = ArchiveBuilder::new();
     archive
-        .ustar("a", b'0', b"", "", 0o644)
+        .ustar("a", b'0', b"keep", "", 0o644)
         .ustar("b", b'1', b"", "a", 0o755);
     let bytes = archive.finish();
     TarArchive::new(bytes.as_slice())
         .extract_in(&destination, policy)
         .await
         .unwrap();
-    assert!(destination.join("b").is_file());
+    assert_eq!(
+        std::fs::read(destination.join("b")).expect("hard link should be readable"),
+        b"keep"
+    );
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let destination = temp.path().join("linkdata-mode");
-        let mut archive = ArchiveBuilder::new();
-        archive
-            .ustar("a", b'0', b"old", "", 0o644)
-            .ustar("b", b'1', b"new", "a", 0o755);
-        let bytes = archive.finish();
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, policy)
-            .await
-            .unwrap();
         assert_eq!(
             std::fs::metadata(destination.join("a"))
                 .unwrap()
