@@ -2155,6 +2155,73 @@ mod tests {
     }
 
     #[test]
+    fn rejects_header_linknames_on_non_link_members() {
+        for mut block in [header(b'0', 0), gnu_header(b'5', 0)] {
+            block[LINK_NAME_RANGE.start] = b't';
+            set_checksum(&mut block);
+            assert!(matches!(
+                last_error(&collect(block.to_vec(), BLOCK_SIZE)),
+                FrameError {
+                    position: 0,
+                    inner: FrameErrorInner::UnexpectedLinkTarget { .. }
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_extended_link_targets_on_non_link_members() {
+        let target = record("linkpath", "target");
+        let mut local = Vec::new();
+        append_pax(&mut local, b'x', &target);
+        let mut global = Vec::new();
+        append_pax(&mut global, b'g', &target);
+        let mut long_link = Vec::new();
+        append_gnu(&mut long_link, b'K', b"target\0");
+
+        for (mut bytes, block) in [
+            (local, header(b'0', 0)),
+            (global, header(b'0', 0)),
+            (long_link, gnu_header(b'0', 0)),
+        ] {
+            append_block(&mut bytes, &block);
+            assert!(matches!(
+                last_error(&collect(bytes, BLOCK_SIZE)),
+                FrameError {
+                    position: 1024,
+                    inner: FrameErrorInner::UnexpectedLinkTarget {
+                        kind: UstarKind::Regular
+                    }
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn deleted_pax_linkpath_does_not_hide_a_header_linkname() {
+        let deleted = record("linkpath", "");
+        let mut bytes = Vec::new();
+        append_pax(&mut bytes, b'g', &record("linkpath", "inherited"));
+        append_pax(&mut bytes, b'x', &deleted);
+        append_block(&mut bytes, &header(b'0', 0));
+        append_pax(&mut bytes, b'x', &deleted);
+        append_block(
+            &mut bytes,
+            &checksummed_header(|block| block[LINK_NAME_RANGE.start] = b't'),
+        );
+
+        let frames = collect(bytes, BLOCK_SIZE);
+        assert_eq!(header_frame(&frames, 4).kind, UstarKind::Regular);
+        assert!(matches!(
+            last_error(&frames),
+            FrameError {
+                position: 3584,
+                inner: FrameErrorInner::UnexpectedLinkTarget { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_malformed_gnu_numeric_fields() {
         for (field, range) in [
             ("mode", MODE_RANGE),
@@ -2363,18 +2430,6 @@ mod tests {
         let mut duplicate = Vec::new();
         append_gnu(&mut duplicate, b'L', b"name\0");
         append_gnu(&mut duplicate, b'L', b"name\0");
-        let mut long_link_for_regular = Vec::new();
-        append_gnu(&mut long_link_for_regular, b'K', b"target\0");
-        append_block(&mut long_link_for_regular, &gnu_header(b'0', 0));
-        assert!(matches!(
-            last_error(&collect(long_link_for_regular, BLOCK_SIZE)),
-            FrameError {
-                position: 1024,
-                inner: FrameErrorInner::UnexpectedLinkTarget {
-                    kind: UstarKind::Regular
-                },
-            }
-        ));
         let mut dangling = Vec::new();
         append_gnu(&mut dangling, b'L', b"name\0");
         append_terminator(&mut dangling);

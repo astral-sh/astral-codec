@@ -109,55 +109,6 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
 }
 
 #[tokio::test]
-async fn rejects_header_linknames_on_non_link_members() {
-    for block in [
-        header(ArchiveFormat::Pax, "file", b'0', 0, "target", 0o644),
-        header(ArchiveFormat::Gnu, "dir", b'5', 0, "target", 0o755),
-    ] {
-        assert!(matches!(
-            TarArchive::new(block.as_slice()).members().next().await,
-            Err(DecodeError::Framing(FrameError {
-                position: 0,
-                inner: FrameErrorInner::UnexpectedLinkTarget { .. },
-            }))
-        ));
-    }
-}
-
-#[tokio::test]
-async fn rejects_pax_linkpaths_on_non_link_members() -> TestResult {
-    let policy = DecodePolicy::default()
-        .pax_policy(PaxDecodePolicy::default().allow_global_pax_member_metadata(true));
-    let target = pax_record(PaxKeyword::LinkPath, "target");
-    let deleted = pax_record(PaxKeyword::LinkPath, "");
-    for (extension, record, linkname) in [
-        (b'x', &target, ""),
-        (b'g', &target, ""),
-        (b'x', &deleted, "target"),
-    ] {
-        let mut archive = ArchiveBuilder::new();
-        archive
-            .pax(b'x', &deleted)
-            .ustar("without-target", b'0', b"", "", 0o644)
-            .pax(extension, record)
-            .ustar("with-target", b'0', b"", linkname, 0o644);
-        let bytes = archive.finish();
-        let mut members = TarArchive::new(bytes.as_slice())
-            .with_policy(policy.clone())
-            .members();
-        assert!(matches!(members.next().await?, Some(Member::File { .. })));
-        assert!(matches!(
-            members.next().await,
-            Err(DecodeError::Framing(FrameError {
-                position: 2560,
-                inner: FrameErrorInner::UnexpectedLinkTarget { .. },
-            }))
-        ));
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn rejects_pax_sizes_with_leading_zeros() {
     for (typeflag, size) in [(b'x', "0777"), (b'g', "00")] {
         let mut archive = ArchiveBuilder::new();
