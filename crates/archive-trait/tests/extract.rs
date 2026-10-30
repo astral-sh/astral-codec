@@ -13,6 +13,8 @@ use support::{TestArchive, TestEntry, TestError, TestPayload, entry};
 use tempfile::tempdir;
 use tokio::{runtime::Builder, sync::oneshot};
 
+const STREAMING_PAYLOAD_BYTES: usize = 1024 * 1024 + 7;
+
 struct GatedArchive {
     entries: VecDeque<TestEntry>,
     root_opened: Option<oneshot::Sender<()>>,
@@ -56,11 +58,10 @@ impl Archive for GatedArchive {
 async fn extracts_common_members_and_streams_payload_sizes() {
     const SMALL_BYTES: usize = 128 * 1024 + 7;
     const BUFFERED_BOUNDARY_BYTES: usize = 1024 * 1024;
-    const LARGE_BYTES: usize = 1024 * 1024 + 7;
 
     let small = patterned_payload(SMALL_BYTES);
     let buffered_boundary = patterned_payload(BUFFERED_BOUNDARY_BYTES);
-    let large = patterned_payload(LARGE_BYTES);
+    let large = patterned_payload(STREAMING_PAYLOAD_BYTES);
     let archive = TestArchive::new([
         entry::directory("bin"),
         entry::executable("bin/tool", b"run"),
@@ -68,17 +69,14 @@ async fn extracts_common_members_and_streams_payload_sizes() {
         entry::file("same", b"new"),
         entry::file("empty", b""),
         entry::file("unicodé/文件", b"utf8"),
+        entry::directory("small"),
+        entry::directory("large"),
         entry::file("small", small.clone()),
         entry::file("buffered-boundary", buffered_boundary.clone()),
         entry::file("large", large.clone()),
     ]);
     let temp = tempdir().expect("temporary directory should be created");
     let destination = temp.path().join("out");
-    // Both buffered and streamed files may replace an empty directory.
-    for path in ["small", "large"] {
-        std::fs::create_dir_all(destination.join(path))
-            .expect("ambient directory should be created");
-    }
 
     archive
         .extract_in(&destination, ExtractPolicy::default())
@@ -114,9 +112,7 @@ async fn extracts_common_members_and_streams_payload_sizes() {
 
 #[tokio::test]
 async fn streaming_payload_reuses_initialized_chunk_buffer() {
-    const PAYLOAD_BYTES: usize = 1024 * 1024 + 7;
-
-    let expected = patterned_payload(PAYLOAD_BYTES);
+    let expected = patterned_payload(STREAMING_PAYLOAD_BYTES);
     let archive = TestArchive::new([entry::reuse_checked_file("file", expected.clone())]);
     let temp = tempdir().expect("temporary directory should be created");
     let destination = temp.path().join("out");
@@ -262,31 +258,32 @@ async fn failed_file_creation_preserves_existing_file() {
     std::fs::write(&path, b"original").expect("ambient file should be created");
 
     let mut handles = Vec::new();
-    let open_error = loop {
-        match File::open("/dev/null") {
-            Ok(file) => handles.push(file),
-            Err(error) => break error,
-        }
-    };
+    while let Ok(file) = File::open("/dev/null") {
+        handles.push(file);
+    }
+    let open_error = File::open(&path).expect_err("descriptors should be exhausted");
     // Leave one descriptor for the extraction root and none for the new file.
     drop(handles.pop().expect("child should have opened files"));
-    for size in [0, 1024 * 1024 + 1] {
-        for allow_overwrites in [true, false] {
+    for allow_overwrites in [false, true] {
+        let policy = ExtractPolicy::default().allow_overwrites(allow_overwrites);
+        for size in [0, STREAMING_PAYLOAD_BYTES] {
             let result = TestArchive::new([entry::file("file", vec![0; size])])
-                .extract_in(
-                    temp.path(),
-                    ExtractPolicy::default().allow_overwrites(allow_overwrites),
-                )
+                .extract_in(temp.path(), policy)
                 .await;
-            assert!(matches!(result, Err(ExtractError::Filesystem {
-                operation: "create file", source, ..
-            }) if source.raw_os_error() == open_error.raw_os_error()));
-            assert_eq!(
-                std::fs::read(&path).expect("ambient file should still exist"),
-                b"original"
+            assert!(
+                matches!(
+                    &result,
+                    Err(ExtractError::Filesystem { operation: "create file", source, .. })
+                        if source.raw_os_error() == open_error.raw_os_error()
+                ),
+                "size {size}, overwrites {allow_overwrites}: {result:?}"
             );
         }
     }
+    assert_eq!(
+        std::fs::read(&path).expect("ambient file should still exist"),
+        b"original"
+    );
 }
 
 #[tokio::test]
