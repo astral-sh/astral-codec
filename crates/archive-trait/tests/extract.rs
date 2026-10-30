@@ -2,7 +2,7 @@ pub mod support;
 
 use std::{collections::VecDeque, io::Read as _, path::Path, sync::mpsc, thread};
 #[cfg(unix)]
-use std::{env, os::unix::fs::PermissionsExt as _, process::Command};
+use std::{env, fs::File, os::unix::fs::PermissionsExt as _, process::Command};
 
 use archive_trait::{
     Archive, ExtractError, ExtractPolicyViolation, Member, SpecialKind,
@@ -12,6 +12,8 @@ use cap_std::{ambient_authority, fs::Dir};
 use support::{TestArchive, TestEntry, TestError, TestPayload, entry};
 use tempfile::tempdir;
 use tokio::{runtime::Builder, sync::oneshot};
+
+const STREAMING_PAYLOAD_BYTES: usize = 1024 * 1024 + 7;
 
 struct GatedArchive {
     entries: VecDeque<TestEntry>,
@@ -56,11 +58,10 @@ impl Archive for GatedArchive {
 async fn extracts_common_members_and_streams_payload_sizes() {
     const SMALL_BYTES: usize = 128 * 1024 + 7;
     const BUFFERED_BOUNDARY_BYTES: usize = 1024 * 1024;
-    const LARGE_BYTES: usize = 1024 * 1024 + 7;
 
     let small = patterned_payload(SMALL_BYTES);
     let buffered_boundary = patterned_payload(BUFFERED_BOUNDARY_BYTES);
-    let large = patterned_payload(LARGE_BYTES);
+    let large = patterned_payload(STREAMING_PAYLOAD_BYTES);
     let archive = TestArchive::new([
         entry::directory("bin"),
         entry::executable("bin/tool", b"run"),
@@ -68,6 +69,8 @@ async fn extracts_common_members_and_streams_payload_sizes() {
         entry::file("same", b"new"),
         entry::file("empty", b""),
         entry::file("unicodé/文件", b"utf8"),
+        entry::directory("small"),
+        entry::directory("large"),
         entry::file("small", small.clone()),
         entry::file("buffered-boundary", buffered_boundary.clone()),
         entry::file("large", large.clone()),
@@ -109,9 +112,7 @@ async fn extracts_common_members_and_streams_payload_sizes() {
 
 #[tokio::test]
 async fn streaming_payload_reuses_initialized_chunk_buffer() {
-    const PAYLOAD_BYTES: usize = 1024 * 1024 + 7;
-
-    let expected = patterned_payload(PAYLOAD_BYTES);
+    let expected = patterned_payload(STREAMING_PAYLOAD_BYTES);
     let archive = TestArchive::new([entry::reuse_checked_file("file", expected.clone())]);
     let temp = tempdir().expect("temporary directory should be created");
     let destination = temp.path().join("out");
@@ -195,27 +196,33 @@ fn patterned_payload(size: usize) -> Vec<u8> {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn extraction_bounds_open_directory_handles() {
+fn rerun_with_low_descriptor_limit(test_name: &str) -> bool {
     const CHILD_ENVIRONMENT: &str = "ARCHIVE_TRAIT_LOW_NOFILE_CHILD";
-    const DIRECTORY_COUNT: usize = 128;
-    const TEST_NAME: &str = "extraction_bounds_open_directory_handles";
 
     // Lowering the process-wide descriptor limit would interfere with parallel
-    // tests, so re-run only this test in a constrained child process. The
-    // environment marker distinguishes that child from the parent invocation.
-    if env::var_os(CHILD_ENVIRONMENT).is_none() {
-        let executable = env::current_exe().expect("test executable should be available");
-        let status = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!(
-                "ulimit -n 64 && exec \"$0\" --exact {TEST_NAME} --nocapture"
-            ))
-            .arg(executable)
-            .env(CHILD_ENVIRONMENT, "1")
-            .status()
-            .expect("limited test process should run");
-        assert!(status.success(), "limited test process should succeed");
+    // tests, so re-run only this test in a constrained child process.
+    if env::var_os(CHILD_ENVIRONMENT).is_some() {
+        return false;
+    }
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"ulimit -n 64 && exec "$0" --exact "$1" --nocapture"#,
+        ])
+        .arg(env::current_exe().expect("test executable should be available"))
+        .arg(test_name)
+        .env(CHILD_ENVIRONMENT, "1")
+        .status()
+        .expect("limited test process should run");
+    assert!(status.success(), "limited test process should succeed");
+    true
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn extraction_bounds_open_directory_handles() {
+    const DIRECTORY_COUNT: usize = 128;
+    if rerun_with_low_descriptor_limit("extraction_bounds_open_directory_handles") {
         return;
     }
 
@@ -238,6 +245,45 @@ async fn extraction_bounds_open_directory_handles() {
             index.to_le_bytes()
         );
     }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_file_creation_preserves_existing_file() {
+    if rerun_with_low_descriptor_limit("failed_file_creation_preserves_existing_file") {
+        return;
+    }
+    let temp = tempdir().expect("temporary directory should be created");
+    let path = temp.path().join("file");
+    std::fs::write(&path, b"original").expect("ambient file should be created");
+
+    let mut handles = Vec::new();
+    while let Ok(file) = File::open("/dev/null") {
+        handles.push(file);
+    }
+    let open_error = File::open(&path).expect_err("descriptors should be exhausted");
+    // Leave one descriptor for the extraction root and none for the new file.
+    drop(handles.pop().expect("child should have opened files"));
+    for allow_overwrites in [false, true] {
+        let policy = ExtractPolicy::default().allow_overwrites(allow_overwrites);
+        for size in [0, STREAMING_PAYLOAD_BYTES] {
+            let result = TestArchive::new([entry::file("file", vec![0; size])])
+                .extract_in(temp.path(), policy)
+                .await;
+            assert!(
+                matches!(
+                    &result,
+                    Err(ExtractError::Filesystem { operation: "create file", source, .. })
+                        if source.raw_os_error() == open_error.raw_os_error()
+                ),
+                "size {size}, overwrites {allow_overwrites}: {result:?}"
+            );
+        }
+    }
+    assert_eq!(
+        std::fs::read(&path).expect("ambient file should still exist"),
+        b"original"
+    );
 }
 
 #[tokio::test]

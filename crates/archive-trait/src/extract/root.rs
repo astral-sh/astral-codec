@@ -22,13 +22,17 @@ use std::{
 use cap_std::fs::OpenOptionsExt as _;
 use cap_std::{
     ambient_authority,
-    fs::{Dir, Metadata, OpenOptions},
+    fs::{Dir, File as CapFile, Metadata, OpenOptions},
 };
 use tokio::{fs::File, io::AsyncWriteExt};
 #[cfg(windows)]
 use {
-    cap_std::fs::MetadataExt as _, std::os::windows::fs::MetadataExt as _,
-    windows_sys::Win32::Storage::FileSystem::FILE_ATTRIBUTE_REPARSE_POINT,
+    cap_std::fs::MetadataExt as _,
+    std::os::windows::fs::MetadataExt as _,
+    windows_sys::Win32::{
+        Foundation::ERROR_ACCESS_DENIED,
+        Storage::FileSystem::{FILE_ATTRIBUTE_DIRECTORY, FILE_ATTRIBUTE_REPARSE_POINT},
+    },
 };
 
 use self::buffered::{BufferedFile, BufferedFileReplacement, write_buffered_files};
@@ -179,7 +183,7 @@ enum FileOpenMode {
 }
 
 impl FileOpenMode {
-    fn options(self) -> OpenOptions {
+    fn open(self, directory: &Dir, path: &Path) -> io::Result<CapFile> {
         let mut options = OpenOptions::new();
         options.write(true);
         match self {
@@ -194,7 +198,20 @@ impl FileOpenMode {
                 options.truncate(true);
             }
         }
-        options
+        let result = directory.open_with(path, &options);
+        // Windows can report access denied when exclusive file creation encounters a directory.
+        // Inspect the leaf without following links before treating that error as a collision.
+        #[cfg(windows)]
+        if matches!(self, Self::CreateNew { .. })
+            && let Err(error) = &result
+            && error.raw_os_error() == Some(ERROR_ACCESS_DENIED as i32)
+            && directory
+                .symlink_metadata(path)
+                .is_ok_and(|metadata| metadata.file_attributes() & FILE_ATTRIBUTE_DIRECTORY != 0)
+        {
+            return Err(io::ErrorKind::AlreadyExists.into());
+        }
+        result
     }
 }
 
@@ -707,10 +724,10 @@ impl<E> ExtractionRoot<E> {
             .await
         {
             Ok(file) => file,
-            Err(error) => {
-                if !self.replace_leaf(path, entry, parent).await? {
-                    return Err(error);
-                }
+            Err(ExtractError::Filesystem { source, .. })
+                if source.kind() == io::ErrorKind::AlreadyExists
+                    && self.replace_leaf(path, entry, parent).await? =>
+            {
                 self.open_file(
                     "create file",
                     path,
@@ -719,6 +736,7 @@ impl<E> ExtractionRoot<E> {
                 )
                 .await?
             }
+            Err(error) => return Err(error),
         };
         self.entries.set_state(entry, ExtractedEntry::File);
         Ok(file)
@@ -1000,10 +1018,7 @@ impl<E> ExtractionRoot<E> {
     ) -> Result<File, ExtractError<E>> {
         let file = self
             .with_entry_parent(operation, path, parent, move |directory, path| {
-                let options = mode.options();
-                directory
-                    .open_with(path, &options)
-                    .map(|file| file.into_std())
+                mode.open(directory, path).map(CapFile::into_std)
             })
             .await?;
         let mut file = File::from_std(file);
