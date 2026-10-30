@@ -181,6 +181,12 @@ pub enum FrameErrorInner {
         /// The effective metadata field containing the NUL byte.
         field: &'static str,
     },
+    /// A member other than a hard link or symbolic link specifies a link target.
+    #[error("member type {kind:?} cannot have a link target")]
+    UnexpectedLinkTarget {
+        /// The member type identified by the header.
+        kind: UstarKind,
+    },
     /// A framing offset or record length overflowed.
     #[error("arithmetic overflow while computing {context}")]
     ArithmeticOverflow {

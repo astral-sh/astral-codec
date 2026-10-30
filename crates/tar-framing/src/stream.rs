@@ -84,11 +84,11 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::{
     ArchiveFormat, BLOCK_SIZE, Block, DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
     DEFAULT_MAX_GNU_EXTENSION_SIZE, DEFAULT_MAX_PAX_EXTENSION_SIZE, FrameError, FrameErrorInner,
-    GnuKind, HdrCharset, PaxError, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
+    GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
     header::{
-        CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, MODE_RANGE,
-        MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE,
-        USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
+        CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
+        MODE_RANGE, MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE,
+        UNAME_RANGE, USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
     },
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
@@ -166,13 +166,16 @@ impl HeaderFrame {
     fn ustar(
         position: u64,
         block: Block,
-        typeflag: u8,
         declared_size: u64,
         local_records: Option<&PaxRecords>,
         global_records: Option<&GlobalPaxRecords>,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
-        let kind = UstarKind::try_from_framed(position, typeflag)?;
+        let has_linkpath = matches!(
+            PaxState::effective_record_from(local_records, global_records, &PaxKeyword::LinkPath),
+            Some(PaxRecord::LinkPath(PaxValue::Value(_)))
+        );
+        let kind = UstarKind::from_header(position, &block, has_linkpath)?;
 
         // Some real-world pax writers encode absent ordinary-header metadata as
         // all NULs. The compatibility policy may accept these empty fields; every
@@ -224,19 +227,11 @@ impl HeaderFrame {
     fn gnu(
         position: u64,
         block: Block,
-        typeflag: u8,
         declared_size: u64,
-        require_link_kind: bool,
+        has_long_link: bool,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
-        let kind = UstarKind::try_from_framed(position, typeflag)?;
-        if require_link_kind && !matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink) {
-            return Err(FrameError::unexpected_order(
-                position,
-                "hard-link or symbolic-link member after GNU long-link extension",
-                "non-link ordinary member",
-            ));
-        }
+        let kind = UstarKind::from_header(position, &block, has_long_link)?;
         validate_gnu_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
@@ -1204,7 +1199,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         let frame = HeaderFrame::ustar(
             position,
             block,
-            parsed.typeflag,
             parsed.size,
             local_pax_records.as_deref(),
             self.global_pax_records.as_ref(),
@@ -1272,7 +1266,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         let frame = HeaderFrame::gnu(
             position,
             block,
-            parsed.typeflag,
             parsed.size,
             pending.long_link,
             &self.policy,
@@ -1409,6 +1402,24 @@ impl TryFromFramed<u8> for UstarKind {
                 position,
                 FrameErrorInner::UnsupportedTypeflag { typeflag },
             )),
+        }
+    }
+}
+
+impl UstarKind {
+    fn from_header(
+        position: u64,
+        block: &Block,
+        has_extended_target: bool,
+    ) -> Result<Self, FrameError> {
+        let kind = Self::try_from_framed(position, block[TYPEFLAG_OFFSET])?;
+        match kind {
+            Self::HardLink | Self::SymbolicLink => Ok(kind),
+            _ if has_extended_target || block[LINK_NAME_RANGE.start] != 0 => Err(FrameError::at(
+                position,
+                FrameErrorInner::UnexpectedLinkTarget { kind },
+            )),
+            _ => Ok(kind),
         }
     }
 }
@@ -2139,6 +2150,73 @@ mod tests {
     }
 
     #[test]
+    fn rejects_header_linknames_on_non_link_members() {
+        for mut block in [header(b'0', 0), gnu_header(b'5', 0)] {
+            block[LINK_NAME_RANGE.start] = b't';
+            set_checksum(&mut block);
+            assert!(matches!(
+                last_error(&collect(block.to_vec(), BLOCK_SIZE)),
+                FrameError {
+                    position: 0,
+                    inner: FrameErrorInner::UnexpectedLinkTarget { .. }
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn rejects_extended_link_targets_on_non_link_members() {
+        let target = record("linkpath", "target");
+        let mut local = Vec::new();
+        append_pax(&mut local, b'x', &target);
+        let mut global = Vec::new();
+        append_pax(&mut global, b'g', &target);
+        let mut long_link = Vec::new();
+        append_gnu(&mut long_link, b'K', b"target\0");
+
+        for (mut bytes, block) in [
+            (local, header(b'0', 0)),
+            (global, header(b'0', 0)),
+            (long_link, gnu_header(b'0', 0)),
+        ] {
+            append_block(&mut bytes, &block);
+            assert!(matches!(
+                last_error(&collect(bytes, BLOCK_SIZE)),
+                FrameError {
+                    position: 1024,
+                    inner: FrameErrorInner::UnexpectedLinkTarget {
+                        kind: UstarKind::Regular
+                    }
+                }
+            ));
+        }
+    }
+
+    #[test]
+    fn deleted_pax_linkpath_does_not_hide_a_header_linkname() {
+        let deleted = record("linkpath", "");
+        let mut bytes = Vec::new();
+        append_pax(&mut bytes, b'g', &record("linkpath", "inherited"));
+        append_pax(&mut bytes, b'x', &deleted);
+        append_block(&mut bytes, &header(b'0', 0));
+        append_pax(&mut bytes, b'x', &deleted);
+        append_block(
+            &mut bytes,
+            &checksummed_header(|block| block[LINK_NAME_RANGE.start] = b't'),
+        );
+
+        let frames = collect(bytes, BLOCK_SIZE);
+        assert_eq!(header_frame(&frames, 4).kind, UstarKind::Regular);
+        assert!(matches!(
+            last_error(&frames),
+            FrameError {
+                position: 3584,
+                inner: FrameErrorInner::UnexpectedLinkTarget { .. }
+            }
+        ));
+    }
+
+    #[test]
     fn rejects_malformed_gnu_numeric_fields() {
         for (field, range) in [
             ("mode", MODE_RANGE),
@@ -2347,17 +2425,10 @@ mod tests {
         let mut duplicate = Vec::new();
         append_gnu(&mut duplicate, b'L', b"name\0");
         append_gnu(&mut duplicate, b'L', b"name\0");
-        let mut long_link_for_regular = Vec::new();
-        append_gnu(&mut long_link_for_regular, b'K', b"target\0");
-        append_block(&mut long_link_for_regular, &gnu_header(b'0', 0));
         let mut dangling = Vec::new();
         append_gnu(&mut dangling, b'L', b"name\0");
         append_terminator(&mut dangling);
-        for (case, bytes) in [
-            ("duplicate", duplicate),
-            ("long-link-for-regular", long_link_for_regular),
-            ("dangling", dangling),
-        ] {
+        for (case, bytes) in [("duplicate", duplicate), ("dangling", dangling)] {
             assert!(
                 matches!(
                     last_error_inner(&collect(bytes, BLOCK_SIZE)),
