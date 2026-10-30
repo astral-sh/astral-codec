@@ -84,11 +84,11 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::{
     ArchiveFormat, BLOCK_SIZE, Block, DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
     DEFAULT_MAX_GNU_EXTENSION_SIZE, DEFAULT_MAX_PAX_EXTENSION_SIZE, FrameError, FrameErrorInner,
-    GnuKind, HdrCharset, PaxError, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
+    GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
     header::{
-        CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, MODE_RANGE,
-        MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE,
-        USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
+        CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
+        MODE_RANGE, MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE,
+        UNAME_RANGE, USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
     },
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
@@ -173,6 +173,11 @@ impl HeaderFrame {
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         let kind = UstarKind::try_from_framed(position, typeflag)?;
+        let has_linkpath = matches!(
+            PaxState::effective_record_from(local_records, global_records, &PaxKeyword::LinkPath),
+            Some(PaxRecord::LinkPath(PaxValue::Value(_)))
+        );
+        Self::validate_link_target(position, kind, &block, has_linkpath)?;
 
         // Some real-world pax writers encode absent ordinary-header metadata as
         // all NULs. The compatibility policy may accept these empty fields; every
@@ -226,17 +231,11 @@ impl HeaderFrame {
         block: Block,
         typeflag: u8,
         declared_size: u64,
-        require_link_kind: bool,
+        has_long_link: bool,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         let kind = UstarKind::try_from_framed(position, typeflag)?;
-        if require_link_kind && !matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink) {
-            return Err(FrameError::unexpected_order(
-                position,
-                "hard-link or symbolic-link member after GNU long-link extension",
-                "non-link ordinary member",
-            ));
-        }
+        Self::validate_link_target(position, kind, &block, has_long_link)?;
         validate_gnu_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
@@ -265,6 +264,23 @@ impl HeaderFrame {
             gid,
             mtime,
         })
+    }
+
+    fn validate_link_target(
+        position: u64,
+        kind: UstarKind,
+        block: &Block,
+        has_extended_target: bool,
+    ) -> Result<(), FrameError> {
+        if !matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink)
+            && (block[LINK_NAME_RANGE.start] != 0 || has_extended_target)
+        {
+            return Err(FrameError::at(
+                position,
+                FrameErrorInner::UnexpectedLinkTarget { kind },
+            ));
+        }
+        Ok(())
     }
 
     fn validate_owner_names(
@@ -2350,14 +2366,19 @@ mod tests {
         let mut long_link_for_regular = Vec::new();
         append_gnu(&mut long_link_for_regular, b'K', b"target\0");
         append_block(&mut long_link_for_regular, &gnu_header(b'0', 0));
+        assert!(matches!(
+            last_error(&collect(long_link_for_regular, BLOCK_SIZE)),
+            FrameError {
+                position: 1024,
+                inner: FrameErrorInner::UnexpectedLinkTarget {
+                    kind: UstarKind::Regular
+                },
+            }
+        ));
         let mut dangling = Vec::new();
         append_gnu(&mut dangling, b'L', b"name\0");
         append_terminator(&mut dangling);
-        for (case, bytes) in [
-            ("duplicate", duplicate),
-            ("long-link-for-regular", long_link_for_regular),
-            ("dangling", dangling),
-        ] {
+        for (case, bytes) in [("duplicate", duplicate), ("dangling", dangling)] {
             assert!(
                 matches!(
                     last_error_inner(&collect(bytes, BLOCK_SIZE)),

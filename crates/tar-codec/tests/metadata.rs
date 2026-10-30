@@ -613,7 +613,7 @@ async fn global_member_metadata_requires_opt_in_and_uses_pax_precedence() {
         let mut archive = ArchiveBuilder::new();
         archive
             .pax(b'g', &pax_record(keyword, value))
-            .ustar("raw", b'0', b"", "", 0o644);
+            .ustar("raw", b'2', b"", "target", 0o644);
         let bytes = archive.finish();
         assert!(matches!(
             TarArchive::new(bytes.as_slice())

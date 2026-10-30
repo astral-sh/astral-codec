@@ -145,23 +145,6 @@ impl<R> MemberFrame<'_, R> {
         Ok(path)
     }
 
-    /// Returns whether the ordinary header or its extensions supply a link target.
-    ///
-    /// A pax `linkpath` deletion does not supply a target. A populated ordinary
-    /// `linkname` still counts even if a pax record overrides or deletes it.
-    pub fn has_link_target(&self) -> bool {
-        if !self.header.link_name.is_empty() {
-            return true;
-        }
-        match &self.extensions {
-            MemberExtensions::Pax(state) => matches!(
-                state.effective_record(&PaxKeyword::LinkPath),
-                Some(PaxRecord::LinkPath(PaxValue::Value(_)))
-            ),
-            MemberExtensions::Gnu { long_link, .. } => long_link.is_some(),
-        }
-    }
-
     /// Returns the effective member link target after applying pax or GNU metadata.
     ///
     /// An explicit pax deletion is an error because it also removes the
@@ -837,7 +820,7 @@ mod tests {
 
     #[test]
     fn keeps_borrowed_header_metadata_available_while_streaming_payload() {
-        let mut member_header = header(b'0', 1);
+        let mut member_header = header(b'1', 1);
         set_field(&mut member_header, NAME_RANGE, b"file");
         set_field(&mut member_header, PREFIX_RANGE, b"dir");
         set_field(&mut member_header, LINK_NAME_RANGE, b"target");
@@ -849,7 +832,8 @@ mod tests {
             append_block(&mut bytes, &member_header);
             append_payload(&mut bytes, b"x");
             append_terminator(&mut bytes);
-            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
+            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE))
+                .with_policy(StreamPolicy::default().allow_pax_hardlink_linkdata(true));
             let mut member = next_member(&mut reader).await?;
 
             assert!(member.payload.next_block().await?.is_some());

@@ -116,7 +116,10 @@ async fn rejects_header_linknames_on_non_link_members() {
     ] {
         assert!(matches!(
             TarArchive::new(block.as_slice()).members().next().await,
-            Err(DecodeError::UnexpectedLinkTarget { position: 0, .. })
+            Err(DecodeError::Framing(FrameError {
+                position: 0,
+                inner: FrameErrorInner::UnexpectedLinkTarget { .. },
+            }))
         ));
     }
 }
@@ -145,7 +148,10 @@ async fn rejects_pax_linkpaths_on_non_link_members() -> TestResult {
         assert!(matches!(members.next().await?, Some(Member::File { .. })));
         assert!(matches!(
             members.next().await,
-            Err(DecodeError::UnexpectedLinkTarget { position: 2560, .. })
+            Err(DecodeError::Framing(FrameError {
+                position: 2560,
+                inner: FrameErrorInner::UnexpectedLinkTarget { .. },
+            }))
         ));
     }
     Ok(())
