@@ -929,27 +929,30 @@ impl<E> ExtractionRoot<E> {
             if path.as_os_str().is_empty() {
                 return Ok((TerminalKind::Directory, false));
             }
-            let kind = match directory.metadata(path) {
-                Ok(metadata) if metadata.is_dir() => Ok(TerminalKind::Directory),
-                Ok(_) => Ok(TerminalKind::NonDirectory),
-                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(TerminalKind::Dangling),
-                Err(error) => Err(error),
-            }?;
-            if kind != TerminalKind::Dangling {
-                return Ok((kind, false));
+            match directory.metadata(path) {
+                Ok(metadata) if metadata.is_dir() => return Ok((TerminalKind::Directory, false)),
+                Ok(_) => return Ok((TerminalKind::NonDirectory, false)),
+                Err(error) => match error.kind() {
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {}
+                    _ => return Err(error),
+                },
             }
 
+            // A dangling target can still pass through an ambient symlink.
             let mut prefix = PathBuf::new();
             for component in path.components() {
                 prefix.push(component.as_os_str());
                 match directory.symlink_metadata(&prefix) {
-                    Ok(metadata) if metadata_is_link(&metadata) => return Ok((kind, true)),
+                    Ok(metadata) if metadata_is_link(&metadata) => {
+                        return Ok((TerminalKind::Dangling, true));
+                    }
+                    Ok(metadata) if !metadata.is_dir() => break,
                     Ok(_) => {}
                     Err(error) if error.kind() == io::ErrorKind::NotFound => break,
                     Err(error) => return Err(error),
                 }
             }
-            Ok((kind, false))
+            Ok((TerminalKind::Dangling, false))
         })
         .await
     }

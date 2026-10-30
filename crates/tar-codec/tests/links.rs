@@ -306,17 +306,26 @@ async fn native_target_controls_are_independent() {
         Path::new("ambient")
     );
 
-    let destination = temp.path().join("ambient-only");
-    let bytes = single_pax_member("link", b'2', b"", "missing", 0o644);
-    assert!(matches!(
+    for (link, target) in [("dangling", "missing"), ("blocked", "ambient/child")] {
+        let bytes = single_pax_member(link, b'2', b"", target, 0o644);
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice())
+                .extract_in(&destination, policy)
+                .await,
+            Err(ExtractError::InvalidLink {
+                reason: "target does not exist",
+                ..
+            })
+        ));
         TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, policy)
-            .await,
-        Err(ExtractError::InvalidLink {
-            reason: "target does not exist",
-            ..
-        })
-    ));
+            .extract_in(&destination, ExtractPolicy::default())
+            .await
+            .expect("default policy should preserve the dangling link");
+        assert_eq!(
+            std::fs::read_link(destination.join(link)).expect("link should be readable"),
+            Path::new(target)
+        );
+    }
 }
 
 /// A missing-target opt-in must not classify paths through existing filesystem
@@ -328,12 +337,11 @@ async fn missing_target_opt_in_does_not_allow_dangling_targets_through_ambient_s
     for (case, ambient_target, archive_target) in [
         ("leaf", "missing", "ambient-link"),
         ("intermediate", "ambient", "ambient-link/missing"),
+        ("blocked", "file", "ambient-link/child"),
     ] {
         let destination = temp.path().join(case);
-        std::fs::create_dir(&destination).unwrap();
-        if case == "intermediate" {
-            std::fs::create_dir(destination.join("ambient")).unwrap();
-        }
+        std::fs::create_dir_all(destination.join("ambient")).expect("directory should be created");
+        std::fs::write(destination.join("file"), b"contents").expect("file should be created");
         symlink_file(ambient_target, destination.join("ambient-link")).unwrap();
         let bytes = single_pax_member("link", b'2', b"", archive_target, 0o644);
         let policy = ExtractPolicy::default();
