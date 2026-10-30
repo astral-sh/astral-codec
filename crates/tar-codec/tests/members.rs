@@ -8,7 +8,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
+    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy, UstarKind,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
@@ -106,6 +106,28 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
     }
     assert!(members.next().await?.is_none());
     Ok(())
+}
+
+#[tokio::test]
+async fn linkdata_is_specific_to_pax_hard_links() {
+    let policy = DecodePolicy::default()
+        .pax_policy(PaxDecodePolicy::default().allow_hardlink_linkdata(true));
+    for (format, typeflag, kind) in [
+        (ArchiveFormat::Gnu, b'1', UstarKind::HardLink),
+        (ArchiveFormat::Pax, b'2', UstarKind::SymbolicLink),
+    ] {
+        let block = header(format, "link", typeflag, 1, "target", 0o644);
+        let mut members = TarArchive::new(block.as_slice())
+            .with_policy(policy.clone())
+            .members();
+        assert!(matches!(
+            members.next().await,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidMemberSize { kind: found, size: 1 },
+                ..
+            })) if found == kind
+        ));
+    }
 }
 
 #[tokio::test]

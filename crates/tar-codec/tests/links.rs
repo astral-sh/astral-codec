@@ -10,7 +10,7 @@ use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, single_pax_memb
 #[cfg(not(unix))]
 use tar_codec::ExtractPolicyViolation;
 use tar_codec::{
-    Archive as _, DecodeError, ExtractError, TarArchive,
+    Archive as _, DecodeError, DecodePolicy, ExtractError, PaxDecodePolicy, TarArchive,
     extract::{ExtractPolicy, LinkPolicy},
 };
 use tar_framing::{FrameError, FrameErrorInner, PaxKeyword, UstarKind};
@@ -852,8 +852,10 @@ async fn case_folded_deferred_symlinks_honor_overwrite_policy() {
 
 /// In tar-minefield F34 and F35, the next block is also a valid member header.
 #[tokio::test]
-async fn rejects_hard_link_sizes_before_overwriting_the_target() -> io::Result<()> {
-    let policy = ExtractPolicy::default().link_policy(LinkPolicy::default().allow_hard_links(true));
+async fn pax_hard_link_payloads_require_opt_in() -> io::Result<()> {
+    let extract_policy =
+        ExtractPolicy::default().link_policy(LinkPolicy::default().allow_hard_links(true));
+    let linkdata = header(ArchiveFormat::Pax, "smuggled", b'0', 0, "", 0o644);
     for (declared_size, pax_size) in [(512, None), (0, Some("512"))] {
         let mut archive = ArchiveBuilder::new();
         archive.ustar("target", b'0', b"keep", "", 0o644);
@@ -869,12 +871,13 @@ async fn rejects_hard_link_sizes_before_overwriting_the_target() -> io::Result<(
                 "target",
                 0o644,
             ))
-            .ustar("smuggled", b'0', b"", "", 0o644);
+            .block(&linkdata)
+            .ustar("after", b'0', b"after", "", 0o644);
         let bytes = archive.finish();
         let destination = tempdir()?;
         assert!(matches!(
             TarArchive::new(bytes.as_slice())
-                .extract_in(destination.path(), policy)
+                .extract_in(destination.path(), extract_policy)
                 .await,
             Err(ExtractError::Archive(DecodeError::Framing(FrameError {
                 inner: FrameErrorInner::InvalidMemberSize {
@@ -887,6 +890,19 @@ async fn rejects_hard_link_sizes_before_overwriting_the_target() -> io::Result<(
         assert_eq!(std::fs::read(destination.path().join("target"))?, b"keep");
         assert!(!destination.path().join("link").exists());
         assert!(!destination.path().join("smuggled").exists());
+
+        let destination = tempdir()?;
+        TarArchive::new(bytes.as_slice())
+            .with_policy(
+                DecodePolicy::default()
+                    .pax_policy(PaxDecodePolicy::default().allow_hardlink_linkdata(true)),
+            )
+            .extract_in(destination.path(), extract_policy)
+            .await
+            .expect("pax linkdata should be accepted when enabled");
+        assert_eq!(std::fs::read(destination.path().join("target"))?, linkdata);
+        assert!(!destination.path().join("smuggled").exists());
+        assert_eq!(std::fs::read(destination.path().join("after"))?, b"after");
     }
     Ok(())
 }

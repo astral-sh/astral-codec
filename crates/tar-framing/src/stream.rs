@@ -205,9 +205,7 @@ impl HeaderFrame {
                 PaxValue::Deleted => Err(FrameError::deleted_pax_metadata(position, "size")),
             },
         )?;
-        // For payload-free members, a zero pax size must not hide a nonzero ustar size.
-        validate_member_size(position, kind, declared_size)?;
-        validate_member_size(position, kind, effective_size)?;
+        validate_pax_member_size(position, kind, declared_size, effective_size, policy)?;
 
         Ok(Self {
             position,
@@ -239,7 +237,7 @@ impl HeaderFrame {
                 "non-link ordinary member",
             ));
         }
-        validate_member_size(position, kind, declared_size)?;
+        validate_gnu_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
                 position,
@@ -437,6 +435,7 @@ enum MemberChunkState {
 pub struct StreamPolicy {
     max_pax_extension_size: u64,
     max_global_pax_extensions_size: u64,
+    allow_pax_hardlink_linkdata: bool,
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
     max_gnu_extension_size: u64,
@@ -447,6 +446,7 @@ impl Default for StreamPolicy {
         Self {
             max_pax_extension_size: DEFAULT_MAX_PAX_EXTENSION_SIZE,
             max_global_pax_extensions_size: DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
+            allow_pax_hardlink_linkdata: false,
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
@@ -477,6 +477,14 @@ impl StreamPolicy {
     /// [`u64::MAX`] removes this limit. The limit for each extension still applies.
     pub fn max_global_pax_extensions_size(mut self, max_global_pax_extensions_size: u64) -> Self {
         self.max_global_pax_extensions_size = max_global_pax_extensions_size;
+        self
+    }
+
+    /// Allows pax hard links to carry a payload of their effective size.
+    ///
+    /// By default, both the ustar header size and the effective pax size must be zero.
+    pub fn allow_pax_hardlink_linkdata(mut self, allow: bool) -> Self {
+        self.allow_pax_hardlink_linkdata = allow;
         self
     }
 
@@ -1397,11 +1405,35 @@ impl TryFromFramed<u8> for UstarKind {
     }
 }
 
-fn validate_member_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
-    if size == 0 {
-        return Ok(());
+fn validate_pax_member_size(
+    position: u64,
+    kind: UstarKind,
+    declared_size: u64,
+    effective_size: u64,
+    policy: &StreamPolicy,
+) -> Result<(), FrameError> {
+    match kind {
+        UstarKind::Regular | UstarKind::Contiguous => Ok(()),
+        UstarKind::HardLink if policy.allow_pax_hardlink_linkdata => Ok(()),
+        UstarKind::HardLink
+        | UstarKind::SymbolicLink
+        | UstarKind::CharacterDevice
+        | UstarKind::BlockDevice
+        | UstarKind::Directory
+        | UstarKind::Fifo => {
+            // NOTE: Observe that we're strict about directory entries having
+            // `size=0`, even though ustar/pax says that they may have a nonzero
+            // size as an allocation hint (which, in turn, does not affect framing).
+            // We do this to avoid a common differential where some parsers incorrectly
+            // honor the directory entry's size during framing.
+            // TODO: Make this configurable? Doing so seems very risky.
+            validate_payload_free_size(position, kind, declared_size)?;
+            validate_payload_free_size(position, kind, effective_size)
+        }
     }
+}
 
+fn validate_gnu_member_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
     match kind {
         UstarKind::Regular | UstarKind::Contiguous => Ok(()),
         UstarKind::HardLink
@@ -1409,10 +1441,18 @@ fn validate_member_size(position: u64, kind: UstarKind, size: u64) -> Result<(),
         | UstarKind::CharacterDevice
         | UstarKind::BlockDevice
         | UstarKind::Directory
-        | UstarKind::Fifo => Err(FrameError::at(
+        | UstarKind::Fifo => validate_payload_free_size(position, kind, size),
+    }
+}
+
+fn validate_payload_free_size(position: u64, kind: UstarKind, size: u64) -> Result<(), FrameError> {
+    if size == 0 {
+        Ok(())
+    } else {
+        Err(FrameError::at(
             position,
             FrameErrorInner::InvalidMemberSize { kind, size },
-        )),
+        ))
     }
 }
 
