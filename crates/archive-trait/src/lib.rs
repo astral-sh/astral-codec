@@ -261,9 +261,11 @@ pub trait Archive: Sized {
     /// are preserved by default on platforms that support native creation;
     /// hard links require explicit opt-in through [`extract::LinkPolicy`].
     ///
-    /// Archived Unix permission modes are normalized rather than restored. New
-    /// regular files are created with mode `0o777` when executable intent is
-    /// set and `0o666` otherwise, in both cases filtered by the process umask.
+    /// Archived Unix permission modes are normalized rather than restored.
+    /// On Unix, extraction requests mode `0o777` for new regular files with
+    /// executable intent and `0o666` otherwise. The OS determines the resulting
+    /// permissions. On Linux, a default ACL on the parent directory takes
+    /// precedence over the process umask.
     /// Directories use the platform's default creation mode, and special mode
     /// bits are not restored. Ownership and timestamps are likewise determined
     /// by extraction activity rather than archived metadata.
