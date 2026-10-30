@@ -263,12 +263,10 @@ pub trait Archive: Sized {
     ///
     /// Archived Unix permission modes are normalized rather than restored.
     /// On Unix, extraction requests mode `0o777` for new regular files with
-    /// executable intent and `0o666` otherwise. The OS determines the resulting
-    /// permissions. On Linux, a default ACL on the parent directory takes
-    /// precedence over the process umask.
-    /// Directories use the platform's default creation mode, and special mode
-    /// bits are not restored. Ownership and timestamps are likewise determined
-    /// by extraction activity rather than archived metadata.
+    /// executable intent and `0o666` otherwise. The OS determines the final
+    /// permissions. Directories use the platform's default creation mode, and
+    /// special mode bits are not restored. Ownership and timestamps are likewise
+    /// determined by extraction activity rather than archived metadata.
     ///
     /// **IMPORTANT**: `destination` must not be concurrently modified during
     /// extraction. No correctness or isolation guarantees are made under
