@@ -53,3 +53,5 @@ within tar-codec:
   For example, a filesystem that performs unicode path normalization
   may coalesce multiple members into a single path on disk, but this is not a
   concern within tar-codec itself.
+- Panics that are caused by platform limitations, e.g. Rust's allocator choosing to
+  panic when failing to reserve adequate capacity on smaller address spaces.
