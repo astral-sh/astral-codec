@@ -707,10 +707,10 @@ impl<E> ExtractionRoot<E> {
             .await
         {
             Ok(file) => file,
-            Err(error) => {
-                if !self.replace_leaf(path, entry, parent).await? {
-                    return Err(error);
-                }
+            Err(ExtractError::Filesystem { source, .. })
+                if source.kind() == io::ErrorKind::AlreadyExists
+                    && self.replace_leaf(path, entry, parent).await? =>
+            {
                 self.open_file(
                     "create file",
                     path,
@@ -719,6 +719,7 @@ impl<E> ExtractionRoot<E> {
                 )
                 .await?
             }
+            Err(error) => return Err(error),
         };
         self.entries.set_state(entry, ExtractedEntry::File);
         Ok(file)

@@ -2,7 +2,7 @@ pub mod support;
 
 use std::{collections::VecDeque, io::Read as _, path::Path, sync::mpsc, thread};
 #[cfg(unix)]
-use std::{env, os::unix::fs::PermissionsExt as _, process::Command};
+use std::{env, fs::File, os::unix::fs::PermissionsExt as _, process::Command};
 
 use archive_trait::{
     Archive, ExtractError, ExtractPolicyViolation, Member, SpecialKind,
@@ -195,27 +195,33 @@ fn patterned_payload(size: usize) -> Vec<u8> {
 }
 
 #[cfg(unix)]
-#[tokio::test]
-async fn extraction_bounds_open_directory_handles() {
+fn rerun_with_low_descriptor_limit(test_name: &str) -> bool {
     const CHILD_ENVIRONMENT: &str = "ARCHIVE_TRAIT_LOW_NOFILE_CHILD";
-    const DIRECTORY_COUNT: usize = 128;
-    const TEST_NAME: &str = "extraction_bounds_open_directory_handles";
 
     // Lowering the process-wide descriptor limit would interfere with parallel
-    // tests, so re-run only this test in a constrained child process. The
-    // environment marker distinguishes that child from the parent invocation.
-    if env::var_os(CHILD_ENVIRONMENT).is_none() {
-        let executable = env::current_exe().expect("test executable should be available");
-        let status = Command::new("/bin/sh")
-            .arg("-c")
-            .arg(format!(
-                "ulimit -n 64 && exec \"$0\" --exact {TEST_NAME} --nocapture"
-            ))
-            .arg(executable)
-            .env(CHILD_ENVIRONMENT, "1")
-            .status()
-            .expect("limited test process should run");
-        assert!(status.success(), "limited test process should succeed");
+    // tests, so re-run only this test in a constrained child process.
+    if env::var_os(CHILD_ENVIRONMENT).is_some() {
+        return false;
+    }
+    let status = Command::new("/bin/sh")
+        .args([
+            "-c",
+            r#"ulimit -n 64 && exec "$0" --exact "$1" --nocapture"#,
+        ])
+        .arg(env::current_exe().expect("test executable should be available"))
+        .arg(test_name)
+        .env(CHILD_ENVIRONMENT, "1")
+        .status()
+        .expect("limited test process should run");
+    assert!(status.success(), "limited test process should succeed");
+    true
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn extraction_bounds_open_directory_handles() {
+    const DIRECTORY_COUNT: usize = 128;
+    if rerun_with_low_descriptor_limit("extraction_bounds_open_directory_handles") {
         return;
     }
 
@@ -237,6 +243,44 @@ async fn extraction_bounds_open_directory_handles() {
                 .expect("extracted file should be readable"),
             index.to_le_bytes()
         );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn failed_file_creation_preserves_existing_file() {
+    if rerun_with_low_descriptor_limit("failed_file_creation_preserves_existing_file") {
+        return;
+    }
+    let temp = tempdir().expect("temporary directory should be created");
+    let path = temp.path().join("file");
+    std::fs::write(&path, b"original").expect("ambient file should be created");
+
+    let mut handles = Vec::new();
+    let open_error = loop {
+        match File::open("/dev/null") {
+            Ok(file) => handles.push(file),
+            Err(error) => break error,
+        }
+    };
+    // Leave one descriptor for the extraction root and none for the new file.
+    drop(handles.pop().expect("child should have opened files"));
+    for size in [0, 1024 * 1024 + 1] {
+        for allow_overwrites in [true, false] {
+            let result = TestArchive::new([entry::file("file", vec![0; size])])
+                .extract_in(
+                    temp.path(),
+                    ExtractPolicy::default().allow_overwrites(allow_overwrites),
+                )
+                .await;
+            assert!(matches!(result, Err(ExtractError::Filesystem {
+                operation: "create file", source, ..
+            }) if source.raw_os_error() == open_error.raw_os_error()));
+            assert_eq!(
+                std::fs::read(&path).expect("ambient file should still exist"),
+                b"original"
+            );
+        }
     }
 }
 

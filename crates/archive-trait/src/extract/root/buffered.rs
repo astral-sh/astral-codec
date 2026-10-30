@@ -110,7 +110,8 @@ pub(super) fn write_buffered_file(
 
     let create_error = match open_new_file(directory, path, executable) {
         Ok(file) => return write_buffered_contents(file, contents),
-        Err(error) => error,
+        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
+        Err(error) => return Err(BufferedFileError::filesystem("create file", error)),
     };
     let metadata = match directory.symlink_metadata(path) {
         Ok(metadata) => metadata,
