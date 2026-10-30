@@ -287,9 +287,7 @@ impl<E> ExtractionRoot<E> {
         allow_overwrites: bool,
     ) -> Result<Self, ExtractError<E>> {
         let error_path = destination.to_owned();
-        // Strip trailing separators and `.` so creation and symlink checks both
-        // operate on the named directory. Leave `..` for the filesystem to resolve.
-        let destination = destination.components().as_path().to_owned();
+        let destination = trim_destination_suffix(destination).to_owned();
         let directory = tokio::task::spawn_blocking(move || {
             match std_fs::symlink_metadata(&destination) {
                 Ok(_) => {}
@@ -1133,6 +1131,16 @@ fn check_symlink_resolution_limit(
     Ok(())
 }
 
+/// Trim trailing separators and `.` so symlink checks inspect the named
+/// directory itself. Preserve root spellings such as `//` for the host.
+fn trim_destination_suffix(destination: &Path) -> &Path {
+    if destination.file_name().is_some() {
+        destination.components().as_path()
+    } else {
+        destination
+    }
+}
+
 fn leaf_name(path: &NormalizedPath) -> &str {
     if let Some(file_name) = path.file_name() {
         file_name
@@ -1230,4 +1238,16 @@ fn create_symlink(_directory: &Dir, _contents: &str, _path: &Path) -> io::Result
         io::ErrorKind::Unsupported,
         "symbolic links are not supported on this platform",
     ))
+}
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn preserves_double_slash_roots() {
+        for root in ["//", "//."] {
+            assert_eq!(trim_destination_suffix(Path::new(root)).as_os_str(), root);
+        }
+    }
 }
