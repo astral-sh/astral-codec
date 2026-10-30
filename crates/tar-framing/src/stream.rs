@@ -166,18 +166,16 @@ impl HeaderFrame {
     fn ustar(
         position: u64,
         block: Block,
-        typeflag: u8,
         declared_size: u64,
         local_records: Option<&PaxRecords>,
         global_records: Option<&GlobalPaxRecords>,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
-        let kind = UstarKind::try_from_framed(position, typeflag)?;
         let has_linkpath = matches!(
             PaxState::effective_record_from(local_records, global_records, &PaxKeyword::LinkPath),
             Some(PaxRecord::LinkPath(PaxValue::Value(_)))
         );
-        Self::validate_link_target(position, kind, &block, has_linkpath)?;
+        let kind = UstarKind::from_header(position, &block, has_linkpath)?;
 
         // Some real-world pax writers encode absent ordinary-header metadata as
         // all NULs. The compatibility policy may accept these empty fields; every
@@ -229,13 +227,11 @@ impl HeaderFrame {
     fn gnu(
         position: u64,
         block: Block,
-        typeflag: u8,
         declared_size: u64,
         has_long_link: bool,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
-        let kind = UstarKind::try_from_framed(position, typeflag)?;
-        Self::validate_link_target(position, kind, &block, has_long_link)?;
+        let kind = UstarKind::from_header(position, &block, has_long_link)?;
         validate_gnu_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
@@ -264,23 +260,6 @@ impl HeaderFrame {
             gid,
             mtime,
         })
-    }
-
-    fn validate_link_target(
-        position: u64,
-        kind: UstarKind,
-        block: &Block,
-        has_extended_target: bool,
-    ) -> Result<(), FrameError> {
-        if !matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink)
-            && (block[LINK_NAME_RANGE.start] != 0 || has_extended_target)
-        {
-            return Err(FrameError::at(
-                position,
-                FrameErrorInner::UnexpectedLinkTarget { kind },
-            ));
-        }
-        Ok(())
     }
 
     fn validate_owner_names(
@@ -1220,7 +1199,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         let frame = HeaderFrame::ustar(
             position,
             block,
-            parsed.typeflag,
             parsed.size,
             local_pax_records.as_deref(),
             self.global_pax_records.as_ref(),
@@ -1288,7 +1266,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         let frame = HeaderFrame::gnu(
             position,
             block,
-            parsed.typeflag,
             parsed.size,
             pending.long_link,
             &self.policy,
@@ -1425,6 +1402,24 @@ impl TryFromFramed<u8> for UstarKind {
                 position,
                 FrameErrorInner::UnsupportedTypeflag { typeflag },
             )),
+        }
+    }
+}
+
+impl UstarKind {
+    fn from_header(
+        position: u64,
+        block: &Block,
+        has_extended_target: bool,
+    ) -> Result<Self, FrameError> {
+        let kind = Self::try_from_framed(position, block[TYPEFLAG_OFFSET])?;
+        match kind {
+            Self::HardLink | Self::SymbolicLink => Ok(kind),
+            _ if has_extended_target || block[LINK_NAME_RANGE.start] != 0 => Err(FrameError::at(
+                position,
+                FrameErrorInner::UnexpectedLinkTarget { kind },
+            )),
+            _ => Ok(kind),
         }
     }
 }
