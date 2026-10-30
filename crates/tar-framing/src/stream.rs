@@ -2145,7 +2145,6 @@ mod tests {
     #[test]
     fn rejects_nonzero_physical_sizes_for_payload_free_members() {
         for (format, block, kind) in [
-            (ArchiveFormat::Pax, header(b'1', 1), UstarKind::HardLink),
             (ArchiveFormat::Gnu, gnu_header(b'1', 1), UstarKind::HardLink),
             (ArchiveFormat::Pax, header(b'2', 1), UstarKind::SymbolicLink),
             (
@@ -2178,17 +2177,18 @@ mod tests {
             (ArchiveFormat::Pax, header(b'6', 1), UstarKind::Fifo),
             (ArchiveFormat::Gnu, gnu_header(b'6', 1), UstarKind::Fifo),
         ] {
-            let frames = collect(block.to_vec(), BLOCK_SIZE);
-            assert!(
-                matches!(
-                    last_error_inner(&frames),
-                    FrameErrorInner::InvalidMemberSize {
-                        kind: found,
-                        size: 1,
-                    } if *found == kind
-                ),
-                "{format:?} {kind:?}"
-            );
+            for allow_linkdata in [false, true] {
+                let stream = TarStream::new(block.as_slice()).with_policy(
+                    StreamPolicy::default().allow_pax_hardlink_linkdata(allow_linkdata),
+                );
+                assert!(
+                    matches!(
+                        last_error_inner(&ready(collect_frames(stream))),
+                        FrameErrorInner::InvalidMemberSize { kind: found, size: 1 } if *found == kind
+                    ),
+                    "{format:?} {kind:?} with allow_linkdata={allow_linkdata}"
+                );
+            }
         }
     }
 

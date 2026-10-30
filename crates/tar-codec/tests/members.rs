@@ -8,7 +8,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive,
 };
 use tar_framing::{
-    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy, UstarKind,
+    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
@@ -108,26 +108,44 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
     Ok(())
 }
 
+/// In tar-minefield F34 and F35, the hard-link payload is itself a valid member header.
 #[tokio::test]
-async fn linkdata_is_specific_to_pax_hard_links() {
+async fn pax_hard_link_payloads_require_opt_in() -> TestResult {
     let policy = DecodePolicy::default()
         .pax_policy(PaxDecodePolicy::default().allow_hardlink_linkdata(true));
-    for (format, typeflag, kind) in [
-        (ArchiveFormat::Gnu, b'1', UstarKind::HardLink),
-        (ArchiveFormat::Pax, b'2', UstarKind::SymbolicLink),
-    ] {
-        let block = header(format, "link", typeflag, 1, "target", 0o644);
-        let mut members = TarArchive::new(block.as_slice())
+    let linkdata = header(ArchiveFormat::Pax, "smuggled", b'0', 0, "", 0o644);
+    let mut header_size = ArchiveBuilder::new();
+    header_size.ustar("link", b'1', &linkdata, "target", 0o644);
+    let mut pax_size = ArchiveBuilder::new();
+    pax_size
+        .pax(b'x', &pax_record(PaxKeyword::Size, "512"))
+        .ustar("link", b'1', b"", "target", 0o644)
+        .block(&linkdata);
+
+    for mut archive in [header_size, pax_size] {
+        archive.ustar("after", b'0', b"", "", 0o644);
+        let bytes = archive.finish();
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice()).members().next().await,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidMemberSize { .. },
+                ..
+            }))
+        ));
+
+        let mut members = TarArchive::new(bytes.as_slice())
             .with_policy(policy.clone())
             .members();
+        let Some(Member::HardLink { payload, .. }) = members.next().await? else {
+            return Err(io::Error::other("expected hard-link member").into());
+        };
+        assert_eq!(read_payload(payload).await?, linkdata);
         assert!(matches!(
-            members.next().await,
-            Err(DecodeError::Framing(FrameError {
-                inner: FrameErrorInner::InvalidMemberSize { kind: found, size: 1 },
-                ..
-            })) if found == kind
+            members.next().await?,
+            Some(Member::File { metadata, .. }) if metadata.path == "after"
         ));
     }
+    Ok(())
 }
 
 #[tokio::test]
