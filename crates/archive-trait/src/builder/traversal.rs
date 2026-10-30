@@ -87,12 +87,12 @@ impl TraversalStream {
 /// A failure while traversing a recursive archive source.
 #[derive(Debug, Error)]
 pub enum TraversalError {
-    /// A traversed source entry unexpectedly falls outside the recursive root.
+    /// A source path cannot be mapped to an archive member path.
     #[error("invalid archive path {path:?}: {reason}")]
     InvalidArchivePath {
-        /// The source entry outside the recursive root.
+        /// The affected source filesystem path.
         path: PathBuf,
-        /// The failed traversal invariant.
+        /// Why the source path cannot be archived.
         reason: &'static str,
     },
     /// An archive name was rejected by the configured builder policy.
@@ -158,14 +158,14 @@ pub(crate) fn stream_directory_entries(
     validation: NameValidation,
     symlink_policy: SymlinkPolicy,
 ) -> Result<TraversalStream, TraversalError> {
-    let Some(archive_path) = source
-        .file_name()
-        .and_then(|name| name.to_str())
-        .map(str::to_owned)
-    else {
-        return Err(TraversalError::NonUtf8SourcePath {
-            path: source.to_path_buf(),
+    let Some(basename) = source.file_name() else {
+        return Err(TraversalError::InvalidArchivePath {
+            path: source,
+            reason: "source directory has no basename",
         });
+    };
+    let Some(archive_path) = basename.to_str().map(str::to_owned) else {
+        return Err(TraversalError::NonUtf8SourcePath { path: source });
     };
     validate_name(&archive_path, validation, "member path")?;
     let (sender, receiver) = mpsc::channel(DIRECTORY_TRAVERSAL_BUFFER_BATCHES);

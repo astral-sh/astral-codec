@@ -2,7 +2,7 @@ use std::{
     cell::RefCell,
     future::Future,
     io,
-    path::PathBuf,
+    path::{Path, PathBuf},
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
@@ -584,6 +584,17 @@ async fn recursive_build_applies_symlink_policy() {
         .expect("disabled validation should accept the link target");
 }
 
+#[tokio::test]
+async fn recursive_build_reports_missing_source_basename() {
+    assert!(matches!(
+        MockFormat::new().builder().add_directory_all(".").await,
+        Err(BuildError::Traversal(TraversalError::InvalidArchivePath {
+            path,
+            reason: "source directory has no basename",
+        })) if path == Path::new(".")
+    ));
+}
+
 #[cfg(unix)]
 #[tokio::test]
 async fn recursive_build_reports_non_utf8_and_unsupported_sources() {
@@ -615,6 +626,15 @@ async fn recursive_build_reports_non_utf8_and_unsupported_sources() {
     let source = temp.path().join("invalid");
     std::fs::create_dir(&source).expect("source directory should be created");
     let invalid_name = OsString::from_vec(vec![0xff]);
+    assert!(matches!(
+        MockFormat::new()
+            .builder()
+            .add_directory_all(temp.path().join(&invalid_name))
+            .await,
+        Err(BuildError::Traversal(
+            TraversalError::NonUtf8SourcePath { .. }
+        ))
+    ));
     if std::fs::write(source.join(&invalid_name), b"contents").is_ok() {
         assert!(matches!(
             MockFormat::new().builder().add_directory_all(&source).await,
