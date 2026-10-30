@@ -668,7 +668,8 @@ mod tests {
         stream::DataOwner,
         test_support::{
             ChunkedReader, append_block, append_gnu, append_pax, append_payload, append_terminator,
-            cancel_pending, gnu_header, header, ready, ready_ok, record, set_checksum,
+            cancel_pending, gnu_base256_header, gnu_header, header, ready, ready_ok, record,
+            set_checksum,
         },
     };
 
@@ -1497,6 +1498,29 @@ mod tests {
             let member = next_member(&mut reader).await?;
             assert_eq!(member.header.position, next_member_position);
             drop(member);
+            assert!(reader.next_frame().await?.is_none());
+            Ok(())
+        });
+    }
+
+    #[test]
+    fn reports_chunk_size_overflow_at_the_start_of_a_retried_chunk() {
+        let mut bytes = gnu_base256_header(b'0', u64::MAX).to_vec();
+        append_payload(&mut bytes, b"payload");
+        ready_ok(async {
+            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 1));
+            let mut payload = next_member(&mut reader).await?.payload;
+            let mut chunk = Vec::new();
+            cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE));
+            let error = payload
+                .next_chunk(&mut chunk, usize::MAX)
+                .await
+                .expect_err("the rounded chunk size should overflow");
+            assert!(matches!(
+                error.inner,
+                FrameErrorInner::ArithmeticOverflow { .. }
+            ));
+            assert_eq!(error.position, BLOCK_SIZE as u64);
             assert!(reader.next_frame().await?.is_none());
             Ok(())
         });

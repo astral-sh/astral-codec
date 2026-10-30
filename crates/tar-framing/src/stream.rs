@@ -653,8 +653,9 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 ));
             }
         };
+        let start_position = self.position - prefix_len as u64;
         let target_len = u64::try_from(target_len.max(BLOCK_SIZE)).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk target length")
+            FrameError::arithmetic_overflow(start_position, "member payload chunk target length")
         })?;
         let physical_len = member_remaining
             .min(target_len)
@@ -662,16 +663,19 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             .checked_mul(BLOCK_SIZE as u64)
             .ok_or_else(|| {
                 FrameError::arithmetic_overflow(
-                    self.position,
+                    start_position,
                     "member payload chunk physical length",
                 )
             })?;
         let meaningful_len = member_remaining.min(physical_len);
         let physical_len = usize::try_from(physical_len).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk physical length")
+            FrameError::arithmetic_overflow(start_position, "member payload chunk physical length")
         })?;
         let meaningful_len = usize::try_from(meaningful_len).map_err(|_| {
-            FrameError::arithmetic_overflow(self.position, "member payload chunk meaningful length")
+            FrameError::arithmetic_overflow(
+                start_position,
+                "member payload chunk meaningful length",
+            )
         })?;
 
         // Move the caller's reusable allocation into persistent storage before
@@ -687,7 +691,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         if block_len != 0 {
             self.member_chunk.buffer[prefix_len..filled].copy_from_slice(&self.block[..block_len]);
         }
-        self.member_chunk.start_position = self.position - prefix_len as u64;
+        self.member_chunk.start_position = start_position;
         self.member_chunk.physical_len = physical_len;
         self.member_chunk.meaningful_len = meaningful_len;
         self.member_chunk.state = Some(MemberChunkState::Reading {
