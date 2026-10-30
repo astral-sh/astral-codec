@@ -34,8 +34,9 @@
 //!   `SCHILY.xattr.*` values. Standard and reserved pax record values remain strict UTF-8.
 //!
 //! - tar-framing requires multi-digit pax `size` values to start with a nonzero digit.
-//!   POSIX specifies decimal, so `0777` means 777 bytes. An octal reader consumes
-//!   only 511 bytes and looks for the next member header one block earlier.
+//!   POSIX specifies decimal, so `0777` means 777 bytes. However,
+//!   some misbehaving parsers will interpret `0777` as octal (511)
+//!   instead, so tar-framing rejects this form.
 //!
 //! - tar-framing rejects directory entries (typeflag `'5'`) that present a nonzero size
 //!   in their ustar header or pax `size` record. pax says that this size should be treated
