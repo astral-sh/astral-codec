@@ -95,6 +95,8 @@
 //! Because pax and GNU both use ustar as their baseline, any compatibility aspect of pax
 //! that is derived from ustar also applies during GNU tar decoding.
 //!
+//! tar-framing does not support tar families other than pax and GNU. That includes the "legacy" (V7) and star families.
+//!
 //! tar-framing accepts wholly NUL `mode`, `uid`, `gid`, and `mtime` fields by default for
 //! compatibility with real-world writers in both families. These fields are represented as
 //! missing rather than assigned a value. This can be disabled with

@@ -88,7 +88,7 @@ use crate::{
     header::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, MODE_RANGE,
         MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE,
-        USTAR_IDENTITY, checksum, is_all_nul, parse_number, parse_octal,
+        USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
     },
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
@@ -1348,6 +1348,14 @@ fn checked_position(position: u64, len: usize) -> Result<u64, FrameError> {
 
 impl TryFromFramed<&Block> for ParsedHeader {
     fn try_from_framed(position: u64, block: &Block) -> Result<Self, FrameError> {
+        // xstar shares the ustar identity but uses part of the path prefix for timestamps.
+        if block.ends_with(XSTAR_MAGIC) {
+            return Err(FrameError::at(
+                position,
+                FrameErrorInner::UnsupportedXstarHeader,
+            ));
+        }
+
         let format = match &block[IDENTITY_RANGE] {
             identity if identity == USTAR_IDENTITY => ArchiveFormat::Pax,
             identity if identity == GNU_IDENTITY => ArchiveFormat::Gnu,
@@ -1547,6 +1555,7 @@ mod tests {
     #[derive(Clone, Copy)]
     enum ExpectedHeaderError {
         InvalidIdentity,
+        UnsupportedXstarHeader,
         InvalidChecksum,
         InvalidSize,
         InvalidNumericField(&'static str),
@@ -1558,6 +1567,7 @@ mod tests {
         fn matches(self, error: &FrameErrorInner) -> bool {
             match (self, error) {
                 (Self::InvalidIdentity, FrameErrorInner::InvalidIdentity { .. })
+                | (Self::UnsupportedXstarHeader, FrameErrorInner::UnsupportedXstarHeader)
                 | (Self::InvalidChecksum, FrameErrorInner::InvalidChecksum { .. })
                 | (Self::InvalidSize, FrameErrorInner::InvalidSize { .. }) => true,
                 (
@@ -1595,6 +1605,11 @@ mod tests {
         vec![
             ("magic", bad_magic, ExpectedHeaderError::InvalidIdentity),
             ("version", bad_version, ExpectedHeaderError::InvalidIdentity),
+            (
+                "xstar magic",
+                checksummed_header(|block| block[508..].copy_from_slice(b"tar\0")),
+                ExpectedHeaderError::UnsupportedXstarHeader,
+            ),
             (
                 "checksum",
                 bad_checksum,
