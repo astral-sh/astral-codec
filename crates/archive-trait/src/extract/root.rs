@@ -283,11 +283,17 @@ async fn write_payload<P: MemberPayload>(
 impl<E> ExtractionRoot<E> {
     /// Opens or creates a real directory and anchors extraction to its capability.
     pub(super) async fn open(
-        destination: &Path,
+        requested: &Path,
         allow_overwrites: bool,
     ) -> Result<Self, ExtractError<E>> {
-        let destination = destination.to_owned();
-        let error_path = destination.clone();
+        // Ignore trailing separators and `.` on named directories so the
+        // symlink check sees the entry itself. Keep roots such as `//` intact.
+        let destination = if requested.file_name().is_some() {
+            requested.components().as_path()
+        } else {
+            requested
+        }
+        .to_owned();
         let directory = tokio::task::spawn_blocking(move || {
             match std_fs::symlink_metadata(&destination) {
                 Ok(_) => {}
@@ -311,7 +317,7 @@ impl<E> ExtractionRoot<E> {
         .await
         .map_err(ExtractError::<E>::BlockingTask)?
         .map_err(|source| {
-            ExtractError::<E>::filesystem("open destination directory", error_path, source)
+            ExtractError::filesystem("open destination directory", requested.to_owned(), source)
         })?;
 
         Ok(Self {

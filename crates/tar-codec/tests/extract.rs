@@ -61,6 +61,21 @@ async fn extracts_files_directories_large_payloads_and_archive_path_syntax() {
 }
 
 #[tokio::test]
+async fn creates_a_missing_destination_ending_in_a_current_directory_component() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let bytes = single_pax_member("file", b'0', b"archive", "", 0o644);
+
+    TarArchive::new(bytes.as_slice())
+        .extract_in(temp.path().join("out/./"), ExtractPolicy::default())
+        .await
+        .expect("missing destination should be created");
+    assert_eq!(
+        std::fs::read(temp.path().join("out/file")).expect("file should be extracted"),
+        b"archive"
+    );
+}
+
+#[tokio::test]
 async fn default_name_policy_rejects_colons_in_regular_file_paths() {
     let bytes = single_pax_member("file:stream", b'0', b"contents", "", 0o644);
     let temp = tempdir().expect("temporary directory should be created");
@@ -623,18 +638,22 @@ async fn rejects_a_symlink_destination_root_without_modifying_its_target() {
 
     let temp = tempdir().unwrap();
     let target = temp.path().join("target");
-    let destination = temp.path().join("link");
     std::fs::create_dir(&target).unwrap();
     std::fs::write(target.join("keep"), b"keep").unwrap();
-    symlink_dir(&target, &destination).unwrap();
+    symlink_dir(&target, temp.path().join("link")).expect("destination link should be created");
     let bytes = single_pax_member("file", b'0', b"archive", "", 0o644);
 
-    assert!(matches!(
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, ExtractPolicy::default())
-            .await,
-        Err(ExtractError::Filesystem { .. })
-    ));
+    for path in ["link", "link/", "link/."] {
+        assert!(
+            matches!(
+                TarArchive::new(bytes.as_slice())
+                    .extract_in(temp.path().join(path), ExtractPolicy::default())
+                    .await,
+                Err(ExtractError::Filesystem { .. })
+            ),
+            "{path} should be rejected"
+        );
+    }
     assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"keep");
     assert!(!target.join("file").exists());
 }
