@@ -100,15 +100,17 @@ pub(super) fn write_buffered_file(
     contents: &[u8],
     replacement: BufferedFileReplacement,
 ) -> Result<(), BufferedFileError> {
+    let mode = FileOpenMode::CreateNew { executable };
     // Unique destination access makes this the common duplicate-member path.
     // If the leaf changed unexpectedly, fall through to no-follow inspection.
     if replacement == BufferedFileReplacement::ExpectedFile && directory.remove_file(path).is_ok() {
-        let file = open_new_file(directory, path, executable)
+        let file = mode
+            .open(directory, path)
             .map_err(|source| BufferedFileError::filesystem("create file", source))?;
         return write_buffered_contents(file, contents);
     }
 
-    let create_error = match open_new_file(directory, path, executable) {
+    let create_error = match mode.open(directory, path) {
         Ok(file) => return write_buffered_contents(file, contents),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
         Err(error) => return Err(BufferedFileError::filesystem("create file", error)),
@@ -124,7 +126,8 @@ pub(super) fn write_buffered_file(
         return Err(BufferedFileError::Collision);
     }
     remove_buffered_leaf(directory, path, &metadata)?;
-    let file = open_new_file(directory, path, executable)
+    let file = mode
+        .open(directory, path)
         .map_err(|source| BufferedFileError::filesystem("create file", source))?;
     write_buffered_contents(file, contents)
 }
@@ -132,11 +135,6 @@ pub(super) fn write_buffered_file(
 fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), BufferedFileError> {
     file.write_all(contents)
         .map_err(|source| BufferedFileError::filesystem("write file", source))
-}
-
-fn open_new_file(directory: &Dir, path: &Path, executable: bool) -> io::Result<CapFile> {
-    let options = FileOpenMode::CreateNew { executable }.options();
-    directory.open_with(path, &options)
 }
 
 fn remove_buffered_leaf(

@@ -74,6 +74,11 @@ async fn extracts_common_members_and_streams_payload_sizes() {
     ]);
     let temp = tempdir().expect("temporary directory should be created");
     let destination = temp.path().join("out");
+    // Both buffered and streamed files may replace an empty directory.
+    for path in ["small", "large"] {
+        std::fs::create_dir_all(destination.join(path))
+            .expect("ambient directory should be created");
+    }
 
     archive
         .extract_in(&destination, ExtractPolicy::default())
