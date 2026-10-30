@@ -213,8 +213,8 @@ pub(crate) async fn extract<A: Archive>(
     root.finalize_symlinks(policy.link_policy).await
 }
 
-fn check_member_policy<E, P>(
-    member: &Member<P>,
+fn check_member_policy<E, P, M>(
+    member: &Member<P, M>,
     policy: ExtractPolicy,
 ) -> Result<(), ExtractError<E>> {
     let position = member.metadata().position;

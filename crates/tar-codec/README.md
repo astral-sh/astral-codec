@@ -67,13 +67,13 @@ Unlike encoding, decoding/extraction has two policy layers:
 - Use `extract::ExtractPolicy` to control various aspects of how archives become
   real paths on the host filesystem.
 
-`Member::metadata()` exposes the effective `mtime` in integral Unix seconds.
-To retain effective vendor PAX records, enable
-`TarArchive::retain_pax_vendor_records(true)` and permit their namespaces through
-`PaxDecodePolicy::vendor_extension_policy`. Snapshots provide read-only `get` and
-`iter` access, preserving raw bytes and explicit deletions for the application to
-interpret. Retention is disabled by default and adds per-member work and
-allocations, including for inherited global metadata.
+`Member::metadata().format` exposes `TarMetadata`: the effective `mtime()` in
+integral Unix seconds and policy-validated PAX state. `PaxState::effective_record`
+and `effective_records` resolve precedence and preserve explicit deletions.
+Metadata is always available without constructing a per-member snapshot. The
+PAX view borrows the archive reader; copy any values needed after advancing to
+the next member. Vendor namespaces must still be permitted through
+`PaxDecodePolicy::vendor_extension_policy`.
 
 ## Performance
 

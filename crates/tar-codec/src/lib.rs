@@ -21,12 +21,12 @@ pub mod encode;
 pub use archive_trait::{
     Archive, ArchiveBuilder, BuildError, Builder, EntryMetadata, ExtractError,
     ExtractPolicyViolation, FilePayload, LentPayload, Member, MemberMetadata, MemberPayload,
-    Members, NameValidator, PaxVendorRecords, PaxVendorValue, SpecialKind, TraversalError,
-    default_name_validator,
+    Members, NameValidator, SpecialKind, TraversalError, default_name_validator,
 };
 pub use archive_trait::{builder, extract};
 pub use decode::{
-    DecodeError, DecodePolicy, DecodePolicyViolation, PaxDecodePolicy, PaxVendorAllowlist,
-    PaxVendorExtensionPolicy, TarArchive, TarMemberPayload,
+    DecodeError, DecodePolicy, DecodePolicyViolation, PaxDecodePolicy, PaxKeyword, PaxRecord,
+    PaxState, PaxValue, PaxVendorAllowlist, PaxVendorExtensionPolicy, TarArchive, TarMemberPayload,
+    TarMetadata,
 };
 pub use encode::{EncodeError, TarEncoder};

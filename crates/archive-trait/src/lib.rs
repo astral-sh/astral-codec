@@ -16,11 +16,9 @@ pub mod extract;
 mod name;
 
 use std::{
-    collections::BTreeMap,
     io,
     marker::PhantomData,
     path::{Path, PathBuf},
-    sync::Arc,
 };
 
 use thiserror::Error;
@@ -32,77 +30,13 @@ pub use name::{NameValidator, default_name_validator};
 
 /// Common metadata for one archive member.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct MemberMetadata {
+pub struct MemberMetadata<M = ()> {
     /// The archive-relative member path before extraction normalization.
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
-    /// Effective Unix modification time in seconds, with fractions discarded.
-    ///
-    /// TAR pax overrides apply; a deletion yields `None` without header fallback.
-    pub mtime: Option<u64>,
-    /// Effective vendor pax records, empty unless the decoder retains them.
-    pub pax_vendor_records: PaxVendorRecords,
-}
-
-/// The effective value of one vendor-namespaced pax record.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub enum PaxVendorValue<T> {
-    /// This record sets or overrides the attribute with uninterpreted bytes.
-    Value(T),
-    /// Explicit deletion, which prevents fallback to an inherited value.
-    Deleted,
-}
-
-/// An owned, read-only vendor pax snapshot, valid after advancing the archive.
-///
-/// Keys are complete, case-sensitive keywords such as `Acme.attribute`.
-/// Values preserve raw bytes and deletions; standard pax records are excluded.
-/// Decoders construct snapshots with [`FromIterator`] after validating policy
-/// and resolving local-over-global and last-record-wins precedence.
-#[derive(Clone, Debug, Default, Eq, PartialEq)]
-pub struct PaxVendorRecords {
-    records: BTreeMap<String, PaxVendorValue<Arc<[u8]>>>,
-}
-
-impl PaxVendorRecords {
-    /// Looks up a complete keyword; `None` is absent, distinct from
-    /// `Some(PaxVendorValue::Deleted)`.
-    pub fn get(&self, keyword: &str) -> Option<PaxVendorValue<&[u8]>> {
-        self.records.get(keyword).map(Self::borrow_value)
-    }
-
-    /// Visits effective keywords, including deletions, in unspecified order.
-    pub fn iter(&self) -> impl Iterator<Item = (&str, PaxVendorValue<&[u8]>)> {
-        self.records
-            .iter()
-            .map(|(keyword, value)| (keyword.as_str(), Self::borrow_value(value)))
-    }
-
-    /// Returns the number of effective keywords, including deletions.
-    pub fn len(&self) -> usize {
-        self.records.len()
-    }
-
-    /// Returns whether the snapshot contains no effective vendor records.
-    pub fn is_empty(&self) -> bool {
-        self.records.is_empty()
-    }
-
-    fn borrow_value(value: &PaxVendorValue<Arc<[u8]>>) -> PaxVendorValue<&[u8]> {
-        match value {
-            PaxVendorValue::Value(bytes) => PaxVendorValue::Value(bytes.as_ref()),
-            PaxVendorValue::Deleted => PaxVendorValue::Deleted,
-        }
-    }
-}
-
-impl FromIterator<(String, PaxVendorValue<Arc<[u8]>>)> for PaxVendorRecords {
-    fn from_iter<T: IntoIterator<Item = (String, PaxVendorValue<Arc<[u8]>>)>>(records: T) -> Self {
-        Self {
-            records: records.into_iter().collect(),
-        }
-    }
+    /// Format-specific metadata, which may borrow the archive reader.
+    pub format: M,
 }
 
 /// A special-file kind that generic extraction deliberately rejects.
@@ -118,11 +52,11 @@ pub enum SpecialKind {
 
 /// One format-neutral archive member.
 #[derive(Debug)]
-pub enum Member<P> {
+pub enum Member<P, M = ()> {
     /// A regular file with a streaming payload.
     File {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The logical, decoded payload size in bytes.
         ///
         /// `payload` must yield exactly this many bytes before completing
@@ -136,19 +70,19 @@ pub enum Member<P> {
     /// A directory.
     Directory {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
     },
     /// A symbolic link.
     SymbolicLink {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The archive-provided link target.
         target: String,
     },
     /// A hard link, optionally followed by replacement payload bytes.
     HardLink {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The archive-provided link target.
         target: String,
         /// The logical, decoded replacement-payload size in bytes.
@@ -162,15 +96,15 @@ pub enum Member<P> {
     /// A parsed special file that cannot be extracted safely.
     Special {
         /// Common member metadata.
-        metadata: MemberMetadata,
+        metadata: MemberMetadata<M>,
         /// The special-file kind.
         kind: SpecialKind,
     },
 }
 
-impl<P> Member<P> {
+impl<P, M> Member<P, M> {
     /// Returns this member's common metadata.
-    pub fn metadata(&self) -> &MemberMetadata {
+    pub fn metadata(&self) -> &MemberMetadata<M> {
         match self {
             Self::File { metadata, .. }
             | Self::Directory { metadata }
@@ -180,7 +114,7 @@ impl<P> Member<P> {
         }
     }
 
-    fn lend_payload<'a>(self) -> Member<LentPayload<'a, P>> {
+    fn lend_payload<'a>(self) -> Member<LentPayload<'a, P>, M> {
         match self {
             Self::File {
                 metadata,
@@ -286,10 +220,11 @@ impl<A: Archive> Members<A> {
     /// Returns the next archive member.
     ///
     /// The returned payload borrows this cursor, so the cursor cannot advance
-    /// until that member is dropped or consumed.
+    /// until that member is dropped or consumed. Format metadata may also
+    /// borrow the cursor, including for members without a payload.
     pub async fn next<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>>>, A::Error> {
+    ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>, A::Metadata<'a>>>, A::Error> {
         Ok(self.archive.next_member().await?.map(Member::lend_payload))
     }
 }
@@ -302,6 +237,10 @@ impl<A: Archive> Members<A> {
 pub trait Archive: Sized {
     /// The archive-format error returned during member iteration.
     type Error;
+    /// Format-specific metadata lent by each member.
+    type Metadata<'a>
+    where
+        Self: 'a;
     /// The streaming payload type lent by each file member.
     type Payload<'a>: MemberPayload<Error = Self::Error>
     where
@@ -316,7 +255,7 @@ pub trait Archive: Sized {
     /// contract even when a concrete payload type does not retain its lifetime.
     async fn next_member<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
+    ) -> Result<Option<Member<Self::Payload<'a>, Self::Metadata<'a>>>, Self::Error>;
 
     /// Consumes this archive and returns its lending member cursor.
     fn members(self) -> Members<Self> {

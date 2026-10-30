@@ -9,10 +9,10 @@ use std::collections::HashSet;
 
 use archive_trait::{
     Archive as ArchiveTrait, Member, MemberMetadata, MemberPayload as MemberPayloadTrait,
-    PaxVendorRecords, PaxVendorValue, SpecialKind,
+    SpecialKind,
 };
 use tar_framing::{
-    ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
+    ArchiveFormat, FrameError, PaxKind, StreamPolicy, UstarKind,
     logical::{MemberExtensions, MemberFrame, MemberPayload as FramingMemberPayload, TarReader},
 };
 use thiserror::Error;
@@ -20,7 +20,7 @@ use tokio::io::AsyncRead;
 
 pub use tar_framing::{
     DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE,
-    DEFAULT_MAX_PAX_EXTENSION_SIZE,
+    DEFAULT_MAX_PAX_EXTENSION_SIZE, PaxKeyword, PaxRecord, PaxState, PaxValue,
 };
 
 /// This type reads one structurally valid pax or GNU tar archive in one pass.
@@ -34,7 +34,6 @@ pub use tar_framing::{
 pub struct TarArchive<R> {
     reader: TarReader<R>,
     policy: DecodePolicy,
-    retain_pax_vendor_records: bool,
     fused: bool,
 }
 
@@ -44,7 +43,6 @@ impl<R> TarArchive<R> {
         Self {
             reader: TarReader::new(reader),
             policy: DecodePolicy::default(),
-            retain_pax_vendor_records: false,
             fused: false,
         }
     }
@@ -65,18 +63,33 @@ impl<R> TarArchive<R> {
         self.policy = policy;
         self
     }
+}
 
-    /// Retains effective vendor pax snapshots for each member; disabled by default.
+/// Policy-validated TAR metadata borrowing the current member's PAX state.
+///
+/// Copy any values needed after advancing the archive.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct TarMetadata<'a> {
+    header_mtime: Option<u64>,
+    /// PAX state, absent for GNU members. Queries resolve local-over-global
+    /// precedence and preserve explicit deletions. Vendor values retain their raw bytes.
+    pub pax: Option<PaxState<'a>>,
+}
+
+impl TarMetadata<'_> {
+    /// Effective Unix modification time in seconds, with fractions discarded.
     ///
-    /// Adds per-member scans and allocations, including inherited global records.
-    /// Values share their underlying bytes. This does not relax [`DecodePolicy`];
-    /// vendor namespaces must be permitted by
-    /// [`PaxDecodePolicy::vendor_extension_policy`]. [`MemberMetadata::mtime`]
-    /// is available regardless of this setting.
-    /// Call before reading any members.
-    pub fn retain_pax_vendor_records(mut self, retain: bool) -> Self {
-        self.retain_pax_vendor_records = retain;
-        self
+    /// PAX overrides apply; a deletion yields `None` without header fallback.
+    pub fn mtime(&self) -> Option<u64> {
+        match self
+            .pax
+            .as_ref()
+            .and_then(|state| state.effective_record(&PaxKeyword::Mtime))
+        {
+            Some(PaxRecord::Mtime(PaxValue::Value(value))) => Some(*value),
+            Some(PaxRecord::Mtime(PaxValue::Deleted)) => None,
+            _ => self.header_mtime,
+        }
     }
 }
 
@@ -562,6 +575,10 @@ impl<R: AsyncRead + Unpin> MemberPayloadTrait for TarMemberPayload<'_, R> {
 
 impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     type Error = DecodeError;
+    type Metadata<'a>
+        = TarMetadata<'a>
+    where
+        Self: 'a;
     type Payload<'a>
         = TarMemberPayload<'a, R>
     where
@@ -569,7 +586,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
     async fn next_member<'a>(
         &'a mut self,
-    ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error> {
+    ) -> Result<Option<Member<Self::Payload<'a>, Self::Metadata<'a>>>, Self::Error> {
         if self.fused {
             return Ok(None);
         }
@@ -591,14 +608,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
             return Err(error);
         }
 
-        match project_member(
-            frame,
-            self.retain_pax_vendor_records
-                && !matches!(
-                    self.policy.pax_policy.vendor_extension_policy,
-                    PaxVendorExtensionPolicy::RejectUnknown
-                ),
-        ) {
+        match project_member(frame) {
             Ok(member) => Ok(Some(member)),
             Err(error) => {
                 self.fused = true;
@@ -610,8 +620,7 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
 
 fn project_member<'a, R>(
     frame: MemberFrame<'a, R>,
-    retain_vendor_records: bool,
-) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
+) -> Result<Member<TarMemberPayload<'a, R>, TarMetadata<'a>>, DecodeError> {
     let position = frame.header.position;
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
@@ -632,41 +641,18 @@ fn project_member<'a, R>(
     } else {
         String::new()
     };
-    let mut metadata = MemberMetadata {
+    let pax = match frame.extensions {
+        MemberExtensions::Pax(state) => Some(state),
+        MemberExtensions::Gnu { .. } => None,
+    };
+    let metadata = MemberMetadata {
         path,
         position,
-        mtime: frame.header.mtime,
-        pax_vendor_records: PaxVendorRecords::default(),
+        format: TarMetadata {
+            header_mtime: frame.header.mtime,
+            pax,
+        },
     };
-    if let MemberExtensions::Pax(state) = &frame.extensions {
-        metadata.mtime = match state.effective_record(&PaxKeyword::Mtime) {
-            Some(PaxRecord::Mtime(PaxValue::Value(value))) => Some(*value),
-            Some(PaxRecord::Mtime(PaxValue::Deleted)) => None,
-            _ => metadata.mtime,
-        };
-        if retain_vendor_records {
-            metadata.pax_vendor_records = state
-                .effective_records()
-                .filter_map(|record| {
-                    let PaxRecord::Vendor {
-                        vendor,
-                        name,
-                        value,
-                    } = record
-                    else {
-                        return None;
-                    };
-                    Some((
-                        format!("{vendor}.{name}"),
-                        match value {
-                            PaxValue::Value(value) => PaxVendorValue::Value(value.clone()),
-                            PaxValue::Deleted => PaxVendorValue::Deleted,
-                        },
-                    ))
-                })
-                .collect();
-        }
-    }
 
     Ok(match kind {
         UstarKind::Regular | UstarKind::Contiguous => Member::File {

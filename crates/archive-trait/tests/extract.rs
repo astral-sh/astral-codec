@@ -22,6 +22,7 @@ struct GatedArchive {
 
 impl Archive for GatedArchive {
     type Error = TestError;
+    type Metadata<'a> = ();
     type Payload<'a> = TestPayload;
 
     async fn next_member<'a>(

@@ -261,15 +261,22 @@ impl<'global> PaxState<'global> {
     /// Local records override globals; the last local record wins. Order is unspecified.
     pub fn effective_records(&self) -> impl Iterator<Item = &PaxRecord> {
         let mut seen = HashSet::new();
-        self.local_extension
+        let mut local = self
+            .local_extension
             .iter()
-            .flat_map(|extension| extension.records().iter().rev())
-            .chain(
-                self.global_records
-                    .into_iter()
-                    .flat_map(|global| global.records.as_slice()),
-            )
-            .filter(move |record| seen.insert(record.keyword()))
+            .flat_map(|extension| extension.records().iter().rev());
+        let mut global = self
+            .global_records
+            .into_iter()
+            .flat_map(|global| global.records.as_slice());
+        std::iter::from_fn(move || {
+            local
+                .find(|record| seen.insert(record.keyword()))
+                .or_else(|| {
+                    // Global records are already unique; only local overrides can hide them.
+                    global.find(|record| seen.is_empty() || !seen.contains(&record.keyword()))
+                })
+        })
     }
 
     pub(super) fn effective_size<'records>(

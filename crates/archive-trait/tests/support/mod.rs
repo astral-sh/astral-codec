@@ -89,8 +89,7 @@ pub mod entry {
         MemberMetadata {
             path: path.to_owned(),
             position: 0,
-            mtime: None,
-            pax_vendor_records: Default::default(),
+            format: (),
         }
     }
 }
@@ -167,6 +166,7 @@ impl MemberPayload for TestPayload {
 
 impl Archive for TestArchive {
     type Error = TestError;
+    type Metadata<'a> = ();
     type Payload<'a> = TestPayload;
 
     async fn next_member<'a>(
