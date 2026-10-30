@@ -34,7 +34,7 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
         .ustar("contiguous", b'7', b"contiguous", "", 0o644)
         .ustar("directory", b'5', b"", "", 0o755)
         .ustar("symbolic", b'2', b"", "file", 0o777)
-        .ustar("hard", b'1', b"replacement", "file", 0o644)
+        .ustar("hard", b'1', b"", "file", 0o644)
         .ustar("character", b'3', b"", "", 0o644)
         .ustar("block", b'4', b"", "", 0o644)
         .ustar("fifo", b'6', b"", "", 0o644);
@@ -88,8 +88,8 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
     };
     assert_eq!(metadata.path, "hard");
     assert_eq!(target, "file");
-    assert_eq!(size, 11);
-    assert_eq!(read_payload(payload).await?, b"replacement");
+    assert_eq!(size, 0);
+    assert!(read_payload(payload).await?.is_empty());
 
     for (path, kind) in [
         ("character", SpecialKind::CharacterDevice),
@@ -105,6 +105,46 @@ async fn projects_every_member_kind_and_streams_payloads() -> TestResult {
         ));
     }
     assert!(members.next().await?.is_none());
+    Ok(())
+}
+
+/// In tar-minefield F34 and F35, the hard-link payload is itself a valid member header.
+#[tokio::test]
+async fn pax_hard_link_payloads_require_opt_in() -> TestResult {
+    let policy = DecodePolicy::default()
+        .pax_policy(PaxDecodePolicy::default().allow_hardlink_linkdata(true));
+    let linkdata = header(ArchiveFormat::Pax, "smuggled", b'0', 0, "", 0o644);
+    let mut header_size = ArchiveBuilder::new();
+    header_size.ustar("link", b'1', &linkdata, "target", 0o644);
+    let mut pax_size = ArchiveBuilder::new();
+    pax_size
+        .pax(b'x', &pax_record(PaxKeyword::Size, "512"))
+        .ustar("link", b'1', b"", "target", 0o644)
+        .block(&linkdata);
+
+    for mut archive in [header_size, pax_size] {
+        archive.ustar("after", b'0', b"", "", 0o644);
+        let bytes = archive.finish();
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice()).members().next().await,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidMemberSize { .. },
+                ..
+            }))
+        ));
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(policy.clone())
+            .members();
+        let Some(Member::HardLink { payload, .. }) = members.next().await? else {
+            return Err(io::Error::other("expected hard-link member").into());
+        };
+        assert_eq!(read_payload(payload).await?, linkdata);
+        assert!(matches!(
+            members.next().await?,
+            Some(Member::File { metadata, .. }) if metadata.path == "after"
+        ));
+    }
     Ok(())
 }
 

@@ -851,22 +851,9 @@ async fn case_folded_deferred_symlinks_honor_overwrite_policy() {
 }
 
 #[tokio::test]
-async fn hard_links_require_prior_archive_targets_and_apply_linkdata() {
+async fn hard_links_require_prior_archive_targets() {
     let temp = tempdir().unwrap();
     let policy = ExtractPolicy::default().link_policy(LinkPolicy::default().allow_hard_links(true));
-    let destination = temp.path().join("linkdata");
-    let mut archive = ArchiveBuilder::new();
-    archive
-        .ustar("a", b'0', b"old", "", 0o644)
-        .ustar("b", b'1', b"new", "a", 0o644);
-    let bytes = archive.finish();
-    TarArchive::new(bytes.as_slice())
-        .extract_in(&destination, policy)
-        .await
-        .unwrap();
-    assert_eq!(std::fs::read(destination.join("a")).unwrap(), b"new");
-    assert_eq!(std::fs::read(destination.join("b")).unwrap(), b"new");
-
     let unresolved = single_pax_member("b", b'1', b"", "a", 0o644);
     assert!(matches!(
         TarArchive::new(unresolved.as_slice())
@@ -890,29 +877,22 @@ async fn hard_links_require_prior_archive_targets_and_apply_linkdata() {
     let destination = temp.path().join("different-mode");
     let mut archive = ArchiveBuilder::new();
     archive
-        .ustar("a", b'0', b"", "", 0o644)
+        .ustar("a", b'0', b"keep", "", 0o644)
         .ustar("b", b'1', b"", "a", 0o755);
     let bytes = archive.finish();
     TarArchive::new(bytes.as_slice())
         .extract_in(&destination, policy)
         .await
         .unwrap();
-    assert!(destination.join("b").is_file());
+    assert_eq!(
+        std::fs::read(destination.join("b")).expect("hard link should be readable"),
+        b"keep"
+    );
 
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
 
-        let destination = temp.path().join("linkdata-mode");
-        let mut archive = ArchiveBuilder::new();
-        archive
-            .ustar("a", b'0', b"old", "", 0o644)
-            .ustar("b", b'1', b"new", "a", 0o755);
-        let bytes = archive.finish();
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, policy)
-            .await
-            .unwrap();
         assert_eq!(
             std::fs::metadata(destination.join("a"))
                 .unwrap()

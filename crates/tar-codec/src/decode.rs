@@ -54,6 +54,7 @@ impl<R> TarArchive<R> {
         let stream_policy = StreamPolicy::default()
             .max_pax_extension_size(policy.pax_policy.max_extension_size)
             .max_global_pax_extensions_size(policy.pax_policy.max_global_extensions_size)
+            .allow_pax_hardlink_linkdata(policy.pax_policy.allow_hardlink_linkdata)
             .allow_all_nul_numeric_fields(policy.allow_all_nul_numeric_fields)
             .allow_header_uname_and_gname_without_terminator(
                 policy.allow_header_uname_and_gname_without_terminator,
@@ -89,6 +90,7 @@ pub struct PaxDecodePolicy {
     vendor_extension_policy: PaxVendorExtensionPolicy,
     allow_duplicate_pax_records: bool,
     allow_global_pax_member_metadata: bool,
+    allow_hardlink_linkdata: bool,
 }
 
 /// Controls which vendor-namespaced pax records may be ignored during decoding.
@@ -136,6 +138,7 @@ impl Default for PaxDecodePolicy {
             vendor_extension_policy: PaxVendorExtensionPolicy::default(),
             allow_duplicate_pax_records: false,
             allow_global_pax_member_metadata: false,
+            allow_hardlink_linkdata: false,
         }
     }
 }
@@ -355,6 +358,18 @@ impl PaxDecodePolicy {
     /// as it is extremely differential-prone.
     pub fn allow_global_pax_member_metadata(mut self, allow: bool) -> Self {
         self.allow_global_pax_member_metadata = allow;
+        self
+    }
+
+    /// Allows pax hard links to carry file data, as written by `pax -o linkdata`.
+    ///
+    /// This is **disabled by default** because readers disagree on whether the
+    /// block after a hard link contains file data or the next member header.
+    /// When enabled, the effective pax size determines the payload length.
+    /// If [hard-link extraction](crate::extract::LinkPolicy::allow_hard_links)
+    /// is also enabled, a nonempty payload replaces the target file's contents.
+    pub fn allow_hardlink_linkdata(mut self, allow: bool) -> Self {
+        self.allow_hardlink_linkdata = allow;
         self
     }
 

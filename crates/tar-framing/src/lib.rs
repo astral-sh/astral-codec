@@ -38,6 +38,11 @@
 //!   as a filesystem allocation hint rather than a physical size, but real-world parsers vary
 //!   widely in how they handle it (some ignore it, others skip over that number of bytes, etc.).
 //!
+//! - By default, tar-framing rejects hard links (typeflag `'1'`) with a nonzero size in
+//!   their ustar header or effective pax `size` record. Readers disagree on whether the
+//!   block after such a link contains payload bytes or the next member header. To read
+//!   archives written with `pax -o linkdata`, enable [`StreamPolicy::allow_pax_hardlink_linkdata`].
+//!
 //! - tar-framing does not change a member type because of a path suffix. For example, it preserves
 //!   a trailing slash in an effective member path. Before ustar, tar used a trailing slash to
 //!   identify a directory. pax does not require an implementation to use this behavior. Therefore,

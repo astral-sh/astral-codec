@@ -205,7 +205,7 @@ impl HeaderFrame {
                 PaxValue::Deleted => Err(FrameError::deleted_pax_metadata(position, "size")),
             },
         )?;
-        validate_pax_member_size(position, kind, declared_size, effective_size)?;
+        validate_pax_member_size(position, kind, declared_size, effective_size, policy)?;
 
         Ok(Self {
             position,
@@ -435,6 +435,7 @@ enum MemberChunkState {
 pub struct StreamPolicy {
     max_pax_extension_size: u64,
     max_global_pax_extensions_size: u64,
+    allow_pax_hardlink_linkdata: bool,
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
     max_gnu_extension_size: u64,
@@ -445,6 +446,7 @@ impl Default for StreamPolicy {
         Self {
             max_pax_extension_size: DEFAULT_MAX_PAX_EXTENSION_SIZE,
             max_global_pax_extensions_size: DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
+            allow_pax_hardlink_linkdata: false,
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
@@ -475,6 +477,14 @@ impl StreamPolicy {
     /// [`u64::MAX`] removes this limit. The limit for each extension still applies.
     pub fn max_global_pax_extensions_size(mut self, max_global_pax_extensions_size: u64) -> Self {
         self.max_global_pax_extensions_size = max_global_pax_extensions_size;
+        self
+    }
+
+    /// Allows pax hard links to carry a payload of their effective size.
+    ///
+    /// By default, both the ustar header size and the effective pax size must be zero.
+    pub fn allow_pax_hardlink_linkdata(mut self, allow: bool) -> Self {
+        self.allow_pax_hardlink_linkdata = allow;
         self
     }
 
@@ -1400,14 +1410,13 @@ fn validate_pax_member_size(
     kind: UstarKind,
     declared_size: u64,
     effective_size: u64,
+    policy: &StreamPolicy,
 ) -> Result<(), FrameError> {
     match kind {
-        // PAX permits a nonzero physical hardlink size and allows pax `size`
-        // records to override it, so the effective size controls framing.
-        // This is a broadening of what ustar allows; ustar requires
-        // hardlink members to have `size=0`.
-        UstarKind::Regular | UstarKind::HardLink | UstarKind::Contiguous => Ok(()),
-        UstarKind::SymbolicLink
+        UstarKind::Regular | UstarKind::Contiguous => Ok(()),
+        UstarKind::HardLink if policy.allow_pax_hardlink_linkdata => Ok(()),
+        UstarKind::HardLink
+        | UstarKind::SymbolicLink
         | UstarKind::CharacterDevice
         | UstarKind::BlockDevice
         | UstarKind::Directory
@@ -2040,31 +2049,6 @@ mod tests {
     }
 
     #[test]
-    fn frames_pax_hard_link_bodies_from_header_or_size_override() {
-        for (case, declared_size, override_size, header_index, data_index) in [
-            ("physical size", 3, None, 0, 1),
-            ("pax size", 0, Some("3"), 2, 3),
-            ("pax size overrides physical size", 1, Some("3"), 2, 3),
-        ] {
-            let mut bytes = Vec::new();
-            if let Some(override_size) = override_size {
-                append_pax(&mut bytes, b'x', &record("size", override_size));
-            }
-            append_block(&mut bytes, &header(b'1', declared_size));
-            append_payload(&mut bytes, b"abc");
-            append_terminator(&mut bytes);
-
-            let frames = collect(bytes, BLOCK_SIZE);
-            let header = header_frame(&frames, header_index);
-            assert_eq!(header.format, ArchiveFormat::Pax, "{case}");
-            assert_eq!(header.kind, UstarKind::HardLink, "{case}");
-            assert_eq!(header.declared_size, declared_size, "{case}");
-            assert_eq!(header.effective_size, 3, "{case}");
-            assert_eq!(data_frame(&frames, data_index).len, 3, "{case}");
-        }
-    }
-
-    #[test]
     fn zero_data_block_is_not_a_terminator() {
         let mut bytes = Vec::new();
         append_block(&mut bytes, &header(b'0', BLOCK_SIZE as u64));
@@ -2161,8 +2145,8 @@ mod tests {
     #[test]
     fn rejects_nonzero_physical_sizes_for_payload_free_members() {
         for (format, block, kind) in [
-            (ArchiveFormat::Pax, header(b'2', 1), UstarKind::SymbolicLink),
             (ArchiveFormat::Gnu, gnu_header(b'1', 1), UstarKind::HardLink),
+            (ArchiveFormat::Pax, header(b'2', 1), UstarKind::SymbolicLink),
             (
                 ArchiveFormat::Gnu,
                 gnu_header(b'2', 1),
@@ -2193,17 +2177,18 @@ mod tests {
             (ArchiveFormat::Pax, header(b'6', 1), UstarKind::Fifo),
             (ArchiveFormat::Gnu, gnu_header(b'6', 1), UstarKind::Fifo),
         ] {
-            let frames = collect(block.to_vec(), BLOCK_SIZE);
-            assert!(
-                matches!(
-                    last_error_inner(&frames),
-                    FrameErrorInner::InvalidMemberSize {
-                        kind: found,
-                        size: 1,
-                    } if *found == kind
-                ),
-                "{format:?} {kind:?}"
-            );
+            for allow_linkdata in [false, true] {
+                let stream = TarStream::new(block.as_slice()).with_policy(
+                    StreamPolicy::default().allow_pax_hardlink_linkdata(allow_linkdata),
+                );
+                assert!(
+                    matches!(
+                        last_error_inner(&ready(collect_frames(stream))),
+                        FrameErrorInner::InvalidMemberSize { kind: found, size: 1 } if *found == kind
+                    ),
+                    "{format:?} {kind:?} with allow_linkdata={allow_linkdata}"
+                );
+            }
         }
     }
 
@@ -2211,6 +2196,7 @@ mod tests {
     fn rejects_nonzero_declared_or_effective_pax_sizes_for_payload_free_members() {
         for (case, declared_size, override_size) in [("effective", 0, "1"), ("declared", 1, "0")] {
             for (typeflag, kind) in [
+                (b'1', UstarKind::HardLink),
                 (b'2', UstarKind::SymbolicLink),
                 (b'3', UstarKind::CharacterDevice),
                 (b'4', UstarKind::BlockDevice),
