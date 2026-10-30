@@ -286,8 +286,10 @@ impl<E> ExtractionRoot<E> {
         destination: &Path,
         allow_overwrites: bool,
     ) -> Result<Self, ExtractError<E>> {
-        let destination = destination.to_owned();
-        let error_path = destination.clone();
+        let error_path = destination.to_owned();
+        // Strip trailing separators and `.` so creation and symlink checks both
+        // operate on the named directory. Leave `..` for the filesystem to resolve.
+        let destination = destination.components().as_path().to_owned();
         let directory = tokio::task::spawn_blocking(move || {
             match std_fs::symlink_metadata(&destination) {
                 Ok(_) => {}
