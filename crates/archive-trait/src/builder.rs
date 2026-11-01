@@ -482,6 +482,7 @@ impl<B: ArchiveBuilder> Builder<B> {
 
 /// A failure while constructing an archive.
 #[derive(Debug, Error)]
+#[non_exhaustive]
 pub enum BuildError<E> {
     /// The archive format encoder failed.
     #[error(transparent)]
