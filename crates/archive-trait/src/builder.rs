@@ -3,7 +3,9 @@
 //! Archive formats implement [`ArchiveBuilder`] and wrap the resulting writer
 //! in a stateful [`Builder`] to use the format-neutral construction APIs.
 
+#[cfg(feature = "fs")]
 mod directory;
+#[cfg(feature = "fs")]
 mod traversal;
 
 use std::{
@@ -15,6 +17,7 @@ use std::{
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncReadExt};
 
+#[cfg(feature = "fs")]
 pub use self::traversal::TraversalError;
 use crate::{
     NameValidator,
@@ -428,8 +431,12 @@ impl<B: ArchiveBuilder> Builder<B> {
     /// Adds one directory member without reading from the filesystem.
     ///
     /// This creates only the named directory member. It does not add any child
-    /// members; use [`Self::add_directory_all`] to recursively add a filesystem
-    /// directory and its contents.
+    /// members.
+    #[cfg_attr(
+        feature = "fs",
+        doc = "Use [`Self::add_directory_all`] to recursively add a filesystem",
+        doc = "directory and its contents."
+    )]
     pub async fn add_directory<P: AsRef<Path>>(
         &mut self,
         path: P,
@@ -481,6 +488,8 @@ impl<B: ArchiveBuilder> Builder<B> {
 }
 
 /// A failure while constructing an archive.
+///
+/// This enum is non-exhaustive because the `fs` feature adds variants.
 #[derive(Debug, Error)]
 #[non_exhaustive]
 pub enum BuildError<E> {
@@ -488,6 +497,7 @@ pub enum BuildError<E> {
     #[error(transparent)]
     Encoder(E),
     /// Traversing a recursive source failed.
+    #[cfg(feature = "fs")]
     #[error(transparent)]
     Traversal(#[from] TraversalError),
     /// A requested archive path cannot be represented by the UTF-8 builder.
@@ -534,6 +544,7 @@ pub enum BuildError<E> {
         source: io::Error,
     },
     /// A blocking filesystem operation failed to complete.
+    #[cfg(feature = "fs")]
     #[error("failed to complete blocking archive filesystem operation: {0}")]
     BlockingTask(#[from] tokio::task::JoinError),
     /// The builder cannot continue because a prior failure may have written bytes.
@@ -669,8 +680,10 @@ fn path_collision<E>(path: &str) -> BuildError<E> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "fs")]
     use std::fs;
 
+    #[cfg(feature = "fs")]
     use tempfile::tempdir;
 
     use super::*;
@@ -812,6 +825,7 @@ mod tests {
         assert_eq!(builder.state.entries.node_count(), 2);
     }
 
+    #[cfg(feature = "fs")]
     #[tokio::test]
     async fn repeated_directory_additions_use_linear_component_storage() {
         const DIRECTORIES: usize = 256;
