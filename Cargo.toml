@@ -47,3 +47,12 @@ zip = { version = "9.0.4", default-features = false, features = ["deflate-flate2
 [workspace.lints.rust]
 unsafe_code = "warn"
 unreachable_pub = "warn"
+
+[workspace.lints.rustdoc]
+bare_urls = "deny"
+broken_intra_doc_links = "deny"
+invalid_codeblock_attributes = "deny"
+invalid_html_tags = "deny"
+invalid_rust_codeblocks = "deny"
+private_intra_doc_links = "deny"
+redundant_explicit_links = "deny"
