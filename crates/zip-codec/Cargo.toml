@@ -12,7 +12,7 @@ license = { workspace = true }
 bench-allocator = []
 
 [dependencies]
-archive-trait = { workspace = true }
+archive-trait = { workspace = true, features = ["fs"] }
 zip-framing = { workspace = true }
 crc32fast = { workspace = true }
 flate2 = { workspace = true }
