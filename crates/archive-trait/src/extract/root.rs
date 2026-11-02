@@ -791,7 +791,14 @@ impl<E> ExtractionRoot<E> {
                     .set_state(entry, ExtractedEntry::CreatedDirectory);
                 return Ok(());
             }
-            Err(error) => error,
+            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
+            Err(source) => {
+                return Err(ExtractError::filesystem(
+                    "create directory",
+                    path.to_path_buf(),
+                    source,
+                ));
+            }
         };
         let metadata = self.metadata(path, parent).await?;
         if metadata
@@ -1052,7 +1059,7 @@ impl<E> ExtractionRoot<E> {
         .await
     }
 
-    /// Attempts a directory creation without eagerly materializing its diagnostic path.
+    /// Returns creation errors to the caller and propagates errors opening the new directory.
     ///
     /// An `AlreadyExists` result is expected while discovering ambient parents. Keeping
     /// that error pathless avoids copying every growing prefix before it is discarded.
@@ -1061,11 +1068,15 @@ impl<E> ExtractionRoot<E> {
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<io::Result<Dir>, ExtractError<E>> {
-        let (directory, relative_path) = self.entry_capability(path, parent);
-        run_blocking_io(directory, relative_path, |directory, path| {
-            directory.create_dir(path)?;
-            directory.open_dir(path)
-        })
+        self.with_entry_parent(
+            "open directory",
+            path,
+            parent,
+            |directory, path| match directory.create_dir(path) {
+                Ok(()) => directory.open_dir(path).map(Ok),
+                Err(error) => Ok(Err(error)),
+            },
+        )
         .await
     }
 

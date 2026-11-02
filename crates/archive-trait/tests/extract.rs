@@ -249,8 +249,8 @@ async fn extraction_bounds_open_directory_handles() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn failed_file_creation_preserves_existing_file() {
-    if rerun_with_low_descriptor_limit("failed_file_creation_preserves_existing_file") {
+async fn extraction_reports_descriptor_exhaustion() {
+    if rerun_with_low_descriptor_limit("extraction_reports_descriptor_exhaustion") {
         return;
     }
     let temp = tempdir().expect("temporary directory should be created");
@@ -262,7 +262,7 @@ async fn failed_file_creation_preserves_existing_file() {
         handles.push(file);
     }
     let open_error = File::open(&path).expect_err("descriptors should be exhausted");
-    // Leave one descriptor for the extraction root and none for the new file.
+    // Leave one descriptor for the extraction root and none for its children.
     drop(handles.pop().expect("child should have opened files"));
     for allow_overwrites in [false, true] {
         let policy = ExtractPolicy::default().allow_overwrites(allow_overwrites);
@@ -283,6 +283,20 @@ async fn failed_file_creation_preserves_existing_file() {
     assert_eq!(
         std::fs::read(&path).expect("ambient file should still exist"),
         b"original"
+    );
+
+    // Replacing the file with a directory succeeds even with no descriptors left to open it.
+    let result = TestArchive::new([entry::directory("file")])
+        .extract_in(temp.path(), ExtractPolicy::default())
+        .await;
+    assert!(path.is_dir());
+    assert!(
+        matches!(
+            &result,
+            Err(ExtractError::Filesystem { operation: "open directory", source, .. })
+                if source.raw_os_error() == open_error.raw_os_error()
+        ),
+        "{result:?}"
     );
 }
 
