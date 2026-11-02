@@ -783,55 +783,39 @@ impl<E> ExtractionRoot<E> {
             }
             self.replace_leaf(path, entry, parent).await?;
         }
-        // Missing parents are common, so inspect and replace only after a collision.
-        let create_error = match self.try_create_directory(path, parent).await? {
-            Ok(directory) => {
-                self.directory_handle = Some((entry, Arc::new(directory)));
-                self.entries
-                    .set_state(entry, ExtractedEntry::CreatedDirectory);
-                return Ok(());
+        let create_error =
+            |source| ExtractError::filesystem("create directory", path.to_path_buf(), source);
+        let (directory, state) = match self.try_create_directory(path, parent).await? {
+            Ok(directory) => (directory, ExtractedEntry::CreatedDirectory),
+            Err(error)
+                if error.kind() == io::ErrorKind::AlreadyExists
+                    && let Some(metadata) = self.metadata(path, parent).await? =>
+            {
+                if metadata.is_dir() && !metadata_is_link(&metadata) {
+                    let directory = self
+                        .with_entry_parent("open directory", path, parent, |directory, path| {
+                            directory.open_dir(path)
+                        })
+                        .await?;
+                    (directory, ExtractedEntry::AmbientDirectory)
+                } else {
+                    if purpose == DirectoryPurpose::ImplicitParent {
+                        return Err(ExtractError::PathCollision {
+                            path: path.to_path_buf(),
+                        });
+                    }
+                    self.replace_leaf(path, entry, parent).await?;
+                    let directory = self
+                        .try_create_directory(path, parent)
+                        .await?
+                        .map_err(create_error)?;
+                    (directory, ExtractedEntry::CreatedDirectory)
+                }
             }
-            Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
-            Err(source) => {
-                return Err(ExtractError::filesystem(
-                    "create directory",
-                    path.to_path_buf(),
-                    source,
-                ));
-            }
+            Err(source) => return Err(create_error(source)),
         };
-        let metadata = self.metadata(path, parent).await?;
-        if metadata
-            .as_ref()
-            .is_some_and(|metadata| metadata.is_dir() && !metadata_is_link(metadata))
-        {
-            let directory = self
-                .with_entry_parent("open directory", path, parent, |directory, path| {
-                    directory.open_dir(path)
-                })
-                .await?;
-            self.directory_handle = Some((entry, Arc::new(directory)));
-            self.entries
-                .set_state(entry, ExtractedEntry::AmbientDirectory);
-            return Ok(());
-        }
-        if metadata.is_none() && self.entries.state(entry).is_none() {
-            return Err(ExtractError::filesystem(
-                "create directory",
-                path.to_path_buf(),
-                create_error,
-            ));
-        }
-        if purpose == DirectoryPurpose::ImplicitParent {
-            return Err(ExtractError::<E>::PathCollision {
-                path: path.to_path_buf(),
-            });
-        }
-        self.replace_leaf(path, entry, parent).await?;
-        let directory = self.create_directory(path, parent).await?;
         self.directory_handle = Some((entry, Arc::new(directory)));
-        self.entries
-            .set_state(entry, ExtractedEntry::CreatedDirectory);
+        self.entries.set_state(entry, state);
         Ok(())
     }
 
@@ -1032,18 +1016,6 @@ impl<E> ExtractionRoot<E> {
         Ok(file)
     }
 
-    async fn create_directory(
-        &self,
-        path: &NormalizedPath,
-        parent: EntryId,
-    ) -> Result<Dir, ExtractError<E>> {
-        self.try_create_directory(path, parent)
-            .await?
-            .map_err(|source| {
-                ExtractError::filesystem("create directory", path.to_path_buf(), source)
-            })
-    }
-
     /// Attempts symbolic-link creation without attaching a path to an expected
     /// physical-filesystem collision.
     async fn try_create_symlink(
@@ -1068,15 +1040,12 @@ impl<E> ExtractionRoot<E> {
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<io::Result<Dir>, ExtractError<E>> {
-        self.with_entry_parent(
-            "open directory",
-            path,
-            parent,
-            |directory, path| match directory.create_dir(path) {
-                Ok(()) => directory.open_dir(path).map(Ok),
-                Err(error) => Ok(Err(error)),
-            },
-        )
+        self.with_entry_parent("open directory", path, parent, |directory, path| {
+            if let Err(error) = directory.create_dir(path) {
+                return Ok(Err(error));
+            }
+            directory.open_dir(path).map(Ok)
+        })
         .await
     }
 
