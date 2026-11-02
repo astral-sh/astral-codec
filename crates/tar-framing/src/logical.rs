@@ -1411,44 +1411,32 @@ mod tests {
             .take(BLOCK_SIZE * 3 + 17)
             .collect::<Vec<_>>();
         let (bytes, next_position) = member_followed_by_empty_member(&contents);
-        // Withhold the rest of the archive until the smaller retry completes.
+        // Two blocks and part of a third are available until both smaller retries finish.
         let (prefix, suffix) = bytes.split_at(BLOCK_SIZE * 3 + 73);
-        for retry_block in [true, false] {
-            ready_ok(async {
-                let (mut writer, input) = duplex(bytes.len());
-                writer
-                    .write_all(prefix)
-                    .await
-                    .expect("write archive prefix");
-                let mut reader = TarReader::new(input);
-                let mut payload = next_member(&mut reader).await?.payload;
-                let mut cancelled_buffer = vec![b'x'; 17];
-                cancel_pending(payload.next_chunk(&mut cancelled_buffer, BLOCK_SIZE * 3));
-                assert!(cancelled_buffer.is_empty());
+        ready_ok(async {
+            let (mut writer, input) = duplex(bytes.len());
+            writer.write_all(prefix).await.expect("write prefix");
+            let mut reader = TarReader::new(input);
+            let mut payload = next_member(&mut reader).await?.payload;
+            let mut cancelled_buffer = vec![b'x'; 17];
+            cancel_pending(payload.next_chunk(&mut cancelled_buffer, BLOCK_SIZE * 3));
+            assert!(cancelled_buffer.is_empty());
+            let first = payload.next_block().await?.expect("expected a block");
+            assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
 
-                let mut chunk = Vec::new();
-                if retry_block {
-                    let first = payload.next_block().await?.expect("expected a block");
-                    chunk.extend_from_slice(&first.block[..first.len]);
-                } else {
-                    assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
-                }
-                assert!(chunk.len() >= BLOCK_SIZE);
-                let (first, rest) = contents.split_at(chunk.len());
-                assert_eq!(chunk, first);
+            let mut chunk = Vec::new();
+            cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE * 2));
+            assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
+            assert_eq!(chunk, contents[BLOCK_SIZE..BLOCK_SIZE * 2]);
 
-                writer
-                    .write_all(suffix)
-                    .await
-                    .expect("write archive suffix");
-                assert!(payload.next_chunk(&mut chunk, contents.len()).await?);
-                assert_eq!(chunk, rest);
-                assert!(!payload.next_chunk(&mut chunk, contents.len()).await?);
-                let next = next_member(&mut reader).await?;
-                assert_eq!(next.header.position, next_position);
-                Ok(())
-            });
-        }
+            writer.write_all(suffix).await.expect("write suffix");
+            assert!(payload.next_chunk(&mut chunk, contents.len()).await?);
+            assert_eq!(chunk, contents[BLOCK_SIZE * 2..]);
+            assert!(!payload.next_chunk(&mut chunk, contents.len()).await?);
+            let next = next_member(&mut reader).await?;
+            assert_eq!(next.header.position, next_position);
+            Ok(())
+        });
     }
 
     #[test]
