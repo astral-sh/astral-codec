@@ -93,8 +93,6 @@ use crate::{
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
 
-type PositionedBlock = (u64, Block);
-
 /// Represents a single non-terminator physical block in a tar stream.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum Frame {
@@ -565,14 +563,22 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
 
     /// Reads one ordinary-member payload block without constructing a [`Frame`].
     ///
-    /// Returns the block's position, lossless bytes, and meaningful length.
-    pub(crate) async fn read_member_block(&mut self) -> Result<(u64, Block, usize), FrameError> {
+    /// Returns the block's position, borrowed bytes, and meaningful length, or
+    /// `None` at the end of the member.
+    pub(crate) async fn read_member_block(
+        &mut self,
+    ) -> Result<Option<(u64, &Block, usize)>, FrameError> {
         let result = self.read_member_block_inner().await;
-        self.fail_on_error(result)
+        Ok(self
+            .fail_on_error(result)?
+            .map(|(position, len)| (position, &self.block, len)))
     }
 
-    async fn read_member_block_inner(&mut self) -> Result<(u64, Block, usize), FrameError> {
+    async fn read_member_block_inner(&mut self) -> Result<Option<(u64, usize)>, FrameError> {
         let remaining = self.member_remaining()?;
+        if remaining == 0 {
+            return Ok(None);
+        }
         let chunk = &mut self.member_chunk;
         if !chunk.unread.is_empty() {
             // A cancelled chunk read can supply part or all of this block.
@@ -585,12 +591,10 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 chunk.buffer.clear();
             }
         }
-        let (position, block) = poll_fn(|context| self.poll_read_block(context))
-            .await?
-            .ok_or_else(|| self.handle_eof())?;
+        let position = poll_fn(|context| self.poll_fill_block(context)).await?;
         let meaningful_len = remaining.min(BLOCK_SIZE as u64) as usize;
         self.state = member_payload_state(remaining - meaningful_len as u64);
-        Ok((position, block, meaningful_len))
+        Ok(Some((position, meaningful_len)))
     }
 
     /// Reads aligned ordinary-member payload blocks directly into `buffer`.
@@ -601,7 +605,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         &mut self,
         buffer: &mut Vec<u8>,
         target_len: usize,
-    ) -> Result<usize, FrameError> {
+    ) -> Result<bool, FrameError> {
         let result = self.read_member_chunk_inner(buffer, target_len).await;
         self.fail_on_error(result)
     }
@@ -610,8 +614,11 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         &mut self,
         buffer: &mut Vec<u8>,
         target_len: usize,
-    ) -> Result<usize, FrameError> {
+    ) -> Result<bool, FrameError> {
         let remaining = self.member_remaining()?;
+        if remaining == 0 {
+            return Ok(false);
+        }
         let read_len = target_len
             .max(BLOCK_SIZE)
             .min(usize::try_from(remaining).unwrap_or(usize::MAX))
@@ -671,7 +678,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         std::mem::swap(buffer, &mut chunk.buffer);
         chunk.buffer.clear();
         self.state = member_payload_state(remaining);
-        Ok(meaningful_len)
+        Ok(true)
     }
 
     fn fail_on_error<T>(&mut self, result: Result<T, FrameError>) -> Result<T, FrameError> {
@@ -684,6 +691,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
     fn member_remaining(&self) -> Result<u64, FrameError> {
         match self.state {
             State::ReadingMember { remaining } => Ok(remaining),
+            State::AwaitingHeader => Ok(0),
             _ => Err(FrameError::unexpected_order(
                 self.position,
                 "ordinary member payload",
@@ -692,10 +700,8 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         }
     }
 
-    fn poll_read_block(
-        &mut self,
-        cx: &mut Context<'_>,
-    ) -> Poll<Result<Option<PositionedBlock>, FrameError>> {
+    /// Fills `self.block` and returns its starting position.
+    fn poll_fill_block(&mut self, cx: &mut Context<'_>) -> Poll<Result<u64, FrameError>> {
         let position = self.position;
         let read = ready!(poll_read_blocks(
             cx,
@@ -705,11 +711,10 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             &mut self.block_len,
         ))?;
         if read == 0 {
-            return Poll::Ready(Ok(None));
+            return Poll::Ready(Err(self.handle_eof()));
         }
         self.block_len = 0;
-        let block = std::mem::replace(&mut self.block, [0; BLOCK_SIZE]);
-        Poll::Ready(Ok(Some((position, block))))
+        Poll::Ready(Ok(position))
     }
 
     fn handle_eof(&mut self) -> FrameError {
@@ -1104,14 +1109,9 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 return Poll::Ready(Ok(None));
             }
 
-            let (position, block) = match self.poll_read_block(context) {
-                Poll::Pending => return Poll::Pending,
-                Poll::Ready(Ok(Some(block))) => block,
-                Poll::Ready(Ok(None)) => return Poll::Ready(Err(self.handle_eof())),
-                Poll::Ready(Err(error)) => return Poll::Ready(Err(error)),
-            };
+            let position = ready!(self.poll_fill_block(context))?;
 
-            match self.process_block(position, block) {
+            match self.process_block(position, self.block) {
                 Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
                 Ok(None) => continue,
                 Err(error) => return Poll::Ready(Err(error)),
