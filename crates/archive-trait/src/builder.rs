@@ -232,12 +232,7 @@ impl FilePayload<'static> {
     }
 
     /// Creates a payload from a [`tokio::fs::File`], starting at the position
-    /// reported by [`AsyncSeekExt::stream_position`] and ending at EOF.
-    ///
-    /// Tokio seeks to query the position. If a clone moved the shared cursor
-    /// while `file` had unread bytes buffered, this seek can change which bytes
-    /// `file` reads next. Use [`Self::new`] with a known payload size to read
-    /// directly from `file` without seeking.
+    /// reported by the handle and ending at EOF.
     ///
     /// This constructor rejects filesystem objects that are not regular files.
     pub async fn from_file(mut file: tokio::fs::File) -> io::Result<Self> {
