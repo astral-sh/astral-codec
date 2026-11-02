@@ -768,55 +768,59 @@ impl<E> ExtractionRoot<E> {
         parent: EntryId,
         purpose: DirectoryPurpose,
     ) -> Result<(), ExtractError<E>> {
-        if self
-            .entries
-            .state(entry)
-            .is_some_and(ExtractedEntry::is_directory)
-        {
-            return Ok(());
-        }
-        if self.entries.state(entry).is_some() {
+        if let Some(state) = self.entries.state(entry) {
+            if state.is_directory() {
+                return Ok(());
+            }
             if purpose == DirectoryPurpose::ImplicitParent {
-                return Err(ExtractError::<E>::PathCollision {
+                return Err(ExtractError::PathCollision {
                     path: path.to_path_buf(),
                 });
             }
             self.replace_leaf(path, entry, parent).await?;
         }
+
         let create_error =
             |source| ExtractError::filesystem("create directory", path.to_path_buf(), source);
-        let (directory, state) = match self.try_create_directory(path, parent).await? {
-            Ok(directory) => (directory, ExtractedEntry::CreatedDirectory),
-            Err(error)
-                if error.kind() == io::ErrorKind::AlreadyExists
-                    && let Some(metadata) = self.metadata(path, parent).await? =>
-            {
-                if metadata.is_dir() && !metadata_is_link(&metadata) {
-                    let directory = self
-                        .with_entry_parent("open directory", path, parent, |directory, path| {
-                            directory.open_dir(path)
-                        })
-                        .await?;
-                    (directory, ExtractedEntry::AmbientDirectory)
-                } else {
-                    if purpose == DirectoryPurpose::ImplicitParent {
-                        return Err(ExtractError::PathCollision {
-                            path: path.to_path_buf(),
-                        });
-                    }
-                    self.replace_leaf(path, entry, parent).await?;
-                    let directory = self
-                        .try_create_directory(path, parent)
-                        .await?
-                        .map_err(create_error)?;
-                    (directory, ExtractedEntry::CreatedDirectory)
-                }
+        let collision = match self.try_create_directory(path, parent).await? {
+            Ok(directory) => {
+                self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+                return Ok(());
             }
+            Err(source) if source.kind() == io::ErrorKind::AlreadyExists => source,
             Err(source) => return Err(create_error(source)),
         };
+
+        let Some(metadata) = self.metadata(path, parent).await? else {
+            return Err(create_error(collision));
+        };
+        if metadata.is_dir() && !metadata_is_link(&metadata) {
+            let directory = self
+                .with_entry_parent("open directory", path, parent, |directory, path| {
+                    directory.open_dir(path)
+                })
+                .await?;
+            self.record_directory(entry, directory, ExtractedEntry::AmbientDirectory);
+            return Ok(());
+        }
+
+        if purpose == DirectoryPurpose::ImplicitParent {
+            return Err(ExtractError::PathCollision {
+                path: path.to_path_buf(),
+            });
+        }
+        self.replace_leaf(path, entry, parent).await?;
+        let directory = self
+            .try_create_directory(path, parent)
+            .await?
+            .map_err(create_error)?;
+        self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+        Ok(())
+    }
+
+    fn record_directory(&mut self, entry: EntryId, directory: Dir, state: ExtractedEntry) {
         self.directory_handle = Some((entry, Arc::new(directory)));
         self.entries.set_state(entry, state);
-        Ok(())
     }
 
     async fn replace_leaf(
@@ -1031,10 +1035,10 @@ impl<E> ExtractionRoot<E> {
         .await
     }
 
-    /// Returns creation errors to the caller and propagates errors opening the new directory.
+    /// Creates and opens a directory in one blocking task.
     ///
-    /// An `AlreadyExists` result is expected while discovering ambient parents. Keeping
-    /// that error pathless avoids copying every growing prefix before it is discarded.
+    /// The inner result carries errors from `create_dir` so callers can handle
+    /// `AlreadyExists` without allocating a diagnostic path. Open errors abort extraction.
     async fn try_create_directory(
         &self,
         path: &NormalizedPath,
