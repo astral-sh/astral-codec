@@ -278,6 +278,10 @@ pub trait Archive: Sized {
     /// Extraction is streamwise: a late error can leave a partially extracted
     /// destination. Callers requiring all-or-nothing behavior should extract
     /// into a new temporary directory and atomically rename it afterward.
+    ///
+    /// If the extraction future is dropped, filesystem operations it already
+    /// submitted may continue to modify the destination. Use a fresh destination
+    /// when retrying a cancelled extraction.
     async fn extract_in<P: AsRef<Path>>(
         self,
         destination: P,
