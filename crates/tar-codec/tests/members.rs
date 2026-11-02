@@ -1,6 +1,11 @@
 pub mod support;
 
-use std::{error::Error, io};
+use std::{
+    error::Error,
+    io,
+    pin::pin,
+    task::{Context, Waker},
+};
 
 use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum};
 use tar_codec::{
@@ -12,6 +17,7 @@ use tar_framing::{
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::TarReader,
 };
+use tokio::io::{AsyncWriteExt as _, duplex};
 
 type TestResult = Result<(), Box<dyn Error>>;
 
@@ -468,6 +474,23 @@ async fn rejects_zero_length_gnu_extensions_at_their_header() -> TestResult {
             );
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_member_read_can_be_retried() -> TestResult {
+    let header = header(ArchiveFormat::Pax, "directory", b'5', 0, "", 0o755);
+    let (input, mut writer) = duplex(BLOCK_SIZE);
+    let mut members = TarArchive::new(input).members();
+    writer.write_all(&header[..1]).await?;
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(pin!(members.next()).poll(&mut context).is_pending());
+
+    writer.write_all(&header[1..]).await?;
+    drop(writer);
+    assert!(
+        matches!(members.next().await?, Some(Member::Directory { metadata }) if metadata.path == "directory")
+    );
     Ok(())
 }
 

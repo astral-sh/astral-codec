@@ -574,36 +574,21 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
             return Ok(None);
         }
 
-        let frame = match self.reader.next_frame().await {
-            Ok(Some(frame)) => frame,
-            Ok(None) => {
-                self.fused = true;
-                return Ok(None);
-            }
-            Err(error) => {
-                self.fused = true;
-                return Err(error.into());
-            }
+        let result = match self.reader.next_frame().await {
+            Ok(Some(frame)) => decode_member(frame, &self.policy).map(Some),
+            Ok(None) => Ok(None),
+            Err(error) => Err(error.into()),
         };
-
-        if let Err(error) = self.policy.check_member(&frame) {
-            self.fused = true;
-            return Err(error);
-        }
-
-        match project_member(frame) {
-            Ok(member) => Ok(Some(member)),
-            Err(error) => {
-                self.fused = true;
-                Err(error)
-            }
-        }
+        self.fused = !matches!(result, Ok(Some(_)));
+        result
     }
 }
 
-fn project_member<'a, R>(
+fn decode_member<'a, R>(
     frame: MemberFrame<'a, R>,
+    policy: &DecodePolicy,
 ) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
+    policy.check_member(&frame)?;
     let position = frame.header.position;
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
