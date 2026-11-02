@@ -175,18 +175,23 @@ async fn extracts_through_deep_ambient_and_created_path() {
         .expect("deep file should be read");
     assert_eq!(contents, b"contents");
 
-    // Walk back up so cleanup doesn't hold a descriptor for every ancestor.
-    directory
-        .remove_file("file")
-        .expect("extracted file should be removed");
-    for _ in 0..DIRECTORY_COMPONENTS {
-        directory = directory
-            .open_parent_dir(ambient_authority())
-            .expect("parent directory should be opened");
+    // On Unix, recursive removal holds a descriptor for every ancestor.
+    #[cfg(unix)]
+    {
         directory
-            .remove_dir(COMPONENT)
-            .expect("empty child directory should be removed");
+            .remove_file("file")
+            .expect("extracted file should be removed");
+        for _ in 0..DIRECTORY_COMPONENTS {
+            directory = directory
+                .open_parent_dir(ambient_authority())
+                .expect("parent directory should be opened");
+            directory
+                .remove_dir(COMPONENT)
+                .expect("empty child directory should be removed");
+        }
     }
+    drop(directory);
+    temp.close().expect("temporary directory should be removed");
 }
 
 fn patterned_payload(size: usize) -> Vec<u8> {
