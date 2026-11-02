@@ -231,9 +231,9 @@ impl FilePayload<'static> {
         Self::from_file(file).await
     }
 
-    /// Creates a payload from the unread contents of a [`tokio::fs::File`].
+    /// Creates a payload from a [`tokio::fs::File`], starting at the position
+    /// reported by the handle and ending at EOF.
     ///
-    /// The declared size is the file length minus its current stream position.
     /// This constructor rejects filesystem objects that are not regular files.
     pub async fn from_file(mut file: tokio::fs::File) -> io::Result<Self> {
         let metadata = file.metadata().await?;
