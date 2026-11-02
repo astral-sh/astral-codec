@@ -1405,29 +1405,63 @@ mod tests {
     }
 
     #[test]
+    fn smaller_payload_retry_returns_a_buffered_block_before_truncation() {
+        for retry_block in [true, false] {
+            let mut bytes = header(b'0', (BLOCK_SIZE * 2) as u64).to_vec();
+            bytes.extend_from_slice(&[b'a'; BLOCK_SIZE]);
+            bytes.push(b'b');
+            let end = bytes.len();
+            ready_ok(async {
+                let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, end));
+                let mut payload = next_member(&mut reader).await?.payload;
+                let mut chunk = Vec::new();
+                cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE * 2));
+
+                if retry_block {
+                    let block = payload.next_block().await?.expect("expected a block");
+                    assert_eq!(block.block, [b'a'; BLOCK_SIZE]);
+                } else {
+                    assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
+                    assert_eq!(chunk, [b'a'; BLOCK_SIZE]);
+                }
+                let error = payload
+                    .next_block()
+                    .await
+                    .expect_err("expected a partial block");
+                assert_eq!(error.position, (BLOCK_SIZE * 2) as u64);
+                assert!(matches!(
+                    error.inner,
+                    FrameErrorInner::IncompleteBlock { read: 1 }
+                ));
+                Ok(())
+            });
+        }
+    }
+
+    #[test]
     fn resumes_cancelled_member_payload_chunk_with_either_read_api() {
         let contents = (0..251_u8)
             .cycle()
-            .take(BLOCK_SIZE * 2 + 17)
+            .take(BLOCK_SIZE * 3 + 17)
             .collect::<Vec<_>>();
-        // After one block, the retry can use the buffered suffix or need more input.
-        for (cancelled_target, retry_target) in
-            [(contents.len(), 1), (BLOCK_SIZE * 2, contents.len())]
-        {
+        // Two complete blocks and part of a third are buffered at cancellation.
+        for retry_target in [BLOCK_SIZE, contents.len()] {
             let (bytes, next_position) = member_followed_by_empty_member(&contents);
             ready_ok(async {
                 let mut reader =
-                    TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
+                    TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE * 3 + 73));
                 let mut payload = next_member(&mut reader).await?.payload;
                 let mut cancelled_buffer = vec![b'x'; 17];
-                cancel_pending(payload.next_chunk(&mut cancelled_buffer, cancelled_target));
+                cancel_pending(payload.next_chunk(&mut cancelled_buffer, BLOCK_SIZE * 3));
                 assert!(cancelled_buffer.is_empty());
 
                 let first = payload.next_block().await?.expect("expected a block");
                 assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
                 let mut chunk = vec![b'y'; 23];
-                assert!(payload.next_chunk(&mut chunk, retry_target).await?);
-                assert_eq!(chunk, contents[BLOCK_SIZE..]);
+                for expected in contents[BLOCK_SIZE..].chunks(retry_target) {
+                    assert!(payload.next_chunk(&mut chunk, retry_target).await?);
+                    assert_eq!(chunk, expected);
+                }
                 assert!(!payload.next_chunk(&mut chunk, retry_target).await?);
                 let next = next_member(&mut reader).await?;
                 assert_eq!(next.header.position, next_position);

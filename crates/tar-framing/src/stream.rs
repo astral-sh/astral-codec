@@ -586,6 +586,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
 
     async fn read_member_block_inner(&mut self) -> Result<(u64, Block, usize), FrameError> {
         if self.member_chunk.state.is_some() {
+            self.limit_pending_member_chunk(BLOCK_SIZE);
             self.complete_member_chunk().await?;
             return self.take_member_block_from_chunk();
         }
@@ -623,6 +624,8 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             if self.member_chunk.state.is_none() {
                 let result = self.start_member_chunk(buffer, target_len, prefix_len);
                 self.fail_on_error(result)?;
+            } else {
+                self.limit_pending_member_chunk(target_len);
             }
             let result = self.complete_member_chunk().await;
             self.fail_on_error(result)?;
@@ -706,6 +709,27 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             filled,
         });
         Ok(())
+    }
+
+    /// Lets a smaller retry finish without reading the rest of the cancelled chunk.
+    fn limit_pending_member_chunk(&mut self, target_len: usize) {
+        let chunk = &mut self.member_chunk;
+        if let Some(MemberChunkState::Reading { filled, .. }) = &mut chunk.state
+            && target_len < chunk.meaningful_len
+        {
+            // Keep every complete block already read. The next read resumes any
+            // trailing partial block through the usual block buffer.
+            let requested_blocks = target_len.div_ceil(BLOCK_SIZE).max(1);
+            let buffered_blocks = *filled / BLOCK_SIZE;
+            let physical_len = requested_blocks.max(buffered_blocks) * BLOCK_SIZE;
+            if *filled > physical_len {
+                self.block_len = *filled - physical_len;
+                self.block[..self.block_len].copy_from_slice(&chunk.buffer[physical_len..*filled]);
+                *filled = physical_len;
+            }
+            chunk.physical_len = physical_len;
+            chunk.meaningful_len = chunk.meaningful_len.min(physical_len);
+        }
     }
 
     async fn complete_member_chunk(&mut self) -> Result<(), FrameError> {
