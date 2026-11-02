@@ -2151,70 +2151,60 @@ mod tests {
         }
     }
 
+    #[track_caller]
+    fn assert_rejects_link_target(mut bytes: Vec<u8>, block: Block, kind: UstarKind) {
+        let position = bytes.len() as u64;
+        append_block(&mut bytes, &block);
+        let frames = collect(bytes, BLOCK_SIZE);
+        let error = last_error(&frames);
+        assert_eq!(error.position, position);
+        assert!(
+            matches!(error.inner, FrameErrorInner::UnexpectedLinkTarget { kind: found } if found == kind),
+            "{error}"
+        );
+    }
+
     #[test]
     fn rejects_header_linknames_on_non_link_members() {
-        for mut block in [header(b'0', 0), gnu_header(b'5', 0)] {
+        for (mut block, kind) in [
+            (header(b'0', 0), UstarKind::Regular),
+            (gnu_header(b'5', 0), UstarKind::Directory),
+        ] {
             block[LINK_NAME_RANGE.start] = b't';
             set_checksum(&mut block);
-            assert!(matches!(
-                last_error(&collect(block.to_vec(), BLOCK_SIZE)),
-                FrameError {
-                    position: 0,
-                    inner: FrameErrorInner::UnexpectedLinkTarget { .. }
-                }
-            ));
+            assert_rejects_link_target(Vec::new(), block, kind);
         }
     }
 
     #[test]
     fn rejects_extended_link_targets_on_non_link_members() {
-        let target = record("linkpath", "target");
-        let mut local = Vec::new();
-        append_pax(&mut local, b'x', &target);
-        let mut global = Vec::new();
-        append_pax(&mut global, b'g', &target);
-        let mut long_link = Vec::new();
-        append_gnu(&mut long_link, b'K', b"target\0");
-
-        for (mut bytes, block) in [
-            (local, header(b'0', 0)),
-            (global, header(b'0', 0)),
-            (long_link, gnu_header(b'0', 0)),
-        ] {
-            append_block(&mut bytes, &block);
-            assert!(matches!(
-                last_error(&collect(bytes, BLOCK_SIZE)),
-                FrameError {
-                    position: 1024,
-                    inner: FrameErrorInner::UnexpectedLinkTarget {
-                        kind: UstarKind::Regular
-                    }
-                }
-            ));
+        for typeflag in *b"xg" {
+            let mut bytes = Vec::new();
+            append_pax(&mut bytes, typeflag, &record("linkpath", "target"));
+            assert_rejects_link_target(bytes, header(b'0', 0), UstarKind::Regular);
         }
+
+        let mut bytes = Vec::new();
+        append_gnu(&mut bytes, b'K', b"target\0");
+        assert_rejects_link_target(bytes, gnu_header(b'0', 0), UstarKind::Regular);
     }
 
     #[test]
     fn deleted_pax_linkpath_does_not_hide_a_header_linkname() {
-        let deleted = record("linkpath", "");
         let mut bytes = Vec::new();
         append_pax(&mut bytes, b'g', &record("linkpath", "inherited"));
-        append_pax(&mut bytes, b'x', &deleted);
-        append_block(&mut bytes, &header(b'0', 0));
-        append_pax(&mut bytes, b'x', &deleted);
-        append_block(
-            &mut bytes,
-            &checksummed_header(|block| block[LINK_NAME_RANGE.start] = b't'),
-        );
+        append_pax(&mut bytes, b'x', &record("linkpath", ""));
 
-        let frames = collect(bytes, BLOCK_SIZE);
-        assert_eq!(header_frame(&frames, 4).kind, UstarKind::Regular);
+        assert_rejects_link_target(
+            bytes.clone(),
+            checksummed_header(|block| block[LINK_NAME_RANGE.start] = b't'),
+            UstarKind::Regular,
+        );
+        append_block(&mut bytes, &header(b'0', 0));
+        append_terminator(&mut bytes);
         assert!(matches!(
-            last_error(&frames),
-            FrameError {
-                position: 3584,
-                inner: FrameErrorInner::UnexpectedLinkTarget { .. }
-            }
+            collect(bytes, BLOCK_SIZE).last(),
+            Some(Ok(Frame::Header(header))) if header.kind == UstarKind::Regular
         ));
     }
 
