@@ -16,6 +16,8 @@ General properties:
 - By default, an attacker should never be able to extract files or other stream contents
   outside of the extraction root. A user must explicitly opt into a non-default extraction
   policy to allow this.
+- When extraction succeeds with the default policy, resolving the target of any extracted
+  symbolic link must stay within the extraction root. The target may be missing.
 - By default, an attacker should never be able to cause a hang during decoding, such as
   via symlink loops. A user must explicitly opt into a non-default extraction policy
   to allow this.
@@ -51,9 +53,9 @@ within tar-codec:
   _if_ that interpretation is substantiated by the pax or GNU specification. If the
   other implementation fails to follow the relevant specification, the
   security-relevant differential is there instead.
-- Differentials that are caused purely by OS- or filesystem-specific behaviors.
-  For example, a filesystem that performs unicode path normalization
-  may coalesce multiple members into a single path on disk, but this is not a
-  concern within tar-codec itself.
+- Differentials caused purely by OS- or filesystem-specific behaviors, provided
+  extraction and symbolic-link resolution stay within the extraction root.
+  For example, case folding or Unicode normalization may cause two member names
+  to refer to the same file.
 - Panics that are caused by platform limitations, e.g. Rust's allocator choosing to
   panic when failing to reserve adequate capacity on smaller address spaces.

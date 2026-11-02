@@ -563,7 +563,7 @@ impl<E> ExtractionRoot<E> {
             links.push(index);
         }
 
-        for index in links {
+        for &index in &links {
             let (entry, parent, path, contents) = {
                 let link = &self.symlinks[index];
                 (
@@ -573,6 +573,23 @@ impl<E> ExtractionRoot<E> {
                     link.target.clone(),
                 )
             };
+            // The link target was validated at this depth. A filesystem alias
+            // must not redirect its parent to a previously published link.
+            if parent != ROOT_ENTRY {
+                let directory = self
+                    .with_root("open symbolic-link parent", &path.parent(), |root, path| {
+                        let mut directory = root.try_clone()?;
+                        for component in path {
+                            if metadata_is_link(&directory.symlink_metadata(component)?) {
+                                return Err(io::Error::other("symbolic link in parent path"));
+                            }
+                            directory = directory.open_dir(component)?;
+                        }
+                        Ok(directory)
+                    })
+                    .await?;
+                self.directory_handle = Some((parent, Arc::new(directory)));
+            }
             match self
                 .try_create_symlink(&path, parent, contents.clone())
                 .await?
@@ -606,6 +623,24 @@ impl<E> ExtractionRoot<E> {
                 .map_err(|source| {
                     ExtractError::filesystem("create symbolic link", path.to_path_buf(), source)
                 })?;
+        }
+
+        // A later link can make a missing target reachable through a filesystem alias.
+        for index in links {
+            let link = &self.symlinks[index];
+            let exists = self
+                .with_root(
+                    "resolve extracted symbolic link",
+                    &link.path,
+                    |root, path| match root.try_exists(path) {
+                        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+                        result => result,
+                    },
+                )
+                .await?;
+            if !exists && !policy.allow_missing_targets {
+                return Err(link.error("target does not exist"));
+            }
         }
         Ok(())
     }
