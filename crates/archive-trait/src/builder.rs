@@ -114,18 +114,21 @@ impl BuilderState {
         Ok(())
     }
 
-    // A backend write is provisionally poisoning. Completion clears this flag
-    // before the returned failure is classified; cancellation leaves it set.
+    // Cancellation can leave partial output. Keep the builder poisoned until
+    // the write returns and we know whether it is safe to continue.
     fn begin_write(&mut self) {
         self.poisoned = true;
     }
 
-    fn complete_write(&mut self) {
-        self.poisoned = false;
-    }
-
-    fn poison(&mut self) {
-        self.poisoned = true;
+    fn complete_write<E>(
+        &mut self,
+        result: Result<(), BuildFailure<E>>,
+        emitted_entries: bool,
+    ) -> Result<(), BuildError<E>> {
+        self.poisoned = result
+            .as_ref()
+            .is_err_and(|failure| emitted_entries || failure.poisons_builder);
+        result.map_err(|failure| failure.error)
     }
 }
 
@@ -327,10 +330,6 @@ impl<E> BuildFailure<E> {
             poisons_builder: true,
         }
     }
-
-    fn into_parts(self) -> (BuildError<E>, bool) {
-        (self.error, self.poisons_builder)
-    }
 }
 
 /// A format-specific archive writer that can create a stateful [`Builder`].
@@ -450,9 +449,8 @@ impl<B: ArchiveBuilder> Builder<B> {
             .backend
             .write_file_member(&path, &mut payload, metadata)
             .await;
-        self.state.complete_write();
         payload.swap_buffer(&mut self.state.source_buffer);
-        self.resolve_hook(result)?;
+        self.state.complete_write(result, false)?;
         self.state.entries.commit_entry(&path, reservation);
         Ok(())
     }
@@ -487,8 +485,7 @@ impl<B: ArchiveBuilder> Builder<B> {
             .preflight_entry(&path, ArchivedEntry::Directory { explicit: true })?;
         self.state.begin_write();
         let result = self.backend.write_directory_member(&path).await;
-        self.state.complete_write();
-        self.resolve_hook(result)?;
+        self.state.complete_write(result, false)?;
         self.state.entries.commit_entry(&path, reservation);
         Ok(())
     }
@@ -525,24 +522,10 @@ impl<B: ArchiveBuilder> Builder<B> {
             .await
             .map_err(BuildError::Traversal)
             .map_err(BuildFailure::recoverable);
-        let result = write_result.and(traversal_result);
-        let DirectoryBuild {
-            entries: _,
-            source_buffer,
-            emitted,
-        } = traversal;
-        self.state.complete_write();
-        self.state.source_buffer = source_buffer;
-        match result {
-            Ok(()) => Ok(()),
-            Err(error) => {
-                let (error, hook_poisoned) = error.into_parts();
-                if emitted || hook_poisoned {
-                    self.state.poison();
-                }
-                Err(error)
-            }
-        }
+        let emitted = traversal.emitted;
+        self.state.source_buffer = traversal.source_buffer;
+        self.state
+            .complete_write(write_result.and(traversal_result), emitted)
     }
 
     /// Finalizes and consumes this archive builder.
@@ -557,25 +540,11 @@ impl<B: ArchiveBuilder> Builder<B> {
     /// the archive terminator has been written.
     pub async fn finish_into_inner(mut self) -> Result<B, BuildError<B::Error>> {
         self.state.ensure_active()?;
-        let result = self.backend.finish_archive().await;
-        self.resolve_hook(result)?;
+        self.backend
+            .finish_archive()
+            .await
+            .map_err(|failure| failure.error)?;
         Ok(self.backend)
-    }
-
-    fn resolve_hook<T>(
-        &mut self,
-        result: Result<T, BuildFailure<B::Error>>,
-    ) -> Result<T, BuildError<B::Error>> {
-        match result {
-            Ok(value) => Ok(value),
-            Err(error) => {
-                let (error, poisons_builder) = error.into_parts();
-                if poisons_builder {
-                    self.state.poison();
-                }
-                Err(error)
-            }
-        }
     }
 }
 
