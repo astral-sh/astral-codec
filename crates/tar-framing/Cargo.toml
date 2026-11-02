@@ -16,7 +16,7 @@ tokio = { workspace = true }
 
 [dev-dependencies]
 divan = { workspace = true }
-tokio = { workspace = true, features = ["rt"] }
+tokio = { workspace = true, features = ["io-util", "rt"] }
 
 [[bench]]
 name = "framing"

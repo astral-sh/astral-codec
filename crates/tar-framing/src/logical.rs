@@ -655,7 +655,7 @@ fn parse_gnu_metadata(metadata: &GnuMetadata, kind: GnuKind) -> Result<&[u8], Fr
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncRead;
+    use tokio::io::{AsyncRead, AsyncWriteExt as _, duplex};
 
     use super::*;
     use crate::{
@@ -1408,32 +1408,35 @@ mod tests {
     fn resumes_cancelled_member_payload_chunk_with_either_read_api() {
         let contents = (0..251_u8)
             .cycle()
-            .take(BLOCK_SIZE * 2 + 17)
+            .take(BLOCK_SIZE * 3 + 17)
             .collect::<Vec<_>>();
-        // After one block, the retry can use the buffered suffix or need more input.
-        for (cancelled_target, retry_target) in
-            [(contents.len(), 1), (BLOCK_SIZE * 2, contents.len())]
-        {
-            let (bytes, next_position) = member_followed_by_empty_member(&contents);
-            ready_ok(async {
-                let mut reader =
-                    TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
-                let mut payload = next_member(&mut reader).await?.payload;
-                let mut cancelled_buffer = vec![b'x'; 17];
-                cancel_pending(payload.next_chunk(&mut cancelled_buffer, cancelled_target));
-                assert!(cancelled_buffer.is_empty());
+        let (bytes, next_position) = member_followed_by_empty_member(&contents);
+        // Two blocks and part of a third are available until both smaller retries finish.
+        let (prefix, suffix) = bytes.split_at(BLOCK_SIZE * 3 + 73);
+        ready_ok(async {
+            let (mut writer, input) = duplex(bytes.len());
+            writer.write_all(prefix).await.expect("write prefix");
+            let mut reader = TarReader::new(input);
+            let mut payload = next_member(&mut reader).await?.payload;
+            let mut cancelled_buffer = vec![b'x'; 17];
+            cancel_pending(payload.next_chunk(&mut cancelled_buffer, BLOCK_SIZE * 3));
+            assert!(cancelled_buffer.is_empty());
+            let first = payload.next_block().await?.expect("expected a block");
+            assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
 
-                let first = payload.next_block().await?.expect("expected a block");
-                assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
-                let mut chunk = vec![b'y'; 23];
-                assert!(payload.next_chunk(&mut chunk, retry_target).await?);
-                assert_eq!(chunk, contents[BLOCK_SIZE..]);
-                assert!(!payload.next_chunk(&mut chunk, retry_target).await?);
-                let next = next_member(&mut reader).await?;
-                assert_eq!(next.header.position, next_position);
-                Ok(())
-            });
-        }
+            let mut chunk = Vec::new();
+            cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE * 2));
+            assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
+            assert_eq!(chunk, contents[BLOCK_SIZE..BLOCK_SIZE * 2]);
+
+            writer.write_all(suffix).await.expect("write suffix");
+            assert!(payload.next_chunk(&mut chunk, contents.len()).await?);
+            assert_eq!(chunk, contents[BLOCK_SIZE * 2..]);
+            assert!(!payload.next_chunk(&mut chunk, contents.len()).await?);
+            let next = next_member(&mut reader).await?;
+            assert_eq!(next.header.position, next_position);
+            Ok(())
+        });
     }
 
     #[test]
