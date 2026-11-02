@@ -1,6 +1,6 @@
 pub mod support;
 
-use std::{collections::VecDeque, io::Read as _, path::Path, sync::mpsc, thread};
+use std::{collections::VecDeque, io::Read as _, path::Path, sync::mpsc};
 #[cfg(unix)]
 use std::{env, fs::File, os::unix::fs::PermissionsExt as _, process::Command};
 
@@ -132,7 +132,6 @@ async fn extracts_through_deep_ambient_and_created_path() {
     const COMPONENT: &str = "segment";
     const AMBIENT_DIRECTORY_COMPONENTS: usize = 320;
     const DIRECTORY_COMPONENTS: usize = 640;
-    const CLEANUP_STACK_BYTES: usize = 16 * 1024 * 1024;
 
     let mut path = format!("{COMPONENT}/").repeat(DIRECTORY_COMPONENTS);
     path.push_str("file");
@@ -176,17 +175,23 @@ async fn extracts_through_deep_ambient_and_created_path() {
         .expect("deep file should be read");
     assert_eq!(contents, b"contents");
 
-    // Recursive removal at this depth needs more than the test thread's stack.
+    // On Unix, recursive removal holds a descriptor for every ancestor.
+    #[cfg(unix)]
+    {
+        directory
+            .remove_file("file")
+            .expect("extracted file should be removed");
+        for _ in 0..DIRECTORY_COMPONENTS {
+            directory = directory
+                .open_parent_dir(ambient_authority())
+                .expect("parent directory should be opened");
+            directory
+                .remove_dir(COMPONENT)
+                .expect("empty child directory should be removed");
+        }
+    }
     drop(directory);
-    let cleanup_root = Dir::open_ambient_dir(temp.path(), ambient_authority())
-        .expect("temporary directory capability should be opened");
-    thread::Builder::new()
-        .stack_size(CLEANUP_STACK_BYTES)
-        .spawn(move || cleanup_root.remove_dir_all("out"))
-        .expect("deep cleanup thread should start")
-        .join()
-        .expect("deep cleanup thread should not panic")
-        .expect("deep destination should be removed");
+    temp.close().expect("temporary directory should be removed");
 }
 
 fn patterned_payload(size: usize) -> Vec<u8> {
