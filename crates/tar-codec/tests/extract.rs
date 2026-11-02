@@ -15,6 +15,56 @@ use tar_codec::{
 };
 use tar_framing::{FrameError, FrameErrorInner, PaxKeyword, UstarKind};
 use tempfile::tempdir;
+use tokio::{
+    io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
+    runtime::Builder,
+    sync::oneshot,
+};
+
+#[test]
+fn truncated_payload_flushes_its_last_write_before_returning() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let payload = vec![b'x'; 2 * 1024 * 1024];
+    let size = payload.len() as u64;
+    let header = header(ArchiveFormat::Pax, "file", b'0', size + 1, "", 0o644);
+    let (reader, mut writer) = duplex(payload.len() / 2);
+
+    let extract = async {
+        let result = TarArchive::new(header.as_slice().chain(reader))
+            .extract_in(temp.path(), ExtractPolicy::default())
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExtractError::Archive(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::TruncatedPayload { remaining: 1, .. },
+                ..
+            })))
+        ));
+        assert_eq!(
+            std::fs::metadata(temp.path().join("file"))
+                .expect("file should exist")
+                .len(),
+            size
+        );
+    };
+    let feed = async {
+        // The pipe cannot hold the full payload until extraction starts reading it.
+        writer.write_all(&payload).await.expect("write payload");
+        // Occupy the only blocking worker so the file write has to wait.
+        let (release, wait) = oneshot::channel::<()>();
+        tokio::task::spawn_blocking(move || wait.blocking_recv());
+        drop(writer);
+        // The biased join polls extraction at EOF before we release the worker.
+        tokio::task::yield_now().await;
+        drop(release);
+    };
+
+    Builder::new_current_thread()
+        .max_blocking_threads(1)
+        .build()
+        .expect("test runtime should be created")
+        .block_on(async { tokio::join!(biased; extract, feed) });
+}
 
 #[tokio::test]
 async fn extracts_files_directories_large_payloads_and_archive_path_syntax() {
