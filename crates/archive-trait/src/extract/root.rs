@@ -49,6 +49,7 @@ use crate::{
 #[derive(Debug)]
 struct PendingSymlink {
     entry: EntryId,
+    parent: EntryId,
     path: NormalizedPath,
     position: u64,
     target: String,
@@ -214,32 +215,6 @@ impl FileOpenMode {
     }
 }
 
-/// A failure while creating or replacing a filesystem leaf.
-enum LeafError {
-    Collision,
-    RemoveDirectory(io::Error),
-    Filesystem {
-        operation: &'static str,
-        source: io::Error,
-    },
-}
-
-impl LeafError {
-    fn filesystem(operation: &'static str, source: io::Error) -> Self {
-        Self::Filesystem { operation, source }
-    }
-
-    fn into_extract<E>(self, path: PathBuf) -> ExtractError<E> {
-        match self {
-            Self::Collision => ExtractError::PathCollision { path },
-            Self::RemoveDirectory(source) => remove_directory_error(path, source),
-            Self::Filesystem { operation, source } => {
-                ExtractError::filesystem(operation, path, source)
-            }
-        }
-    }
-}
-
 /// Tracks destination capabilities and archive-owned state for one extraction.
 pub(super) struct ExtractionRoot<E> {
     /// The capability anchoring all extraction filesystem operations.
@@ -282,19 +257,6 @@ enum TerminalKind {
     NonDirectory,
     /// The target does not yet exist.
     Dangling,
-}
-
-impl TerminalKind {
-    fn inspect(root: &Dir, path: &Path) -> io::Result<Self> {
-        match root.metadata(path) {
-            Ok(metadata) if metadata.is_dir() => Ok(Self::Directory),
-            Ok(_) => Ok(Self::NonDirectory),
-            Err(error) => match error.kind() {
-                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Ok(Self::Dangling),
-                _ => Err(error),
-            },
-        }
-    }
 }
 
 /// The result of resolving a target through the archive's symbolic-link graph.
@@ -479,6 +441,7 @@ impl<E> ExtractionRoot<E> {
             .set_state(entry, ExtractedEntry::Symlink { index });
         self.symlinks.push(PendingSymlink {
             entry,
+            parent,
             path,
             position: member.position,
             target: member.link_target.clone(),
@@ -554,36 +517,11 @@ impl<E> ExtractionRoot<E> {
         }
     }
 
-    /// Checks the archive graph, publishes the links, then checks their targets on disk.
+    /// Validates active symbolic links against the complete graph, then creates them.
     pub(super) async fn finalize_symlinks(
-        &self,
+        &mut self,
         policy: LinkPolicy,
     ) -> Result<(), ExtractError<E>> {
-        let links = self.validated_symlinks(policy).await?;
-        for link in &links {
-            self.publish_symlink(link).await?;
-        }
-
-        // A later link can make a previously missing target reachable through a filesystem alias.
-        for link in links {
-            let kind = self
-                .with_root(
-                    "resolve extracted symbolic link",
-                    &link.path,
-                    TerminalKind::inspect,
-                )
-                .await?;
-            if kind == TerminalKind::Dangling && !policy.allow_missing_targets {
-                return Err(link.error("target does not exist"));
-            }
-        }
-        Ok(())
-    }
-
-    async fn validated_symlinks(
-        &self,
-        policy: LinkPolicy,
-    ) -> Result<Vec<&PendingSymlink>, ExtractError<E>> {
         let mut links = Vec::with_capacity(self.symlinks.len());
         let mut resolution_work_bytes = 0;
         for (index, link) in self.symlinks.iter().enumerate() {
@@ -602,10 +540,16 @@ impl<E> ExtractionRoot<E> {
                 }
                 ResolvedTarget::Unowned(path) => {
                     let (kind, traverses_ambient_link) = self.inspect_ambient_target(&path).await?;
-                    if !policy.allow_ambient_targets
-                        && (kind != TerminalKind::Dangling || traverses_ambient_link)
-                    {
+                    if traverses_ambient_link && !policy.allow_ambient_targets {
                         return Err(link.error("ambient target is not allowed"));
+                    }
+                    match kind {
+                        TerminalKind::Directory | TerminalKind::NonDirectory
+                            if !policy.allow_ambient_targets =>
+                        {
+                            return Err(link.error("ambient target is not allowed"));
+                        }
+                        _ => {}
                     }
                     kind
                 }
@@ -616,49 +560,89 @@ impl<E> ExtractionRoot<E> {
             if kind == TerminalKind::NonDirectory && link.requires_directory {
                 return Err(link.error("target path suffix requires a directory"));
             }
-            links.push(link);
+            links.push(index);
         }
-        Ok(links)
-    }
 
-    /// Publishes a link relative to its verified parent, including any overwrite.
-    async fn publish_symlink(&self, link: &PendingSymlink) -> Result<(), ExtractError<E>> {
-        let parent_path = link.path.parent();
-        let parent = if parent_path.is_empty() {
-            Arc::clone(&self.directory)
-        } else {
-            Arc::new(
-                self.with_root(
-                    "open symbolic-link parent",
-                    &parent_path,
-                    open_real_directory,
+        for &index in &links {
+            let (entry, parent, path, contents) = {
+                let link = &self.symlinks[index];
+                (
+                    link.entry,
+                    link.parent,
+                    link.path.clone(),
+                    link.target.clone(),
                 )
-                .await?,
-            )
-        };
-        let name = PathBuf::from(leaf_name(&link.path));
-        let target = link.target.clone();
-        let can_replace = self.can_replace(link.entry);
-        tokio::task::spawn_blocking(move || {
-            // Distinct archive names can alias the same leaf. A non-link belongs to
-            // a later member and takes precedence over this deferred link.
-            if let Some(existing) = symlink_metadata(&parent, &name)
-                .map_err(|source| LeafError::filesystem("inspect", source))?
-            {
-                if !can_replace {
-                    return Err(LeafError::Collision);
-                }
-                if !metadata_is_link(&existing) {
-                    return Ok(());
-                }
-                remove_file_or_symlink(&parent, &name, true)
-                    .map_err(|source| LeafError::filesystem("remove file", source))?;
+            };
+            // The link target was validated at this depth. A filesystem alias
+            // must not redirect its parent to a previously published link.
+            if parent != ROOT_ENTRY {
+                let directory = self
+                    .with_root("open symbolic-link parent", &path.parent(), |root, path| {
+                        let mut directory = root.try_clone()?;
+                        for component in path {
+                            if metadata_is_link(&directory.symlink_metadata(component)?) {
+                                return Err(io::Error::other("symbolic link in parent path"));
+                            }
+                            directory = directory.open_dir(component)?;
+                        }
+                        Ok(directory)
+                    })
+                    .await?;
+                self.directory_handle = Some((parent, Arc::new(directory)));
             }
-            create_symlink(&parent, &target, &name)
-                .map_err(|source| LeafError::filesystem("create symbolic link", source))
-        })
-        .await?
-        .map_err(|error| error.into_extract(link.path.to_path_buf()))
+            match self
+                .try_create_symlink(&path, parent, contents.clone())
+                .await?
+            {
+                Ok(()) => continue,
+                Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
+                Err(source) => {
+                    return Err(ExtractError::filesystem(
+                        "create symbolic link",
+                        path.to_path_buf(),
+                        source,
+                    ));
+                }
+            }
+
+            // Distinct archive paths can name the same filesystem leaf through
+            // case folding or Unicode normalization. Reservation flushes files
+            // and removes existing leaves, so a non-link found here belongs to
+            // a later archive member and already has precedence. A link can be
+            // an earlier deferred link, which this member may replace according
+            // to the normal overwrite policy.
+            self.check_replacement(&path, entry)?;
+            if let Some(metadata) = self.metadata(&path, parent).await? {
+                if !metadata_is_link(&metadata) {
+                    continue;
+                }
+                self.remove_leaf(&path, entry, parent, &metadata).await?;
+            }
+            self.try_create_symlink(&path, parent, contents)
+                .await?
+                .map_err(|source| {
+                    ExtractError::filesystem("create symbolic link", path.to_path_buf(), source)
+                })?;
+        }
+
+        // A later link can make a missing target reachable through a filesystem alias.
+        for index in links {
+            let link = &self.symlinks[index];
+            let exists = self
+                .with_root(
+                    "resolve extracted symbolic link",
+                    &link.path,
+                    |root, path| match root.try_exists(path) {
+                        Err(error) if error.kind() == io::ErrorKind::NotADirectory => Ok(false),
+                        result => result,
+                    },
+                )
+                .await?;
+            if !exists && !policy.allow_missing_targets {
+                return Err(link.error("target does not exist"));
+            }
+        }
+        Ok(())
     }
 }
 
@@ -976,9 +960,13 @@ impl<E> ExtractionRoot<E> {
             if path.as_os_str().is_empty() {
                 return Ok((TerminalKind::Directory, false));
             }
-            let kind = TerminalKind::inspect(directory, path)?;
-            if kind != TerminalKind::Dangling {
-                return Ok((kind, false));
+            match directory.metadata(path) {
+                Ok(metadata) if metadata.is_dir() => return Ok((TerminalKind::Directory, false)),
+                Ok(_) => return Ok((TerminalKind::NonDirectory, false)),
+                Err(error) => match error.kind() {
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {}
+                    _ => return Err(error),
+                },
             }
 
             // A dangling target can still pass through an ambient symlink.
@@ -1008,8 +996,14 @@ impl<E> ExtractionRoot<E> {
         path: &NormalizedPath,
         parent: EntryId,
     ) -> Result<Option<Metadata>, ExtractError<E>> {
-        self.with_entry_parent("inspect", path, parent, symlink_metadata)
-            .await
+        self.with_entry_parent("inspect", path, parent, |directory, path| {
+            match directory.symlink_metadata(path) {
+                Ok(metadata) => Ok(Some(metadata)),
+                Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+                Err(error) => Err(error),
+            }
+        })
+        .await
     }
 
     async fn remove_leaf(
@@ -1059,6 +1053,21 @@ impl<E> ExtractionRoot<E> {
         // Keep each extraction chunk to one Tokio blocking write.
         file.set_max_buf_size(STREAMING_PAYLOAD_CHUNK_BYTES);
         Ok(file)
+    }
+
+    /// Attempts symbolic-link creation without attaching a path to an expected
+    /// physical-filesystem collision.
+    async fn try_create_symlink(
+        &self,
+        path: &NormalizedPath,
+        parent: EntryId,
+        contents: String,
+    ) -> Result<io::Result<()>, ExtractError<E>> {
+        let (directory, relative_path) = self.entry_capability(path, parent);
+        run_blocking_io(directory, relative_path, move |directory, path| {
+            create_symlink(directory, &contents, path)
+        })
+        .await
     }
 
     /// Creates and opens a directory in one blocking task.
@@ -1248,26 +1257,6 @@ fn metadata_is_link(metadata: &Metadata) -> bool {
 #[cfg(windows)]
 fn metadata_is_link(metadata: &Metadata) -> bool {
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
-}
-
-fn symlink_metadata(directory: &Dir, path: &Path) -> io::Result<Option<Metadata>> {
-    match directory.symlink_metadata(path) {
-        Ok(metadata) => Ok(Some(metadata)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
-    }
-}
-
-/// Opens a directory beneath the root without traversing any symbolic links.
-fn open_real_directory(root: &Dir, path: &Path) -> io::Result<Dir> {
-    let mut directory = root.try_clone()?;
-    for component in path {
-        if metadata_is_link(&directory.symlink_metadata(component)?) {
-            return Err(io::Error::other("symbolic link in parent path"));
-        }
-        directory = directory.open_dir(component)?;
-    }
-    Ok(directory)
 }
 
 #[cfg(unix)]

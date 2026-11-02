@@ -11,7 +11,8 @@ use std::{
 
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
-use super::{FileOpenMode, LeafError, metadata_is_link, remove_file_or_symlink};
+use super::{FileOpenMode, metadata_is_link, remove_directory_error, remove_file_or_symlink};
+use crate::ExtractError;
 
 /// Whether a buffered file may replace an existing destination leaf.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -22,6 +23,16 @@ pub(super) enum BufferedFileReplacement {
     Allowed,
     /// The leaf is an archive-owned file and may use the direct replacement path.
     ExpectedFile,
+}
+
+/// A failure while creating or replacing a validated buffered file.
+pub(super) enum BufferedFileError {
+    Collision,
+    RemoveDirectory(io::Error),
+    Filesystem {
+        operation: &'static str,
+        source: io::Error,
+    },
 }
 
 /// One fully validated small file prepared for ordered batch creation.
@@ -37,7 +48,23 @@ pub(super) struct BufferedFile {
 /// The reusable buffers and first error produced by an ordered file batch.
 pub(super) struct BufferedFileBatchResult {
     pub(super) buffers: Vec<Vec<u8>>,
-    pub(super) error: Option<(PathBuf, LeafError)>,
+    pub(super) error: Option<(PathBuf, BufferedFileError)>,
+}
+
+impl BufferedFileError {
+    fn filesystem(operation: &'static str, source: io::Error) -> Self {
+        Self::Filesystem { operation, source }
+    }
+
+    pub(super) fn into_extract<E>(self, path: PathBuf) -> ExtractError<E> {
+        match self {
+            Self::Collision => ExtractError::PathCollision { path },
+            Self::RemoveDirectory(source) => remove_directory_error(path, source),
+            Self::Filesystem { operation, source } => {
+                ExtractError::filesystem(operation, path, source)
+            }
+        }
+    }
 }
 
 /// Creates buffered files in archive order and stops after cancellation or the first failure.
@@ -72,55 +99,55 @@ pub(super) fn write_buffered_file(
     executable: bool,
     contents: &[u8],
     replacement: BufferedFileReplacement,
-) -> Result<(), LeafError> {
+) -> Result<(), BufferedFileError> {
     let mode = FileOpenMode::CreateNew { executable };
     // Unique destination access makes this the common duplicate-member path.
     // If the leaf changed unexpectedly, fall through to no-follow inspection.
     if replacement == BufferedFileReplacement::ExpectedFile && directory.remove_file(path).is_ok() {
         let file = mode
             .open(directory, path)
-            .map_err(|source| LeafError::filesystem("create file", source))?;
+            .map_err(|source| BufferedFileError::filesystem("create file", source))?;
         return write_buffered_contents(file, contents);
     }
 
     let create_error = match mode.open(directory, path) {
         Ok(file) => return write_buffered_contents(file, contents),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
-        Err(error) => return Err(LeafError::filesystem("create file", error)),
+        Err(error) => return Err(BufferedFileError::filesystem("create file", error)),
     };
     let metadata = match directory.symlink_metadata(path) {
         Ok(metadata) => metadata,
         Err(error) if error.kind() == io::ErrorKind::NotFound => {
-            return Err(LeafError::filesystem("create file", create_error));
+            return Err(BufferedFileError::filesystem("create file", create_error));
         }
-        Err(error) => return Err(LeafError::filesystem("inspect", error)),
+        Err(error) => return Err(BufferedFileError::filesystem("inspect", error)),
     };
     if replacement == BufferedFileReplacement::Disallowed {
-        return Err(LeafError::Collision);
+        return Err(BufferedFileError::Collision);
     }
     remove_buffered_leaf(directory, path, &metadata)?;
     let file = mode
         .open(directory, path)
-        .map_err(|source| LeafError::filesystem("create file", source))?;
+        .map_err(|source| BufferedFileError::filesystem("create file", source))?;
     write_buffered_contents(file, contents)
 }
 
-fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), LeafError> {
+fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), BufferedFileError> {
     file.write_all(contents)
-        .map_err(|source| LeafError::filesystem("write file", source))
+        .map_err(|source| BufferedFileError::filesystem("write file", source))
 }
 
 fn remove_buffered_leaf(
     directory: &Dir,
     path: &Path,
     metadata: &Metadata,
-) -> Result<(), LeafError> {
+) -> Result<(), BufferedFileError> {
     if metadata.is_dir() && !metadata_is_link(metadata) {
         return directory
             .remove_dir(path)
-            .map_err(LeafError::RemoveDirectory);
+            .map_err(BufferedFileError::RemoveDirectory);
     }
 
     remove_file_or_symlink(directory, path, metadata_is_link(metadata))
-        .map_err(|source| LeafError::filesystem("remove file", source))
+        .map_err(|source| BufferedFileError::filesystem("remove file", source))
 }
