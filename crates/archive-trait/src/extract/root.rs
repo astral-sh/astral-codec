@@ -599,7 +599,7 @@ impl<E> ExtractionRoot<E> {
                 if !metadata_is_link(&metadata) {
                     continue;
                 }
-                self.remove_leaf(&path, entry, parent, &metadata).await?;
+                self.remove_leaf(&path, entry, parent, metadata).await?;
             }
             self.try_create_symlink(&path, parent, contents)
                 .await?
@@ -647,13 +647,7 @@ impl<E> ExtractionRoot<E> {
         } else {
             BufferedFileReplacement::Allowed
         };
-        if self
-            .directory_handle
-            .as_ref()
-            .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-        {
-            self.directory_handle = None;
-        }
+        self.release_directory_handle(entry);
         let (directory, relative_path) = self.entry_capability(path, parent);
         self.buffered_file_bytes = self.buffered_file_bytes.saturating_add(contents.len());
         self.buffered_files.push(BufferedFile {
@@ -693,7 +687,7 @@ impl<E> ExtractionRoot<E> {
             self.buffered_file_buffers.push(buffer);
         }
         if let Some((path, error)) = result.error {
-            return Err(error.into_extract(&path));
+            return Err(error.into_extract(path));
         }
         Ok(())
     }
@@ -840,7 +834,7 @@ impl<E> ExtractionRoot<E> {
         }
         self.check_replacement(path, entry)?;
         if let Some(metadata) = metadata {
-            self.remove_leaf(path, entry, parent, &metadata).await?;
+            self.remove_leaf(path, entry, parent, metadata).await?;
         }
         self.entries.clear_state(entry);
         Ok(true)
@@ -981,34 +975,15 @@ impl<E> ExtractionRoot<E> {
         path: &NormalizedPath,
         entry: EntryId,
         parent: EntryId,
-        metadata: &Metadata,
+        metadata: Metadata,
     ) -> Result<(), ExtractError<E>> {
-        if metadata.is_dir() && !metadata_is_link(metadata) {
-            // Windows directory handles do not share delete access.
-            if self
-                .directory_handle
-                .as_ref()
-                .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-            {
-                self.directory_handle = None;
-            }
-            let removed = self
-                .with_entry_parent("remove directory", path, parent, remove_empty_directory)
-                .await?;
-            if removed {
-                Ok(())
-            } else {
-                Err(ExtractError::PathCollision {
-                    path: path.to_path_buf(),
-                })
-            }
-        } else {
-            let is_link = metadata_is_link(metadata);
-            self.with_entry_parent("remove file", path, parent, move |directory, path| {
-                remove_file_or_symlink(directory, path, is_link)
-            })
-            .await
-        }
+        self.release_directory_handle(entry);
+        let (directory, relative_path) = self.entry_capability(path, parent);
+        run_blocking_io(directory, relative_path, move |directory, path| {
+            remove_existing_leaf(directory, path, &metadata)
+        })
+        .await?
+        .map_err(|error| error.into_extract(path.to_path_buf()))
     }
 
     async fn open_file(
@@ -1126,6 +1101,17 @@ impl<E> ExtractionRoot<E> {
         }
         (Arc::clone(&self.directory), path.to_path_buf())
     }
+
+    /// Windows directory handles do not share delete access.
+    fn release_directory_handle(&mut self, entry: EntryId) {
+        if self
+            .directory_handle
+            .as_ref()
+            .is_some_and(|(cached_entry, _)| *cached_entry == entry)
+        {
+            self.directory_handle = None;
+        }
+    }
 }
 
 fn check_symlink_resolution_limit(
@@ -1162,15 +1148,50 @@ fn leaf_name(path: &NormalizedPath) -> &str {
     }
 }
 
-/// Removes the directory, returning false if it contains any entries.
-fn remove_empty_directory(directory: &Dir, path: &Path) -> io::Result<bool> {
-    match directory.remove_dir(path) {
-        Ok(()) => Ok(true),
-        Err(error) => match error.kind() {
-            // POSIX permits both ENOTEMPTY and EEXIST for a nonempty directory.
-            io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists => Ok(false),
-            _ => Err(error),
-        },
+/// A leaf operation failure before the archive-relative path is attached.
+enum LeafError {
+    Collision,
+    Filesystem {
+        operation: &'static str,
+        source: io::Error,
+    },
+}
+
+impl LeafError {
+    fn filesystem(operation: &'static str, source: io::Error) -> Self {
+        Self::Filesystem { operation, source }
+    }
+
+    fn into_extract<E>(self, path: PathBuf) -> ExtractError<E> {
+        match self {
+            Self::Collision => ExtractError::PathCollision { path },
+            Self::Filesystem { operation, source } => {
+                ExtractError::filesystem(operation, path, source)
+            }
+        }
+    }
+}
+
+/// Removes the leaf described by no-follow metadata, refusing nonempty directories.
+fn remove_existing_leaf(
+    directory: &Dir,
+    path: &Path,
+    metadata: &Metadata,
+) -> Result<(), LeafError> {
+    let is_link = metadata_is_link(metadata);
+    if metadata.is_dir() && !is_link {
+        directory
+            .remove_dir(path)
+            .map_err(|source| match source.kind() {
+                // POSIX permits both ENOTEMPTY and EEXIST for a nonempty directory.
+                io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists => {
+                    LeafError::Collision
+                }
+                _ => LeafError::filesystem("remove directory", source),
+            })
+    } else {
+        remove_file_or_symlink(directory, path, is_link)
+            .map_err(|source| LeafError::filesystem("remove file", source))
     }
 }
 
@@ -1211,15 +1232,15 @@ where
         .map_err(|source| ExtractError::filesystem(operation, error_path.to_path_buf(), source))
 }
 
-/// Runs one capability-relative filesystem operation without attaching a path to I/O errors.
+/// Runs one capability-relative filesystem operation, leaving its result to the caller.
 async fn run_blocking_io<E, T, F>(
     directory: Arc<Dir>,
     relative_path: PathBuf,
     action: F,
-) -> Result<io::Result<T>, ExtractError<E>>
+) -> Result<T, ExtractError<E>>
 where
     T: Send + 'static,
-    F: FnOnce(&Dir, &Path) -> io::Result<T> + Send + 'static,
+    F: FnOnce(&Dir, &Path) -> T + Send + 'static,
 {
     tokio::task::spawn_blocking(move || action(&directory, &relative_path))
         .await

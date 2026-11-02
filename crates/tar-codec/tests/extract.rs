@@ -2,7 +2,10 @@ pub mod support;
 
 use std::path::Path;
 #[cfg(unix)]
-use std::{fs::Permissions, os::unix::fs::PermissionsExt as _};
+use std::{
+    fs::{DirBuilder, Permissions},
+    os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
+};
 
 #[cfg(unix)]
 use support::EntryKind;
@@ -432,11 +435,10 @@ async fn extraction_replaces_empty_leaves_but_rejects_non_directory_parents() {
         if existing_file {
             std::fs::write(destination.join("same"), b"ambient").unwrap();
         } else {
-            let directory = destination.join("same");
-            std::fs::create_dir(&directory).unwrap();
-            // The parent permits removal even though the directory cannot be listed.
-            std::fs::set_permissions(directory, Permissions::from_mode(0o311))
-                .expect("restrict directory permissions");
+            DirBuilder::new()
+                .mode(0o311)
+                .create(destination.join("same"))
+                .expect("create an unreadable directory");
         }
         let mut archive = ArchiveBuilder::new();
         archive
@@ -604,8 +606,8 @@ async fn disabled_overwrites_reject_replacements_but_reuse_directories() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn non_empty_directories_are_never_replaced() {
-    let temp = tempdir().unwrap();
+async fn non_empty_directories_are_never_replaced() -> std::io::Result<()> {
+    let temp = tempdir()?;
     let archives = [
         ("archive-child", {
             let mut archive = ArchiveBuilder::new();
@@ -633,25 +635,21 @@ async fn non_empty_directories_are_never_replaced() {
         assert!(destination.join("same").is_dir());
     }
 
-    let destination = temp.path().join("ambient-child");
-    let directory = destination.join("same");
-    std::fs::create_dir_all(&directory).unwrap();
-    std::fs::write(directory.join("child"), b"keep").unwrap();
-    std::fs::set_permissions(&directory, Permissions::from_mode(0o311))
-        .expect("restrict directory permissions");
+    let directory = temp.path().join("same");
+    let child = directory.join("child");
+    DirBuilder::new().mode(0o311).create(&directory)?;
+    std::fs::write(&child, b"keep")?;
     let bytes = single_pax_member("same", b'0', b"replace", "", 0o644);
     let result = TarArchive::new(bytes.as_slice())
-        .extract_in(&destination, ExtractPolicy::default())
+        .extract_in(temp.path(), ExtractPolicy::default())
         .await;
-    std::fs::set_permissions(&directory, Permissions::from_mode(0o700))
-        .expect("restore directory permissions for cleanup");
+    // TempDir needs to list the directory to clean up.
+    std::fs::set_permissions(directory, Permissions::from_mode(0o700))?;
     assert!(
         matches!(result, Err(ExtractError::PathCollision { path }) if path == Path::new("same"))
     );
-    assert_eq!(
-        std::fs::read(directory.join("child")).expect("read child"),
-        b"keep"
-    );
+    assert_eq!(std::fs::read(child)?, b"keep");
+    Ok(())
 }
 
 /// Ensures a destination symbolic link cannot be used or replaced as an
