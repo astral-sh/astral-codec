@@ -67,6 +67,30 @@ Unlike encoding, decoding/extraction has two policy layers:
 - Use `extract::ExtractPolicy` to control various aspects of how archives become
   real paths on the host filesystem.
 
+Consumers that store filesystem names as bytes can use
+`TarArchive::next_byte_member` instead of the UTF-8 `Archive::next_member` API:
+
+```rust
+use tar_codec::{ByteMember, MemberPayload as _, TarArchive};
+
+let mut archive = TarArchive::new(reader);
+let mut chunk = Vec::new();
+while let Some(member) = archive.next_byte_member().await? {
+    // Validate member.metadata().path before using it as a filesystem path.
+    if let ByteMember::File { metadata, mut payload, .. } = member {
+        while payload.next_chunk(&mut chunk, 64 * 1024).await? {
+            // Store chunk under the validated byte path in metadata.path.
+        }
+    }
+}
+```
+
+`ByteMember` retains effective paths and link targets as `Vec<u8>`, with the
+same framing and decode-policy checks. Non-UTF-8 pax `path` and `linkpath`
+records require `hdrcharset=BINARY`; USTAR and GNU names retain their raw
+bytes. Consumers are responsible for path and link validation. The existing
+UTF-8 member and extraction APIs continue to reject non-UTF-8 names.
+
 ## Performance
 
 tar-codec aims to be as fast as (or substantially faster than) other

@@ -5,11 +5,12 @@
 //! as file-system paths. [`ArchiveTrait::extract_in`] validates and normalizes
 //! them as specified by [`crate::extract::ExtractPolicy`].
 
+mod bytes;
+
 use std::collections::HashSet;
 
 use archive_trait::{
-    Archive as ArchiveTrait, Member, MemberMetadata, MemberPayload as MemberPayloadTrait,
-    SpecialKind,
+    Archive as ArchiveTrait, Member, MemberPayload as MemberPayloadTrait, SpecialKind,
 };
 use tar_framing::{
     ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
@@ -18,6 +19,7 @@ use tar_framing::{
 use thiserror::Error;
 use tokio::io::AsyncRead;
 
+pub use bytes::{ByteMember, ByteMemberMetadata};
 pub use tar_framing::{
     DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE,
     DEFAULT_MAX_PAX_EXTENSION_SIZE,
@@ -570,12 +572,45 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     async fn next_member<'a>(
         &'a mut self,
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error> {
+        self.next_member_with(|frame| project_byte_member(frame)?.into_utf8())
+            .await
+    }
+}
+
+impl<R: AsyncRead + Unpin> TarArchive<R> {
+    /// Reads the next tar member without requiring UTF-8 paths or link targets.
+    ///
+    /// Applies the same framing and [`DecodePolicy`] checks as
+    /// [`ArchiveTrait::next_member`]. Non-UTF-8 pax `path` and `linkpath` records
+    /// must declare `hdrcharset=BINARY`. USTAR and GNU header fields and GNU
+    /// long-name and long-link extensions retain their effective bytes.
+    ///
+    /// Paths and targets are not normalized or validated for extraction.
+    /// Consumers must apply their own path and link safety rules.
+    ///
+    /// This method and [`ArchiveTrait::next_member`] advance the same cursor.
+    /// Both are fused after EOF or a decoding error. Advancing drains any
+    /// unread payload from the preceding member.
+    pub async fn next_byte_member(
+        &mut self,
+    ) -> Result<Option<ByteMember<TarMemberPayload<'_, R>>>, DecodeError> {
+        self.next_member_with(project_byte_member).await
+    }
+
+    async fn next_member_with<'a, T>(
+        &'a mut self,
+        project: impl FnOnce(MemberFrame<'a, R>) -> Result<T, DecodeError>,
+    ) -> Result<Option<T>, DecodeError> {
         if self.fused {
             return Ok(None);
         }
 
         let result = match self.reader.next_frame().await {
-            Ok(Some(frame)) => decode_member(frame, &self.policy).map(Some),
+            Ok(Some(frame)) => self
+                .policy
+                .check_member(&frame)
+                .and_then(|()| project(frame))
+                .map(Some),
             Ok(None) => Ok(None),
             Err(error) => Err(error.into()),
         };
@@ -584,35 +619,23 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     }
 }
 
-fn decode_member<'a, R>(
+fn project_byte_member<'a, R>(
     frame: MemberFrame<'a, R>,
-    policy: &DecodePolicy,
-) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
-    policy.check_member(&frame)?;
+) -> Result<ByteMember<TarMemberPayload<'a, R>>, DecodeError> {
     let position = frame.header.position;
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
     let executable = frame.header.mode.unwrap_or_default() & 0o111 != 0;
-    let path = std::str::from_utf8(frame.effective_path()?.as_ref())
-        .map(str::to_owned)
-        .map_err(|_| DecodeError::InvalidUtf8 {
-            position,
-            field: "path",
-        })?;
+    let path = frame.effective_path()?.into_owned();
     let target = if matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink) {
-        std::str::from_utf8(frame.effective_link_path()?.as_ref())
-            .map(str::to_owned)
-            .map_err(|_| DecodeError::InvalidUtf8 {
-                position,
-                field: "linkpath",
-            })?
+        frame.effective_link_path()?.into_owned()
     } else {
-        String::new()
+        Vec::new()
     };
-    let metadata = MemberMetadata { path, position };
+    let metadata = ByteMemberMetadata { path, position };
 
     Ok(match kind {
-        UstarKind::Regular | UstarKind::Contiguous => Member::File {
+        UstarKind::Regular | UstarKind::Contiguous => ByteMember::File {
             metadata,
             size,
             executable,
@@ -620,9 +643,9 @@ fn decode_member<'a, R>(
                 payload: frame.payload,
             },
         },
-        UstarKind::Directory => Member::Directory { metadata },
-        UstarKind::SymbolicLink => Member::SymbolicLink { metadata, target },
-        UstarKind::HardLink => Member::HardLink {
+        UstarKind::Directory => ByteMember::Directory { metadata },
+        UstarKind::SymbolicLink => ByteMember::SymbolicLink { metadata, target },
+        UstarKind::HardLink => ByteMember::HardLink {
             metadata,
             target,
             size,
@@ -630,15 +653,15 @@ fn decode_member<'a, R>(
                 payload: frame.payload,
             },
         },
-        UstarKind::CharacterDevice => Member::Special {
+        UstarKind::CharacterDevice => ByteMember::Special {
             metadata,
             kind: SpecialKind::CharacterDevice,
         },
-        UstarKind::BlockDevice => Member::Special {
+        UstarKind::BlockDevice => ByteMember::Special {
             metadata,
             kind: SpecialKind::BlockDevice,
         },
-        UstarKind::Fifo => Member::Special {
+        UstarKind::Fifo => ByteMember::Special {
             metadata,
             kind: SpecialKind::Fifo,
         },
