@@ -984,14 +984,6 @@ impl<E> ExtractionRoot<E> {
         metadata: &Metadata,
     ) -> Result<(), ExtractError<E>> {
         if metadata.is_dir() && !metadata_is_link(metadata) {
-            let is_empty = self
-                .with_entry_parent("inspect directory", path, parent, directory_is_empty)
-                .await?;
-            if !is_empty {
-                return Err(ExtractError::<E>::PathCollision {
-                    path: path.to_path_buf(),
-                });
-            }
             // Windows directory handles do not share delete access.
             if self
                 .directory_handle
@@ -1000,10 +992,16 @@ impl<E> ExtractionRoot<E> {
             {
                 self.directory_handle = None;
             }
-            self.with_entry_parent("remove directory", path, parent, |directory, path| {
-                directory.remove_dir(path)
-            })
-            .await
+            let removed = self
+                .with_entry_parent("remove directory", path, parent, remove_empty_directory)
+                .await?;
+            if removed {
+                Ok(())
+            } else {
+                Err(ExtractError::PathCollision {
+                    path: path.to_path_buf(),
+                })
+            }
         } else {
             let is_link = metadata_is_link(metadata);
             self.with_entry_parent("remove file", path, parent, move |directory, path| {
@@ -1164,10 +1162,16 @@ fn leaf_name(path: &NormalizedPath) -> &str {
     }
 }
 
-fn directory_is_empty(directory: &Dir, path: &Path) -> io::Result<bool> {
-    let directory = directory.open_dir(path)?;
-    let mut entries = directory.entries()?;
-    Ok(entries.next().transpose()?.is_none())
+/// Removes the directory, returning false if it contains any entries.
+fn remove_empty_directory(directory: &Dir, path: &Path) -> io::Result<bool> {
+    match directory.remove_dir(path) {
+        Ok(()) => Ok(true),
+        Err(error) => match error.kind() {
+            // POSIX permits both ENOTEMPTY and EEXIST for a nonempty directory.
+            io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists => Ok(false),
+            _ => Err(error),
+        },
+    }
 }
 
 #[cfg(not(windows))]

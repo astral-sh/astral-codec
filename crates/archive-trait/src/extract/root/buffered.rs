@@ -11,7 +11,7 @@ use std::{
 
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
-use super::{FileOpenMode, directory_is_empty, metadata_is_link, remove_file_or_symlink};
+use super::{FileOpenMode, metadata_is_link, remove_empty_directory, remove_file_or_symlink};
 use crate::ExtractError;
 
 /// Whether a buffered file may replace an existing destination leaf.
@@ -143,14 +143,12 @@ fn remove_buffered_leaf(
     metadata: &Metadata,
 ) -> Result<(), BufferedFileError> {
     if metadata.is_dir() && !metadata_is_link(metadata) {
-        let is_empty = directory_is_empty(directory, path)
-            .map_err(|source| BufferedFileError::filesystem("inspect directory", source))?;
-        if !is_empty {
-            return Err(BufferedFileError::Collision);
+        let removed = remove_empty_directory(directory, path)
+            .map_err(|source| BufferedFileError::filesystem("remove directory", source))?;
+        if removed {
+            return Ok(());
         }
-        return directory
-            .remove_dir(path)
-            .map_err(|source| BufferedFileError::filesystem("remove directory", source));
+        return Err(BufferedFileError::Collision);
     }
 
     remove_file_or_symlink(directory, path, metadata_is_link(metadata))
