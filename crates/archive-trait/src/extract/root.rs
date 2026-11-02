@@ -278,22 +278,23 @@ async fn write_payload<P: MemberPayload>(
     path: &NormalizedPath,
     mut file: File,
 ) -> Result<(), ExtractError<P::Error>> {
-    loop {
-        if !payload
+    let result = loop {
+        match payload
             .next_chunk(chunk_buffer, STREAMING_PAYLOAD_CHUNK_BYTES)
             .await
-            .map_err(ExtractError::Archive)?
         {
-            break;
+            Ok(true) => file.write_all(chunk_buffer).await.map_err(|source| {
+                ExtractError::filesystem("write file", path.to_path_buf(), source)
+            })?,
+            Ok(false) => break Ok(()),
+            Err(error) => break Err(ExtractError::Archive(error)),
         }
-        file.write_all(chunk_buffer)
-            .await
-            .map_err(|source| ExtractError::filesystem("write file", path.to_path_buf(), source))?;
-    }
+    };
+    // A queued write must finish even if reading the next chunk failed.
     file.flush()
         .await
         .map_err(|source| ExtractError::filesystem("flush file", path.to_path_buf(), source))?;
-    Ok(())
+    result
 }
 
 // Member operations invoked by the extraction loop.
