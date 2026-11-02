@@ -565,14 +565,20 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
 
     /// Reads one ordinary-member payload block without constructing a [`Frame`].
     ///
-    /// Returns the block's position, lossless bytes, and meaningful length.
-    pub(crate) async fn read_member_block(&mut self) -> Result<(u64, Block, usize), FrameError> {
+    /// Returns the block's position, lossless bytes, and meaningful length, or
+    /// `None` at the end of the member.
+    pub(crate) async fn read_member_block(
+        &mut self,
+    ) -> Result<Option<(u64, Block, usize)>, FrameError> {
         let result = self.read_member_block_inner().await;
         self.fail_on_error(result)
     }
 
-    async fn read_member_block_inner(&mut self) -> Result<(u64, Block, usize), FrameError> {
+    async fn read_member_block_inner(&mut self) -> Result<Option<(u64, Block, usize)>, FrameError> {
         let remaining = self.member_remaining()?;
+        if remaining == 0 {
+            return Ok(None);
+        }
         let chunk = &mut self.member_chunk;
         if !chunk.unread.is_empty() {
             // A cancelled chunk read can supply part or all of this block.
@@ -590,7 +596,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             .ok_or_else(|| self.handle_eof())?;
         let meaningful_len = remaining.min(BLOCK_SIZE as u64) as usize;
         self.state = member_payload_state(remaining - meaningful_len as u64);
-        Ok((position, block, meaningful_len))
+        Ok(Some((position, block, meaningful_len)))
     }
 
     /// Reads aligned ordinary-member payload blocks directly into `buffer`.
@@ -601,7 +607,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         &mut self,
         buffer: &mut Vec<u8>,
         target_len: usize,
-    ) -> Result<usize, FrameError> {
+    ) -> Result<bool, FrameError> {
         let result = self.read_member_chunk_inner(buffer, target_len).await;
         self.fail_on_error(result)
     }
@@ -610,8 +616,11 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         &mut self,
         buffer: &mut Vec<u8>,
         target_len: usize,
-    ) -> Result<usize, FrameError> {
+    ) -> Result<bool, FrameError> {
         let remaining = self.member_remaining()?;
+        if remaining == 0 {
+            return Ok(false);
+        }
         let read_len = target_len
             .max(BLOCK_SIZE)
             .min(usize::try_from(remaining).unwrap_or(usize::MAX))
@@ -671,7 +680,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         std::mem::swap(buffer, &mut chunk.buffer);
         chunk.buffer.clear();
         self.state = member_payload_state(remaining);
-        Ok(meaningful_len)
+        Ok(true)
     }
 
     fn fail_on_error<T>(&mut self, result: Result<T, FrameError>) -> Result<T, FrameError> {
@@ -684,6 +693,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
     fn member_remaining(&self) -> Result<u64, FrameError> {
         match self.state {
             State::ReadingMember { remaining } => Ok(remaining),
+            State::AwaitingHeader => Ok(0),
             _ => Err(FrameError::unexpected_order(
                 self.position,
                 "ordinary member payload",

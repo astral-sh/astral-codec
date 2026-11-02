@@ -204,7 +204,6 @@ pub struct TarReader<R> {
 /// the logical [`Header`] borrows reusable header storage.
 struct PayloadReader<R> {
     stream: TarStream<R>,
-    remaining: u64,
     drain_buffer: Vec<u8>,
 }
 
@@ -289,7 +288,6 @@ impl<R> TarReader<R> {
             global_pax_records: None,
             payload: PayloadReader {
                 stream: TarStream::new(reader),
-                remaining: 0,
                 drain_buffer: Vec::new(),
             },
             header_storage: HeaderStorage::default(),
@@ -317,12 +315,9 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
     /// view borrowing this reader; it must be dropped before requesting another
     /// member.
     pub async fn next_frame(&mut self) -> Result<Option<MemberFrame<'_, R>>, FrameError> {
-        if matches!(self.payload.stream.state, State::Failed) {
-            self.clear_extension_state();
-            return Ok(None);
-        }
-
-        if let Err(error) = self.payload.drain_payload().await {
+        if matches!(self.payload.stream.state, State::ReadingMember { .. })
+            && let Err(error) = self.payload.drain_payload().await
+        {
             self.clear_extension_state();
             return Err(error);
         }
@@ -367,7 +362,6 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
                             long_link: pending_extensions.gnu_long_link,
                         },
                     };
-                    self.payload.remaining = header.effective_size;
                     let header = self.header_storage.update(&header);
                     return Ok(Some(MemberFrame {
                         header,
@@ -468,70 +462,27 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
 }
 
 impl<R: AsyncRead + Unpin> PayloadReader<R> {
-    async fn next_payload_block(&mut self) -> Result<Option<PayloadBlock>, FrameError> {
-        if self.remaining == 0 {
-            return Ok(None);
-        }
-        let (position, block, len) = self.stream.read_member_block().await?;
-        let payload_len = u64::try_from(len)
-            .map_err(|_| FrameError::arithmetic_overflow(position, "member payload length"))?;
-        self.remaining = self.remaining.checked_sub(payload_len).ok_or_else(|| {
-            FrameError::unexpected_order(
-                position,
-                "bounded member payload",
-                "oversized member payload",
-            )
-        })?;
-        Ok(Some(PayloadBlock {
-            position,
-            block,
-            len,
-        }))
-    }
-
-    async fn next_payload_chunk(
-        &mut self,
-        buffer: &mut Vec<u8>,
-        target_len: usize,
-    ) -> Result<bool, FrameError> {
-        if self.remaining == 0 {
-            return Ok(false);
-        }
-        let len = self.stream.read_member_chunk(buffer, target_len).await?;
-        let len = u64::try_from(len).map_err(|_| {
-            FrameError::arithmetic_overflow(self.stream.position, "member payload chunk length")
-        })?;
-        self.remaining = self.remaining.checked_sub(len).ok_or_else(|| {
-            FrameError::unexpected_order(
-                self.stream.position,
-                "bounded member payload",
-                "oversized member payload chunk",
-            )
-        })?;
-        Ok(true)
-    }
-
     async fn drain_payload(&mut self) -> Result<(), FrameError> {
-        let mut buffer = mem::take(&mut self.drain_buffer);
-        let result = loop {
-            match self
-                .next_payload_chunk(&mut buffer, PAYLOAD_DRAIN_CHUNK_BYTES)
-                .await
-            {
-                Ok(true) => {}
-                Ok(false) => break Ok(()),
-                Err(error) => break Err(error),
-            }
-        };
-        self.drain_buffer = buffer;
-        result
+        while self
+            .stream
+            .read_member_chunk(&mut self.drain_buffer, PAYLOAD_DRAIN_CHUNK_BYTES)
+            .await?
+        {}
+        Ok(())
     }
 }
 
 impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
     /// Returns the next meaningful payload block, excluding final padding in `len`.
     pub async fn next_block(&mut self) -> Result<Option<PayloadBlock>, FrameError> {
-        self.reader.next_payload_block().await
+        let Some((position, block, len)) = self.reader.stream.read_member_block().await? else {
+            return Ok(None);
+        };
+        Ok(Some(PayloadBlock {
+            position,
+            block,
+            len,
+        }))
     }
 
     /// Reads validated payload bytes into a reusable chunk buffer.
@@ -550,7 +501,10 @@ impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
         buffer: &mut Vec<u8>,
         target_len: usize,
     ) -> Result<bool, FrameError> {
-        self.reader.next_payload_chunk(buffer, target_len).await
+        self.reader
+            .stream
+            .read_member_chunk(buffer, target_len)
+            .await
     }
 
     /// Discards and validates all remaining payload bytes using reusable storage.
