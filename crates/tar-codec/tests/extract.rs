@@ -1,11 +1,6 @@
 pub mod support;
 
-use std::{
-    io,
-    path::Path,
-    pin::Pin,
-    task::{Context, Poll},
-};
+use std::path::Path;
 
 #[cfg(unix)]
 use support::EntryKind;
@@ -18,74 +13,57 @@ use tar_codec::{
     Archive as _, DecodeError, ExtractError, ExtractPolicyViolation, TarArchive,
     extract::ExtractPolicy,
 };
-use tar_framing::{BLOCK_SIZE, FrameError, FrameErrorInner, PaxKeyword, UstarKind};
+use tar_framing::{FrameError, FrameErrorInner, PaxKeyword, UstarKind};
 use tempfile::tempdir;
 use tokio::{
-    io::{AsyncRead, AsyncReadExt as _, ReadBuf},
+    io::{AsyncReadExt as _, AsyncWriteExt as _, duplex},
     runtime::Builder,
     sync::oneshot,
 };
 
-struct LastPayloadByte(Option<u8>);
-
-impl AsyncRead for LastPayloadByte {
-    fn poll_read(
-        mut self: Pin<&mut Self>,
-        _context: &mut Context<'_>,
-        buffer: &mut ReadBuf<'_>,
-    ) -> Poll<io::Result<()>> {
-        if buffer.remaining() > 0
-            && let Some(byte) = self.0.take()
-        {
-            // Keep the only blocking worker busy until extraction yields. Its next
-            // file write will be queued when the next read encounters EOF.
-            let (release, wait) = oneshot::channel::<()>();
-            tokio::task::spawn_blocking(move || wait.blocking_recv());
-            tokio::spawn(async move { drop(release) });
-            buffer.put_slice(&[byte]);
-        }
-        Poll::Ready(Ok(()))
-    }
-}
-
 #[test]
 fn truncated_payload_flushes_its_last_write_before_returning() {
-    const CHUNK_BYTES: usize = 2 * 1024 * 1024;
     let temp = tempdir().expect("temporary directory should be created");
-    let mut bytes = header(
-        ArchiveFormat::Pax,
-        "file",
-        b'0',
-        CHUNK_BYTES as u64 + 1,
-        "",
-        0o644,
-    )
-    .to_vec();
-    bytes.resize(BLOCK_SIZE + CHUNK_BYTES - 1, b'x');
-    let input = bytes.as_slice().chain(LastPayloadByte(Some(b'x')));
+    let payload = vec![b'x'; 2 * 1024 * 1024];
+    let size = payload.len() as u64;
+    let header = header(ArchiveFormat::Pax, "file", b'0', size + 1, "", 0o644);
+    let (reader, mut writer) = duplex(payload.len() / 2);
+
+    let extract = async {
+        let result = TarArchive::new(header.as_slice().chain(reader))
+            .extract_in(temp.path(), ExtractPolicy::default())
+            .await;
+        assert!(matches!(
+            result,
+            Err(ExtractError::Archive(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::TruncatedPayload { remaining: 1, .. },
+                ..
+            })))
+        ));
+        assert_eq!(
+            std::fs::metadata(temp.path().join("file"))
+                .expect("file should exist")
+                .len(),
+            size
+        );
+    };
+    let feed = async {
+        // The pipe cannot hold the full payload until extraction starts reading it.
+        writer.write_all(&payload).await.expect("write payload");
+        // Occupy the only blocking worker so the file write has to wait.
+        let (release, wait) = oneshot::channel::<()>();
+        tokio::task::spawn_blocking(move || wait.blocking_recv());
+        drop(writer);
+        // The biased join polls extraction at EOF before we release the worker.
+        tokio::task::yield_now().await;
+        drop(release);
+    };
 
     Builder::new_current_thread()
         .max_blocking_threads(1)
         .build()
         .expect("test runtime should be created")
-        .block_on(async {
-            let result = TarArchive::new(input)
-                .extract_in(temp.path(), ExtractPolicy::default())
-                .await;
-            assert!(matches!(
-                result,
-                Err(ExtractError::Archive(DecodeError::Framing(FrameError {
-                    inner: FrameErrorInner::TruncatedPayload { remaining: 1, .. },
-                    ..
-                })))
-            ));
-            assert_eq!(
-                std::fs::metadata(temp.path().join("file"))
-                    .expect("file should exist")
-                    .len(),
-                CHUNK_BYTES as u64
-            );
-        });
+        .block_on(async { tokio::join!(biased; extract, feed) });
 }
 
 #[tokio::test]
