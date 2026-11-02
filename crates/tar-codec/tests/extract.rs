@@ -1,6 +1,11 @@
 pub mod support;
 
 use std::path::Path;
+#[cfg(unix)]
+use std::{
+    fs::{DirBuilder, Permissions},
+    os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
+};
 
 #[cfg(unix)]
 use support::EntryKind;
@@ -430,7 +435,10 @@ async fn extraction_replaces_empty_leaves_but_rejects_non_directory_parents() {
         if existing_file {
             std::fs::write(destination.join("same"), b"ambient").unwrap();
         } else {
-            std::fs::create_dir(destination.join("same")).unwrap();
+            DirBuilder::new()
+                .mode(0o311)
+                .create(destination.join("same"))
+                .expect("create an unreadable directory");
         }
         let mut archive = ArchiveBuilder::new();
         archive
@@ -598,8 +606,8 @@ async fn disabled_overwrites_reject_replacements_but_reuse_directories() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn non_empty_directories_are_never_replaced() {
-    let temp = tempdir().unwrap();
+async fn non_empty_directories_are_never_replaced() -> std::io::Result<()> {
+    let temp = tempdir()?;
     let archives = [
         ("archive-child", {
             let mut archive = ArchiveBuilder::new();
@@ -627,17 +635,21 @@ async fn non_empty_directories_are_never_replaced() {
         assert!(destination.join("same").is_dir());
     }
 
-    let destination = temp.path().join("ambient-child");
-    std::fs::create_dir_all(destination.join("same")).unwrap();
-    std::fs::write(destination.join("same/child"), b"keep").unwrap();
+    let directory = temp.path().join("same");
+    let child = directory.join("child");
+    DirBuilder::new().mode(0o311).create(&directory)?;
+    std::fs::write(&child, b"keep")?;
     let bytes = single_pax_member("same", b'0', b"replace", "", 0o644);
-    assert!(matches!(
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, ExtractPolicy::default())
-            .await,
-        Err(ExtractError::PathCollision { .. })
-    ));
-    assert!(destination.join("same").is_dir());
+    let result = TarArchive::new(bytes.as_slice())
+        .extract_in(temp.path(), ExtractPolicy::default())
+        .await;
+    // TempDir needs to list the directory to clean up.
+    std::fs::set_permissions(directory, Permissions::from_mode(0o700))?;
+    assert!(
+        matches!(result, Err(ExtractError::PathCollision { path }) if path == Path::new("same"))
+    );
+    assert_eq!(std::fs::read(child)?, b"keep");
+    Ok(())
 }
 
 /// Ensures a destination symbolic link cannot be used or replaced as an

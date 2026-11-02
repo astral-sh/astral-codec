@@ -693,7 +693,7 @@ impl<E> ExtractionRoot<E> {
             self.buffered_file_buffers.push(buffer);
         }
         if let Some((path, error)) = result.error {
-            return Err(error.into_extract(&path));
+            return Err(error.into_extract(path));
         }
         Ok(())
     }
@@ -984,14 +984,6 @@ impl<E> ExtractionRoot<E> {
         metadata: &Metadata,
     ) -> Result<(), ExtractError<E>> {
         if metadata.is_dir() && !metadata_is_link(metadata) {
-            let is_empty = self
-                .with_entry_parent("inspect directory", path, parent, directory_is_empty)
-                .await?;
-            if !is_empty {
-                return Err(ExtractError::<E>::PathCollision {
-                    path: path.to_path_buf(),
-                });
-            }
             // Windows directory handles do not share delete access.
             if self
                 .directory_handle
@@ -1000,10 +992,12 @@ impl<E> ExtractionRoot<E> {
             {
                 self.directory_handle = None;
             }
-            self.with_entry_parent("remove directory", path, parent, |directory, path| {
+            let (directory, relative_path) = self.entry_capability(path, parent);
+            run_blocking_io(directory, relative_path, |directory, path| {
                 directory.remove_dir(path)
             })
-            .await
+            .await?
+            .map_err(|source| remove_directory_error(path.to_path_buf(), source))
         } else {
             let is_link = metadata_is_link(metadata);
             self.with_entry_parent("remove file", path, parent, move |directory, path| {
@@ -1164,10 +1158,14 @@ fn leaf_name(path: &NormalizedPath) -> &str {
     }
 }
 
-fn directory_is_empty(directory: &Dir, path: &Path) -> io::Result<bool> {
-    let directory = directory.open_dir(path)?;
-    let mut entries = directory.entries()?;
-    Ok(entries.next().transpose()?.is_none())
+fn remove_directory_error<E>(path: PathBuf, source: io::Error) -> ExtractError<E> {
+    match source.kind() {
+        // POSIX permits both ENOTEMPTY and EEXIST for a nonempty directory.
+        io::ErrorKind::DirectoryNotEmpty | io::ErrorKind::AlreadyExists => {
+            ExtractError::PathCollision { path }
+        }
+        _ => ExtractError::filesystem("remove directory", path, source),
+    }
 }
 
 #[cfg(not(windows))]

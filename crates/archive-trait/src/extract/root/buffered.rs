@@ -11,7 +11,7 @@ use std::{
 
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
-use super::{FileOpenMode, directory_is_empty, metadata_is_link, remove_file_or_symlink};
+use super::{FileOpenMode, metadata_is_link, remove_directory_error, remove_file_or_symlink};
 use crate::ExtractError;
 
 /// Whether a buffered file may replace an existing destination leaf.
@@ -28,6 +28,7 @@ pub(super) enum BufferedFileReplacement {
 /// A failure while creating or replacing a validated buffered file.
 pub(super) enum BufferedFileError {
     Collision,
+    RemoveDirectory(io::Error),
     Filesystem {
         operation: &'static str,
         source: io::Error,
@@ -55,13 +56,12 @@ impl BufferedFileError {
         Self::Filesystem { operation, source }
     }
 
-    pub(super) fn into_extract<E>(self, path: &Path) -> ExtractError<E> {
+    pub(super) fn into_extract<E>(self, path: PathBuf) -> ExtractError<E> {
         match self {
-            Self::Collision => ExtractError::PathCollision {
-                path: path.to_owned(),
-            },
+            Self::Collision => ExtractError::PathCollision { path },
+            Self::RemoveDirectory(source) => remove_directory_error(path, source),
             Self::Filesystem { operation, source } => {
-                ExtractError::filesystem(operation, path.to_owned(), source)
+                ExtractError::filesystem(operation, path, source)
             }
         }
     }
@@ -143,14 +143,9 @@ fn remove_buffered_leaf(
     metadata: &Metadata,
 ) -> Result<(), BufferedFileError> {
     if metadata.is_dir() && !metadata_is_link(metadata) {
-        let is_empty = directory_is_empty(directory, path)
-            .map_err(|source| BufferedFileError::filesystem("inspect directory", source))?;
-        if !is_empty {
-            return Err(BufferedFileError::Collision);
-        }
         return directory
             .remove_dir(path)
-            .map_err(|source| BufferedFileError::filesystem("remove directory", source));
+            .map_err(BufferedFileError::RemoveDirectory);
     }
 
     remove_file_or_symlink(directory, path, metadata_is_link(metadata))
