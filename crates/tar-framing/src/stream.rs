@@ -171,6 +171,8 @@ impl HeaderFrame {
         global_records: Option<&GlobalPaxRecords>,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
+        // A local `linkpath` can supply a target or, if empty, suppress the global
+        // target for this member. `from_header` also checks the ustar `linkname`.
         let has_linkpath = matches!(
             PaxState::effective_record_from(local_records, global_records, &PaxKeyword::LinkPath),
             Some(PaxRecord::LinkPath(PaxValue::Value(_)))
