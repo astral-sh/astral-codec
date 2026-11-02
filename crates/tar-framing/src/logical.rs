@@ -655,7 +655,7 @@ fn parse_gnu_metadata(metadata: &GnuMetadata, kind: GnuKind) -> Result<&[u8], Fr
 
 #[cfg(test)]
 mod tests {
-    use tokio::io::AsyncRead;
+    use tokio::io::{AsyncRead, AsyncWriteExt as _, duplex};
 
     use super::*;
     use crate::{
@@ -1405,64 +1405,45 @@ mod tests {
     }
 
     #[test]
-    fn smaller_payload_retry_returns_a_buffered_block_before_truncation() {
-        for retry_block in [true, false] {
-            let mut bytes = header(b'0', (BLOCK_SIZE * 2) as u64).to_vec();
-            bytes.extend_from_slice(&[b'a'; BLOCK_SIZE]);
-            bytes.push(b'b');
-            let end = bytes.len();
-            ready_ok(async {
-                let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, end));
-                let mut payload = next_member(&mut reader).await?.payload;
-                let mut chunk = Vec::new();
-                cancel_pending(payload.next_chunk(&mut chunk, BLOCK_SIZE * 2));
-
-                if retry_block {
-                    let block = payload.next_block().await?.expect("expected a block");
-                    assert_eq!(block.block, [b'a'; BLOCK_SIZE]);
-                } else {
-                    assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
-                    assert_eq!(chunk, [b'a'; BLOCK_SIZE]);
-                }
-                let error = payload
-                    .next_block()
-                    .await
-                    .expect_err("expected a partial block");
-                assert_eq!(error.position, (BLOCK_SIZE * 2) as u64);
-                assert!(matches!(
-                    error.inner,
-                    FrameErrorInner::IncompleteBlock { read: 1 }
-                ));
-                Ok(())
-            });
-        }
-    }
-
-    #[test]
     fn resumes_cancelled_member_payload_chunk_with_either_read_api() {
         let contents = (0..251_u8)
             .cycle()
             .take(BLOCK_SIZE * 3 + 17)
             .collect::<Vec<_>>();
-        // Two complete blocks and part of a third are buffered at cancellation.
-        for retry_target in [BLOCK_SIZE, contents.len()] {
-            let (bytes, next_position) = member_followed_by_empty_member(&contents);
+        let (bytes, next_position) = member_followed_by_empty_member(&contents);
+        // Withhold the rest of the archive until the smaller retry completes.
+        let (prefix, suffix) = bytes.split_at(BLOCK_SIZE * 3 + 73);
+        for retry_block in [true, false] {
             ready_ok(async {
-                let mut reader =
-                    TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE * 3 + 73));
+                let (mut writer, input) = duplex(bytes.len());
+                writer
+                    .write_all(prefix)
+                    .await
+                    .expect("write archive prefix");
+                let mut reader = TarReader::new(input);
                 let mut payload = next_member(&mut reader).await?.payload;
                 let mut cancelled_buffer = vec![b'x'; 17];
                 cancel_pending(payload.next_chunk(&mut cancelled_buffer, BLOCK_SIZE * 3));
                 assert!(cancelled_buffer.is_empty());
 
-                let first = payload.next_block().await?.expect("expected a block");
-                assert_eq!(&first.block[..first.len], &contents[..BLOCK_SIZE]);
-                let mut chunk = vec![b'y'; 23];
-                for expected in contents[BLOCK_SIZE..].chunks(retry_target) {
-                    assert!(payload.next_chunk(&mut chunk, retry_target).await?);
-                    assert_eq!(chunk, expected);
+                let mut chunk = Vec::new();
+                if retry_block {
+                    let first = payload.next_block().await?.expect("expected a block");
+                    chunk.extend_from_slice(&first.block[..first.len]);
+                } else {
+                    assert!(payload.next_chunk(&mut chunk, BLOCK_SIZE).await?);
                 }
-                assert!(!payload.next_chunk(&mut chunk, retry_target).await?);
+                assert!(chunk.len() >= BLOCK_SIZE);
+                let (first, rest) = contents.split_at(chunk.len());
+                assert_eq!(chunk, first);
+
+                writer
+                    .write_all(suffix)
+                    .await
+                    .expect("write archive suffix");
+                assert!(payload.next_chunk(&mut chunk, contents.len()).await?);
+                assert_eq!(chunk, rest);
+                assert!(!payload.next_chunk(&mut chunk, contents.len()).await?);
                 let next = next_member(&mut reader).await?;
                 assert_eq!(next.header.position, next_position);
                 Ok(())

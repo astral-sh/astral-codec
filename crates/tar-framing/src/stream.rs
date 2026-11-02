@@ -76,7 +76,7 @@ use std::{
     ops::Range,
     pin::Pin,
     sync::Arc,
-    task::{Context, Poll},
+    task::{Context, Poll, ready},
 };
 
 use tokio::io::{AsyncRead, ReadBuf};
@@ -411,7 +411,6 @@ pub(super) struct PendingGnu {
 struct MemberChunk {
     buffer: Vec<u8>,
     start_position: u64,
-    physical_len: usize,
     meaningful_len: usize,
     state: Option<MemberChunkState>,
 }
@@ -586,8 +585,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
 
     async fn read_member_block_inner(&mut self) -> Result<(u64, Block, usize), FrameError> {
         if self.member_chunk.state.is_some() {
-            self.limit_pending_member_chunk(BLOCK_SIZE);
-            self.complete_member_chunk().await?;
+            self.complete_member_chunk(BLOCK_SIZE).await?;
             return self.take_member_block_from_chunk();
         }
         let remaining = match &self.state {
@@ -624,10 +622,8 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             if self.member_chunk.state.is_none() {
                 let result = self.start_member_chunk(buffer, target_len, prefix_len);
                 self.fail_on_error(result)?;
-            } else {
-                self.limit_pending_member_chunk(target_len);
             }
-            let result = self.complete_member_chunk().await;
+            let result = self.complete_member_chunk(target_len).await;
             self.fail_on_error(result)?;
             let result = self.take_member_chunk(buffer);
             prefix_len = self.fail_on_error(result)?;
@@ -677,15 +673,8 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                     "member payload chunk physical length",
                 )
             })?;
-        let meaningful_len = member_remaining.min(physical_len);
         let physical_len = usize::try_from(physical_len).map_err(|_| {
             FrameError::arithmetic_overflow(start_position, "member payload chunk physical length")
-        })?;
-        let meaningful_len = usize::try_from(meaningful_len).map_err(|_| {
-            FrameError::arithmetic_overflow(
-                start_position,
-                "member payload chunk meaningful length",
-            )
         })?;
 
         // Move the caller's reusable allocation into persistent storage before
@@ -702,8 +691,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             self.member_chunk.buffer[prefix_len..filled].copy_from_slice(&self.block[..block_len]);
         }
         self.member_chunk.start_position = start_position;
-        self.member_chunk.physical_len = physical_len;
-        self.member_chunk.meaningful_len = meaningful_len;
         self.member_chunk.state = Some(MemberChunkState::Reading {
             member_remaining,
             filled,
@@ -711,114 +698,75 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         Ok(())
     }
 
-    /// Lets a smaller retry finish without reading the rest of the cancelled chunk.
-    fn limit_pending_member_chunk(&mut self, target_len: usize) {
+    async fn complete_member_chunk(&mut self, target_len: usize) -> Result<(), FrameError> {
         let chunk = &mut self.member_chunk;
-        if let Some(MemberChunkState::Reading { filled, .. }) = &mut chunk.state
-            && target_len < chunk.meaningful_len
-        {
-            // Keep every complete block already read. The next read resumes any
-            // trailing partial block through the usual block buffer.
-            let requested_blocks = target_len.div_ceil(BLOCK_SIZE).max(1);
-            let buffered_blocks = *filled / BLOCK_SIZE;
-            let physical_len = requested_blocks.max(buffered_blocks) * BLOCK_SIZE;
-            if *filled > physical_len {
-                self.block_len = *filled - physical_len;
-                self.block[..self.block_len].copy_from_slice(&chunk.buffer[physical_len..*filled]);
-                *filled = physical_len;
-            }
-            chunk.physical_len = physical_len;
-            chunk.meaningful_len = chunk.meaningful_len.min(physical_len);
-        }
-    }
-
-    async fn complete_member_chunk(&mut self) -> Result<(), FrameError> {
-        loop {
-            let (member_remaining, filled) = match self.member_chunk.state {
-                Some(MemberChunkState::Reading {
-                    member_remaining,
-                    filled,
-                }) => (member_remaining, filled),
-                Some(MemberChunkState::Ready { .. }) => return Ok(()),
-                None => {
-                    return Err(FrameError::unexpected_order(
-                        self.position,
-                        "pending member payload chunk",
-                        "parser state without a pending chunk",
-                    ));
-                }
-            };
-            let start_position = self.member_chunk.start_position;
-            let physical_len = self.member_chunk.physical_len;
-            let meaningful_len = self.member_chunk.meaningful_len;
-            if filled == physical_len {
-                self.position =
-                    checked_position(start_position, physical_len).inspect_err(|_| {
-                        self.member_chunk.state = None;
-                    })?;
-                let remaining = member_remaining
-                    .checked_sub(meaningful_len as u64)
-                    .ok_or_else(|| {
-                        self.member_chunk.state = None;
-                        FrameError::arithmetic_overflow(
-                            start_position,
-                            "remaining member payload length",
-                        )
-                    })?;
-                self.state = member_payload_state(remaining);
-                self.member_chunk.state = Some(MemberChunkState::Ready { delivered: 0 });
-                return Ok(());
-            }
-
-            let read = match poll_fn(|context| {
-                let mut read_buffer =
-                    ReadBuf::new(&mut self.member_chunk.buffer[filled..physical_len]);
-                match Pin::new(&mut self.inner).poll_read(context, &mut read_buffer) {
-                    Poll::Pending => Poll::Pending,
-                    Poll::Ready(Ok(())) => Poll::Ready(Ok(read_buffer.filled().len())),
-                    Poll::Ready(Err(source)) => Poll::Ready(Err(source)),
-                }
-            })
-            .await
-            {
-                Ok(read) => read,
-                Err(source) => {
-                    self.member_chunk.state = None;
-                    let error_position = checked_position(start_position, filled)?;
-                    self.position = checked_position(start_position, filled - filled % BLOCK_SIZE)?;
-                    return Err(FrameError::at(
-                        error_position,
-                        FrameErrorInner::Io { source },
-                    ));
-                }
-            };
-            if read == 0 {
-                self.member_chunk.state = None;
-                let partial_len = filled % BLOCK_SIZE;
-                let completed_len = filled - partial_len;
-                self.position = checked_position(start_position, completed_len)?;
-                if partial_len != 0 {
-                    return Err(FrameError::at(
-                        self.position,
-                        FrameErrorInner::IncompleteBlock { read: partial_len },
-                    ));
-                }
-                let completed_len = u64::try_from(completed_len).map_err(|_| {
-                    FrameError::arithmetic_overflow(
-                        self.position,
-                        "completed member payload chunk length",
-                    )
-                })?;
-                return Err(FrameError::truncated_payload(
+        let (member_remaining, filled) = match &mut chunk.state {
+            Some(MemberChunkState::Reading {
+                member_remaining,
+                filled,
+            }) => (*member_remaining, filled),
+            Some(MemberChunkState::Ready { .. }) => return Ok(()),
+            None => {
+                return Err(FrameError::unexpected_order(
                     self.position,
-                    DataOwner::Member,
-                    member_remaining - member_remaining.min(completed_len),
+                    "pending member payload chunk",
+                    "parser state without a pending chunk",
                 ));
             }
-            if let Some(MemberChunkState::Reading { filled, .. }) = &mut self.member_chunk.state {
-                *filled += read;
+        };
+        let read_len = target_len
+            .clamp(BLOCK_SIZE, chunk.buffer.len())
+            .next_multiple_of(BLOCK_SIZE);
+        let result = poll_fn(|context| {
+            while *filled < read_len {
+                let mut buffer = ReadBuf::new(&mut chunk.buffer[*filled..read_len]);
+                ready!(Pin::new(&mut self.inner).poll_read(context, &mut buffer))?;
+                if buffer.filled().is_empty() {
+                    break;
+                }
+                *filled += buffer.filled().len();
             }
+            Poll::Ready(Ok(()))
+        })
+        .await;
+
+        let filled = *filled;
+        chunk.state = None;
+        let partial_len = filled % BLOCK_SIZE;
+        let physical_len = filled - partial_len;
+        self.position = checked_position(chunk.start_position, physical_len)?;
+        let meaningful_len = member_remaining.min(physical_len as u64);
+        let remaining = member_remaining - meaningful_len;
+        if let Err(source) = result {
+            return Err(FrameError::at(
+                checked_position(chunk.start_position, filled)?,
+                FrameErrorInner::Io { source },
+            ));
         }
+        if filled < read_len {
+            if partial_len != 0 {
+                return Err(FrameError::at(
+                    self.position,
+                    FrameErrorInner::IncompleteBlock { read: partial_len },
+                ));
+            }
+            return Err(FrameError::truncated_payload(
+                self.position,
+                DataOwner::Member,
+                remaining,
+            ));
+        }
+
+        // A cancelled read may have buffered part of the block after this request.
+        if partial_len != 0 {
+            self.block[..partial_len].copy_from_slice(&chunk.buffer[physical_len..filled]);
+            self.block_len = partial_len;
+        }
+        chunk.buffer.truncate(physical_len);
+        chunk.meaningful_len = meaningful_len as usize;
+        self.state = member_payload_state(remaining);
+        chunk.state = Some(MemberChunkState::Ready { delivered: 0 });
+        Ok(())
     }
 
     fn take_member_chunk(&mut self, buffer: &mut Vec<u8>) -> Result<usize, FrameError> {
@@ -852,7 +800,6 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             ));
         };
         let start_position = self.member_chunk.start_position;
-        let physical_len = self.member_chunk.physical_len;
         let total_meaningful_len = self.member_chunk.meaningful_len;
         let position = checked_position(start_position, delivered).inspect_err(|_| {
             self.member_chunk.state = None;
@@ -867,7 +814,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             })?
             .min(BLOCK_SIZE);
         let delivered = delivered + BLOCK_SIZE;
-        if delivered == physical_len {
+        if delivered == self.member_chunk.buffer.len() {
             self.member_chunk.state = None;
         } else {
             self.member_chunk.state = Some(MemberChunkState::Ready { delivered });
