@@ -24,6 +24,8 @@ General properties:
 - All asynchronous consumer-facing APIs should be cancellation safe. In other words,
   dropping a future produced by a direct-use API should _never_ result in state corruption that
   breaks our parsing or encoding properties.
+  If you drop an `Archive::extract_in` future, pending filesystem operations can still
+  modify the extraction root. Retry a cancelled extraction in a fresh directory.
 - All consumer-facing APIs should be deadlock safe.
 - Encoding should always produce a valid, unambiguous, pax-only tar.
 - By default, both encoding and decoding should remain linear in time and memory with respect
