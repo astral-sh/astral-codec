@@ -820,7 +820,7 @@ mod tests {
 
     #[test]
     fn keeps_borrowed_header_metadata_available_while_streaming_payload() {
-        let mut member_header = header(b'0', 1);
+        let mut member_header = header(b'1', 1);
         set_field(&mut member_header, NAME_RANGE, b"file");
         set_field(&mut member_header, PREFIX_RANGE, b"dir");
         set_field(&mut member_header, LINK_NAME_RANGE, b"target");
@@ -832,7 +832,8 @@ mod tests {
             append_block(&mut bytes, &member_header);
             append_payload(&mut bytes, b"x");
             append_terminator(&mut bytes);
-            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
+            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE))
+                .with_policy(StreamPolicy::default().allow_pax_hardlink_linkdata(true));
             let mut member = next_member(&mut reader).await?;
 
             assert!(member.payload.next_block().await?.is_some());
