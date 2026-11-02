@@ -480,7 +480,7 @@ impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
         };
         Ok(Some(PayloadBlock {
             position,
-            block,
+            block: *block,
             len,
         }))
     }
