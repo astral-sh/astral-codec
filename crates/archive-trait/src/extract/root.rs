@@ -259,6 +259,19 @@ enum TerminalKind {
     Dangling,
 }
 
+impl TerminalKind {
+    fn inspect(root: &Dir, path: &Path) -> io::Result<Self> {
+        match root.metadata(path) {
+            Ok(metadata) if metadata.is_dir() => Ok(Self::Directory),
+            Ok(_) => Ok(Self::NonDirectory),
+            Err(error) => match error.kind() {
+                io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => Ok(Self::Dangling),
+                _ => Err(error),
+            },
+        }
+    }
+}
+
 /// The result of resolving a target through the archive's symbolic-link graph.
 ///
 /// Resolution stops when it reaches either an entry whose provenance and kind
@@ -563,7 +576,7 @@ impl<E> ExtractionRoot<E> {
             links.push(index);
         }
 
-        for index in links {
+        for &index in &links {
             let (entry, parent, path, contents) = {
                 let link = &self.symlinks[index];
                 (
@@ -573,6 +586,18 @@ impl<E> ExtractionRoot<E> {
                     link.target.clone(),
                 )
             };
+            // A previously published link can alias a parent on disk. Keep
+            // relative targets anchored to the directory depth we validated.
+            if parent != ROOT_ENTRY {
+                let directory = self
+                    .with_root(
+                        "open symbolic-link parent",
+                        &path.parent(),
+                        open_real_directory,
+                    )
+                    .await?;
+                self.directory_handle = Some((parent, Arc::new(directory)));
+            }
             match self
                 .try_create_symlink(&path, parent, contents.clone())
                 .await?
@@ -606,6 +631,22 @@ impl<E> ExtractionRoot<E> {
                 .map_err(|source| {
                     ExtractError::filesystem("create symbolic link", path.to_path_buf(), source)
                 })?;
+        }
+
+        // A later link can make a previously missing target reachable through
+        // a filesystem alias. Resolve the published links from the root.
+        for index in links {
+            let link = &self.symlinks[index];
+            let kind = self
+                .with_root(
+                    "resolve extracted symbolic link",
+                    &link.path,
+                    TerminalKind::inspect,
+                )
+                .await?;
+            if kind == TerminalKind::Dangling && !policy.allow_missing_targets {
+                return Err(link.error("target does not exist"));
+            }
         }
         Ok(())
     }
@@ -925,13 +966,9 @@ impl<E> ExtractionRoot<E> {
             if path.as_os_str().is_empty() {
                 return Ok((TerminalKind::Directory, false));
             }
-            match directory.metadata(path) {
-                Ok(metadata) if metadata.is_dir() => return Ok((TerminalKind::Directory, false)),
-                Ok(_) => return Ok((TerminalKind::NonDirectory, false)),
-                Err(error) => match error.kind() {
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {}
-                    _ => return Err(error),
-                },
+            let kind = TerminalKind::inspect(directory, path)?;
+            if kind != TerminalKind::Dangling {
+                return Ok((kind, false));
             }
 
             // A dangling target can still pass through an ambient symlink.
@@ -1222,6 +1259,18 @@ fn metadata_is_link(metadata: &Metadata) -> bool {
 #[cfg(windows)]
 fn metadata_is_link(metadata: &Metadata) -> bool {
     metadata.file_attributes() & FILE_ATTRIBUTE_REPARSE_POINT != 0
+}
+
+/// Opens a directory beneath the root without traversing any symbolic links.
+fn open_real_directory(root: &Dir, path: &Path) -> io::Result<Dir> {
+    let mut directory = root.try_clone()?;
+    for component in path {
+        if metadata_is_link(&directory.symlink_metadata(component)?) {
+            return Err(io::Error::other("symbolic link in parent path"));
+        }
+        directory = directory.open_dir(component)?;
+    }
+    Ok(directory)
 }
 
 #[cfg(unix)]

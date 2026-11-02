@@ -761,14 +761,16 @@ async fn later_link_entries_replace_links_of_the_same_kind() {
 }
 
 #[cfg(unix)]
+fn is_case_insensitive(directory: &Path) -> bool {
+    std::fs::write(directory.join("case-fold-probe-a"), b"").expect("probe should be created");
+    directory.join("case-fold-probe-A").exists()
+}
+
+#[cfg(unix)]
 #[tokio::test]
 async fn case_folded_deferred_symlinks_honor_overwrite_policy() {
     let temp = tempdir().expect("temporary directory should be created");
-    let case_probe = temp.path().join("case-fold-probe-a");
-    std::fs::write(&case_probe, b"").expect("case-fold probe should be created");
-    let case_insensitive = temp.path().join("case-fold-probe-A").exists();
-    std::fs::remove_file(case_probe).expect("case-fold probe should be removed");
-    if !case_insensitive {
+    if !is_case_insensitive(temp.path()) {
         return;
     }
 
@@ -848,6 +850,43 @@ async fn case_folded_deferred_symlinks_honor_overwrite_policy() {
             .expect("later file should remain after the collision"),
         b"later"
     );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn case_folded_symlink_parents_and_targets_cannot_escape() {
+    let temp = tempdir().expect("temporary directory should be created");
+    if !is_case_insensitive(temp.path()) {
+        return;
+    }
+
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .ustar("nest/MAP", b'2', b"", ".", 0o644)
+        .ustar("nest/map/door", b'2', b"", "../..", 0o644)
+        .ustar("NEST/mAp", b'2', b"", "..", 0o644);
+    let destination = temp.path().join("aliased-parent");
+    assert!(matches!(
+        TarArchive::new(archive.finish().as_slice())
+            .extract_in(&destination, ExtractPolicy::default())
+            .await,
+        Err(ExtractError::Filesystem { path, .. }) if path == Path::new("nest/map")
+    ));
+    assert!(!destination.join("nest/door").is_symlink());
+
+    let destination = temp.path().join("aliased-target");
+    std::fs::create_dir(&destination).expect("destination should be created");
+    symlink_file("..", destination.join("up")).expect("ambient link should be created");
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .ustar("door", b'2', b"", "map/up", 0o644)
+        .ustar("MAP", b'2', b"", ".", 0o644);
+    assert!(matches!(
+        TarArchive::new(archive.finish().as_slice())
+            .extract_in(&destination, ExtractPolicy::default())
+            .await,
+        Err(ExtractError::Filesystem { path, .. }) if path == Path::new("door")
+    ));
 }
 
 #[tokio::test]
