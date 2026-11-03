@@ -16,8 +16,8 @@ license = "MIT OR Apache-2.0"
 version = "0.0.15"
 
 [workspace.dependencies]
-archive-trait = { path = "crates/archive-trait", version = "0.0.15" }
-tar-codec = { path = "crates/tar-codec", version = "0.0.15" }
+archive-trait = { path = "crates/archive-trait", version = "0.0.15", default-features = false }
+tar-codec = { path = "crates/tar-codec", version = "0.0.15", default-features = false }
 tar-framing = { path = "crates/tar-framing", version = "0.0.15" }
 
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
