@@ -29,6 +29,10 @@ pub use builder::{
 pub use name::{NameValidator, default_name_validator};
 
 /// Common metadata for one archive member.
+///
+/// `M` is the format-specific metadata supplied by the owning [`Archive`]. It
+/// defaults to `()`, so helpers that accept members should stay generic over
+/// `M` rather than naming `MemberMetadata` without a type argument.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct MemberMetadata<M = ()> {
     /// The archive-relative member path before extraction normalization.
@@ -51,6 +55,10 @@ pub enum SpecialKind {
 }
 
 /// One format-neutral archive member.
+///
+/// `M` is this member's format-specific metadata and defaults to `()`. Helpers
+/// that accept members from more than one archive format should be generic over
+/// `M`, since `Member<P>` only accepts members without format metadata.
 #[derive(Debug)]
 pub enum Member<P, M = ()> {
     /// A regular file with a streaming payload.

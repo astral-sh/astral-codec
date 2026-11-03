@@ -274,10 +274,12 @@ impl<'global> PaxState<'global> {
             .into_iter()
             .flat_map(|global| global.records.as_slice());
         std::iter::from_fn(move || {
-            local.find(|record| seen.insert(record.keyword())).or_else(|| {
-                // Global records are already unique; only local overrides can hide them.
-                global.find(|record| !seen.contains(&record.keyword()))
-            })
+            local
+                .find(|record| seen.insert(record.keyword()))
+                .or_else(|| {
+                    // Global records are already unique; only local overrides can hide them.
+                    global.find(|record| !seen.contains(&record.keyword()))
+                })
         })
     }
 
