@@ -31,8 +31,8 @@ General properties:
 - All consumer-facing APIs should be deadlock safe.
 - Encoding should always produce a valid, unambiguous, pax-only tar.
 - By default, both encoding and decoding should remain linear in time and memory with respect
-  to their input. Enabling non-default policies during encoding and decoding may change this
-  property.
+  to their input. Amplification caused solely by how the caller uses the API is out of scope.
+  Enabling non-default policies during encoding and decoding may change this property.
 
 The format-writing methods on `ArchiveBuilder` are implementation hooks, not
 direct-use APIs. Archive construction must go through `Builder` for policy,
