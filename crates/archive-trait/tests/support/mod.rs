@@ -89,6 +89,7 @@ pub mod entry {
         MemberMetadata {
             path: path.to_owned(),
             position: 0,
+            format: (),
         }
     }
 }
@@ -165,6 +166,7 @@ impl MemberPayload for TestPayload {
 
 impl Archive for TestArchive {
     type Error = TestError;
+    type Metadata<'a> = ();
     type Payload<'a> = TestPayload;
 
     async fn next_member<'a>(
