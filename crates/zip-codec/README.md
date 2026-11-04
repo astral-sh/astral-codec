@@ -46,7 +46,8 @@ compression method. Empty files are always stored.
 `ZipArchive::entries` exposes indexed members; call `directory()` on an entry
 to access its central-directory metadata. `ZipArchive::member(index)` selects
 an entry. Sequential iteration resumes after the selected entry.
-`open_with_limits` and `ZipEncoder::with_limits` configure resource budgets.
+Use `with_limits` on `ZipArchive::builder(reader)` or `ZipEncoder` to set
+resource budgets.
 
 Opening validates the directory. Selecting a member reconciles its local
 header, extras, and descriptor before exposing it. `validate_all().await` checks
@@ -74,7 +75,11 @@ regardless of the member's UTF-8 flag.
 The member adapter supports regular files, directories, symbolic links, and
 the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
 Volume labels, sockets, and conflicting file-type attributes cannot be projected.
-Each member header may contain only the [supported extra fields](APPNOTE.md#member-extra-fields).
+
+The reader accepts only the ZIP64 member extra field by default. To opt in to
+the [other supported fields](APPNOTE.md#member-extra-fields), call
+`.with_policy(ExtraFieldPolicy::AllowListed)` on the archive builder before
+`.open().await`.
 
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
 the encoder seeks back to fill in the local header's CRC and sizes. No data

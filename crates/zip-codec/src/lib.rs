@@ -17,9 +17,9 @@ pub use archive_trait::{
     ExtractPolicyViolation, FilePayload, LentPayload, Member, MemberMetadata, MemberPayload,
     Members, NameValidator, SpecialKind, TraversalError, builder, default_name_validator, extract,
 };
-pub use decode::{DecodeError, ZipArchive, ZipMemberPayload};
+pub use decode::{DecodeError, ZipArchive, ZipArchiveBuilder, ZipMemberPayload};
 pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, Entry, EntryKind, HostSystem,
-    IndexedEntry, LimitExceeded, Limits,
+    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, Entry, EntryKind, ExtraFieldPolicy,
+    HostSystem, IndexedEntry, LimitExceeded, Limits,
 };

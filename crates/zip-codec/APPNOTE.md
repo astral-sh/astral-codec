@@ -26,6 +26,9 @@ record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
 
 ## Member extra fields
 
+ZIP64 (`0x0001`) is accepted by default. The other fields in the table require
+`ExtraFieldPolicy::AllowListed`.
+
 Section 4.6.2 permits skipping third-party fields by length. We reject any ID
 outside the table in either member header. Identical copies can still change
 how another reader interprets a member: [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
