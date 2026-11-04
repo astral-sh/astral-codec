@@ -124,20 +124,8 @@ impl CompletedMember<'_> {
     pub fn local_header(&self) -> Vec<u8> {
         let mut bytes = Vec::with_capacity(self.header.local_header_size());
         push32(&mut bytes, signature::LOCAL);
-        bytes.extend_from_slice(&self.common().to_bytes());
-        push16(&mut bytes, self.header.path.len() as u16);
-        push16(
-            &mut bytes,
-            (extra::HEADER_SIZE + extra::ZIP64_LOCAL_SIZE) as u16,
-        );
-
-        bytes.extend_from_slice(self.header.path.as_bytes());
-
-        push16(&mut bytes, u16::from(ExtraHeaderId::Zip64));
-        push16(&mut bytes, extra::ZIP64_LOCAL_SIZE as u16);
-        push64(&mut bytes, self.uncompressed);
-        push64(&mut bytes, self.compressed);
-
+        self.append_common(&mut bytes, extra::ZIP64_LOCAL_SIZE);
+        self.append_name_and_sizes(&mut bytes, extra::ZIP64_LOCAL_SIZE);
         bytes
     }
 
@@ -153,12 +141,7 @@ impl CompletedMember<'_> {
         bytes.reserve(self.header.central_header_size());
         push32(bytes, signature::CENTRAL);
         push16(bytes, VERSION_MADE_BY);
-        bytes.extend_from_slice(&self.common().to_bytes());
-        push16(bytes, self.header.path.len() as u16);
-        push16(
-            bytes,
-            (extra::HEADER_SIZE + extra::ZIP64_CENTRAL_SIZE) as u16,
-        );
+        self.append_common(bytes, extra::ZIP64_CENTRAL_SIZE);
         push16(bytes, 0); // Comment length.
         push16(bytes, 0); // Starting disk.
         push16(bytes, 0); // Internal attributes.
@@ -181,18 +164,20 @@ impl CompletedMember<'_> {
         );
         push32(bytes, u32::MAX);
 
-        bytes.extend_from_slice(self.header.path.as_bytes());
-
-        push16(bytes, u16::from(ExtraHeaderId::Zip64));
-        push16(bytes, extra::ZIP64_CENTRAL_SIZE as u16);
-        push64(bytes, self.uncompressed);
-        push64(bytes, self.compressed);
+        self.append_name_and_sizes(bytes, extra::ZIP64_CENTRAL_SIZE);
         push64(bytes, self.offset);
     }
 
-    /// Returns a [`Common`] for this completed member's common metadata.
-    fn common(&self) -> Common {
-        Common {
+    fn append_name_and_sizes(&self, bytes: &mut Vec<u8>, zip64_size: usize) {
+        bytes.extend_from_slice(self.header.path.as_bytes());
+        push16(bytes, u16::from(ExtraHeaderId::Zip64));
+        push16(bytes, zip64_size as u16);
+        push64(bytes, self.uncompressed);
+        push64(bytes, self.compressed);
+    }
+
+    fn append_common(&self, bytes: &mut Vec<u8>, zip64_size: usize) {
+        let common = Common {
             version: version::ZIP64,
             flags: GeneralPurposeFlags::UTF8,
             method: self.header.method,
@@ -201,7 +186,10 @@ impl CompletedMember<'_> {
             crc: self.crc,
             compressed: SizeField::Zip64,
             uncompressed: SizeField::Zip64,
-        }
+        };
+        bytes.extend_from_slice(&common.to_bytes());
+        push16(bytes, self.header.path.len() as u16);
+        push16(bytes, (extra::HEADER_SIZE + zip64_size) as u16);
     }
 }
 
