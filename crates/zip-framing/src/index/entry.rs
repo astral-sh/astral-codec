@@ -260,11 +260,13 @@ impl IndexedEntry {
     }
 
     #[inline]
-    pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Self {
-        Self {
+    pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
+        let mut entry = Self {
             directory,
             boundary,
-        }
+        };
+        entry.set_boundary(boundary)?;
+        Ok(entry)
     }
 
     #[inline]

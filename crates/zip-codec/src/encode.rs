@@ -1,9 +1,6 @@
 //! Streaming ZIP64 encoding for the format-neutral archive builder.
 
-use std::{
-    borrow::Cow,
-    io::{self, SeekFrom},
-};
+use std::io::{self, SeekFrom};
 
 use archive_trait::{
     ArchiveBuilder, BuildError, EntryMetadata, FilePayload, builder::BuildFailure,
@@ -13,7 +10,7 @@ use flate2::{Compress, Compression, FlushCompress, Status};
 use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
-    Budget, BudgetError, CompressionMethod, LimitExceeded, Limits, member_destination,
+    Budget, BudgetError, CompressionMethod, LimitExceeded, Limits,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -296,8 +293,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
 impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type Error = EncodeError;
     type FileOptions = ZipFileOptions;
-
-    const COLLISION_KEY: fn(&str) -> Cow<'_, str> = member_destination;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         let (end, position) = self.prepare_end().map_err(BuildFailure::recoverable)?;

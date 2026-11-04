@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem, str};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem, str};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -6,7 +6,6 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use crate::{
     Budget, Error, Limits, add,
     constants::{extra, signature, size, version},
-    destination::check_destinations,
     invalid,
     record::{RecordReader, array_at},
 };
@@ -140,13 +139,12 @@ impl Index {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
+            // The last entry already has the directory offset as its boundary.
             // Keep the earliest directory-order error even though assignment
             // proceeds in physical order.
             let mut first_error = None;
-            for (ordinal, &index) in order.iter().enumerate() {
-                let boundary = order
-                    .get(ordinal + 1)
-                    .map_or(end.offset, |&next| entries[next].directory().position());
+            for (&index, &next) in order.iter().zip(order.iter().skip(1)) {
+                let boundary = entries[next].directory().position();
                 if let Err(error) = entries[index].set_boundary(boundary)
                     && first_error.as_ref().is_none_or(|(first, _)| index < *first)
                 {
@@ -156,6 +154,8 @@ impl Index {
             if let Some((_, error)) = first_error {
                 return Err(error);
             }
+
+            check_destination_order(&entries).await?;
         }
 
         Ok(Self {
@@ -397,7 +397,7 @@ impl CentralDirectory {
         while entries.len() < self.count as usize {
             match CentralDirectoryEntry::parse(bytes, position, budget)? {
                 BufferedEntry::Complete(entry, length) => {
-                    entries.push(IndexedEntry::new(entry, self.offset));
+                    entries.push(IndexedEntry::new(entry, self.offset)?);
                     position += length as u64;
                     bytes = &bytes[length..];
                 }
@@ -417,9 +417,45 @@ impl CentralDirectory {
             ));
         }
 
-        check_destinations(&entries).await?;
         Ok(entries)
     }
+}
+
+/// Readers may visit members in directory or physical order. Both must visit
+/// repeated destinations in the same relative order.
+async fn check_destination_order(entries: &[IndexedEntry]) -> Result<(), Error> {
+    let mut last_offsets = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let directory = entry.directory();
+        let offset = directory.position();
+        if last_offsets
+            .insert(member_destination(directory.path()), offset)
+            .is_some_and(|previous| previous > offset)
+        {
+            return Err(invalid(
+                offset,
+                "duplicate destination order disagrees with local headers",
+            ));
+        }
+        tokio::task::consume_budget().await;
+    }
+    Ok(())
+}
+
+/// Ignore empty and `.` components and compare `..` literally.
+fn member_destination(path: &str) -> Cow<'_, str> {
+    let path = path.trim_end_matches('/');
+    if !path.split('/').any(|part| matches!(part, "" | ".")) {
+        return Cow::Borrowed(path);
+    }
+    let mut destination = String::with_capacity(path.len());
+    for part in path.split('/').filter(|part| !matches!(*part, "" | ".")) {
+        if !destination.is_empty() {
+            destination.push('/');
+        }
+        destination.push_str(part);
+    }
+    Cow::Owned(destination)
 }
 
 /// Scans the whole tail: a second EOCD reaching EOF is ambiguous even when the

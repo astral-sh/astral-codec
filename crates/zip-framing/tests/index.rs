@@ -1768,72 +1768,58 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 }
 
 #[tokio::test]
-async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
-    for (names, duplicate) in [
-        (&["d/config", "d/config"][..], true),
-        (&["./d/config", "d/./config"], true),
-        (&["d/config", "d//config"], true),
-        (&["d/config/", "d/config"], true),
-        (&["d/config/./", "e/config", "d/config"], true),
-        (&["d/config", "d/other", "d/config"], true),
-        (&["d/config", "e/config", "d/other"], false),
-        (&["d/./", "d/file"], false),
-        (&["d/.config", "d/config"], false),
-        (&["d/Config", "d/config"], false),
-        (&["d/../config", "config"], false),
-        // These spellings have the same CRC-32, both as parents and as leaves.
-        (&["plumless/config", "buckeroo/config"], false),
-        (&["d/buckeroo", "d/plumless"], false),
-        (&["d/buckeroo", "d/plumless", "d/./buckeroo"], true),
+async fn duplicate_destinations_must_preserve_local_order() -> TestResult {
+    let mut local = Vec::new();
+    let mut members = Vec::new();
+    for path in [
+        "d/config",
+        "./d//./config/",
+        "d/config",
+        "d/Config",
+        "d/../d/config",
     ] {
-        let mut bytes = Vec::new();
-        let mut headers = Vec::new();
-        for &path in names {
-            let kind = if path.ends_with('/') {
-                WriteEntryKind::Directory
-            } else {
-                WriteEntryKind::File { executable: false }
-            };
-            let member = PendingMember::new(path, CompressionMethod::Stored, kind)?.finish(
-                0,
-                0,
-                0,
-                bytes.len() as u64,
-            )?;
-            bytes.extend(member.local_header());
-            headers.push(member.central_header());
-        }
-        // Directory order is the reverse of physical order.
-        let offset = bytes.len() as u64;
-        for header in headers.into_iter().rev() {
-            bytes.extend(header);
+        let kind = if path.ends_with('/') {
+            WriteEntryKind::Directory
+        } else {
+            WriteEntryKind::File { executable: false }
+        };
+        let offset = local.len() as u64;
+        let member =
+            PendingMember::new(path, CompressionMethod::Stored, kind)?.finish(0, 0, 0, offset)?;
+        local.extend(member.local_header());
+        members.push((offset, member.central_header()));
+    }
+
+    // The first three members share a destination. The last two can move freely.
+    for (order, backwards) in [
+        ([0, 1, 2, 3, 4], None),
+        ([4, 3, 0, 1, 2], None),
+        ([0, 2, 3, 4, 1], Some(1)),
+        ([2, 0, 1, 3, 4], Some(0)),
+    ] {
+        let mut bytes = local.clone();
+        for index in order {
+            bytes.extend_from_slice(&members[index].1);
         }
         bytes.extend(end_records(
-            names.len() as u64,
-            offset,
-            bytes.len() as u64 - offset,
+            members.len() as u64,
+            local.len() as u64,
+            (bytes.len() - local.len()) as u64,
         )?);
 
         let mut source = Cursor::new(bytes);
         let result = Index::read(&mut source, Limits::default()).await;
-        if duplicate {
+        if let Some(index) = backwards {
             assert!(
                 matches!(
                     result,
-                    Err(FrameError::Invalid {
-                        position: 0,
-                        reason: "duplicate member destination"
-                    })
+                    Err(FrameError::Invalid { position, reason: "duplicate destination order disagrees with local headers" })
+                        if position == members[index].0
                 ),
-                "{names:?}"
+                "{order:?}"
             );
         } else {
-            let mut index = result?;
-            index.validate_all(&mut source).await?;
-            assert_eq!(
-                index.entries()[names.len() - 1].directory().path(),
-                names[0]
-            );
+            result?.validate_all(&mut source).await?;
         }
     }
     Ok(())

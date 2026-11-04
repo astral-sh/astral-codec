@@ -72,18 +72,18 @@ padding outside records, trailing bytes, and ambiguous end records are also
 rejected.
 
 Opening an archive validates the end records and central directory, including
-bounds derivable from the declared local offsets and sizes. Member destinations
-must be unique across the directory: `a/b`, `a//b`, `a/./b`, and `a/b/` all
-identify the same destination. This comparison is case-sensitive and does not
-apply filesystem-specific name rules.
-
-Local records are checked only when selected. Before exposing a member, its local
-header, central header, ZIP64 fields, extras, and descriptor must agree, and its
-physical extent must exactly fill its assigned span. Checked local metadata is cached.
+bounds derivable from the declared local offsets and sizes. Local records are
+checked only when selected. Before exposing a member, its local header, central
+header, ZIP64 fields, extras, and descriptor must agree, and its physical extent
+must exactly fill its assigned span. Checked local metadata is cached.
 `ZipArchive::validate_all` checks every member's metadata and file type, including
 unselected members, establishing complete nonoverlapping record coverage. Without
 that call or traversal of every member, malformed unselected local records and
 some gaps or overlaps can remain undiscovered.
+
+Repeated member destinations are allowed when the central directory lists them
+in local-header order. This comparison is case-sensitive and ignores empty and
+`.` components, so `d/config` and `d/./config/` name the same destination.
 
 Each member extra field must have a [supported identifier](crates/zip-codec/APPNOTE.md#member-extra-fields)
 and fit within its header. The reader rejects duplicate identifiers, conflicting
