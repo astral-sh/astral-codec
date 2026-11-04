@@ -84,7 +84,8 @@ only executable intent. DEFLATE and CRC use `flate2` with its pure-Rust `zlib-rs
 backend. `CompressionMethod` is non-exhaustive so further methods can be added
 without redesigning the APIs.
 
-See [SECURITY.md](../../SECURITY.md) for resource bounds and validation guarantees.
+See [SECURITY.md](../../SECURITY.md) for resource bounds and validation guarantees,
+and [APPNOTE.md](APPNOTE.md) for writer conventions and open policy questions.
 
 For HTTP range sources, metadata reads use bounded read-ahead. Local records
 are fetched only when selected. To prefetch a whole selected member, obtain its
