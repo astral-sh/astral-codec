@@ -24,13 +24,29 @@ when the descriptor agrees with the central directory and the directory's
 entry count, size, and offset fit in the classic record. A sentinel in the end
 record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
 
-**Timestamps and ownership.** macOS `ditto` writes two timestamps in both
-copies of `0x5855` and a UID/GID pair in the local header. Info-ZIP `zip`
-writes timestamps in `0x5455` and ownership in `0x7875`. We ignore these
-values when extracting. For `0x7855`, the local field holds a 16-bit UID/GID
-pair and the central field is empty. Central `0x5455` and `0x7855` fields
-require local copies. We reject either alongside `0x5855`.
-[Info-ZIP field layouts][infozip]
+## Member extra fields
+
+Section 4.6.2 permits skipping third-party fields by length. We reject any ID
+outside the table in either member header. Identical copies can still change
+how another reader interprets a member: [libarchive's `xl` field](https://github.com/libarchive/libarchive/blob/v3.7.4/libarchive/archive_read_support_format_zip.c#L676)
+can mark a regular file as a symlink, and ZipIt `0x2605` can supply another name
+and mark the payload as MacBinary (§4.6.4).
+
+| ID | Field | What we check |
+| --- | --- | --- |
+| `0x0001` | ZIP64 | Sizes, offsets, and disk numbers correspond to sentinels in the header (§4.5.3). |
+| `0x000d` | PKWARE UNIX | The field has its fixed prefix, copies agree, and any file-type data matches the member kind (§4.5.7). |
+| `0x6375`, `0x7075` | Unicode comment and path | The CRC and UTF-8 text agree with the ordinary comment or filename (§§4.6.8–9). |
+| `0x5455` | Info-ZIP extended timestamps | Flags account for the timestamps; a central copy must agree with the local flags and modification time, if present. |
+| `0x5855` | Original Info-ZIP UNIX | Each copy carries two timestamps. They must agree across headers; the local field may also carry a 16-bit UID and GID. |
+| `0x7855` | Info-ZIP 16-bit ownership | The local field carries a UID and GID; an empty central marker requires a local copy. |
+| `0x7875` | Info-ZIP variable-width ownership | Version 1 carries a UID and GID, each with a nonzero byte length. The two values must fill the field and copies must agree. |
+
+macOS `ditto` writes `0x5855`; Info-ZIP `zip` writes `0x5455` and `0x7875` together.
+We validate these [Info-ZIP layouts](https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt)
+without applying timestamps or ownership. We reject `0x5855` alongside any
+newer Info-ZIP timestamp or ownership field, and reject `0x7855` alongside
+`0x7875`, rather than choosing which copy takes precedence.
 
 ## Open policy questions
 
@@ -48,13 +64,5 @@ lengths as part of the file contents.
 without ZIP64. For ordinary stored files, Python and `ditto` declare 2.0,
 and Info-ZIP `zip` declares 1.0 even with extra fields (§4.4.28).
 
-**Skip unknown extra fields?** APPNOTE permits skipping fields by length
-(§4.6.2). We accept unknown IDs in either header and require matching bytes
-when both carry the field. ZipIt's `0x2605` can supply another filename and
-mark the payload as MacBinary (§4.6.4).
-An allowlist would rule that out. It would need to include Info-ZIP's
-`0x7875` ownership field to keep reading archives written by `zip`.
-
 [appnote]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
-[infozip]: https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt
 [is-dir]: https://docs.python.org/3.14/library/zipfile.html#zipfile.ZipInfo.is_dir
