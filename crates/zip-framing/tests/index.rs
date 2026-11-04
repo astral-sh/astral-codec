@@ -1784,6 +1784,7 @@ async fn requires_unique_destinations_in_the_central_directory() -> TestResult {
         // These spellings have the same CRC-32, both as parents and as leaves.
         (&["plumless/config", "buckeroo/config"], false),
         (&["d/buckeroo", "d/plumless"], false),
+        (&["d/buckeroo", "d/plumless", "d/./buckeroo"], true),
     ] {
         let mut bytes = Vec::new();
         let mut headers = Vec::new();

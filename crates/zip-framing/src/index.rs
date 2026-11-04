@@ -1,4 +1,4 @@
-use std::{cell::RefCell, collections::HashSet, mem, str};
+use std::{cell::RefCell, mem, str};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -6,13 +6,14 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use crate::{
     Budget, Error, Limits, add,
     constants::{extra, signature, size, version},
-    invalid, member_destination,
+    destination::check_destinations,
+    invalid,
     record::{RecordReader, array_at},
 };
 
 mod entry;
 
-use entry::ResolvedMember;
+use entry::{BufferedEntry, ResolvedMember};
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
 thread_local! {
@@ -139,12 +140,13 @@ impl Index {
                 return Err(invalid(0, "unaccounted bytes before the first member"));
             }
 
-            // The last entry already has the directory offset as its boundary.
             // Keep the earliest directory-order error even though assignment
             // proceeds in physical order.
             let mut first_error = None;
-            for (&index, &next) in order.iter().zip(order.iter().skip(1)) {
-                let boundary = entries[next].directory().position();
+            for (ordinal, &index) in order.iter().enumerate() {
+                let boundary = order
+                    .get(ordinal + 1)
+                    .map_or(end.offset, |&next| entries[next].directory().position());
                 if let Err(error) = entries[index].set_boundary(boundary)
                     && first_error.as_ref().is_none_or(|(first, _)| index < *first)
                 {
@@ -391,12 +393,21 @@ impl CentralDirectory {
             }
         }
 
-        for _ in 0..self.count {
-            let (entry, next) = CentralDirectoryEntry::read(reader, position, end, budget).await?;
-            entries.push(IndexedEntry::new(entry, self.offset)?);
-            position = next;
-
-            tokio::task::consume_budget().await;
+        let mut bytes = reader.buffered(position, end);
+        while entries.len() < self.count as usize {
+            match CentralDirectoryEntry::parse(bytes, position, budget)? {
+                BufferedEntry::Complete(entry, length) => {
+                    entries.push(IndexedEntry::new(entry, self.offset));
+                    position += length as u64;
+                    bytes = &bytes[length..];
+                }
+                BufferedEntry::Incomplete(needed) => {
+                    // Yield between bounded read-ahead windows.
+                    tokio::task::yield_now().await;
+                    reader.read_slice(position, needed, end).await?;
+                    bytes = reader.buffered(position, end);
+                }
+            }
         }
 
         if position != end {
@@ -406,21 +417,7 @@ impl CentralDirectory {
             ));
         }
 
-        // Directory order may differ from local order. Two members with the
-        // same destination would give those orders different overwrite semantics.
-        if entries.len() > 1 {
-            let mut destinations = HashSet::with_capacity(entries.len());
-            for entry in &entries {
-                let directory = entry.directory();
-                if !destinations.insert(member_destination(directory.path())) {
-                    return Err(invalid(
-                        directory.position(),
-                        "duplicate member destination",
-                    ));
-                }
-                tokio::task::consume_budget().await;
-            }
-        }
+        check_destinations(&entries).await?;
         Ok(entries)
     }
 }
