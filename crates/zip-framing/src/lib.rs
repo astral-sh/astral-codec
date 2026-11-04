@@ -29,6 +29,7 @@ mod host;
 mod index;
 mod kind;
 mod record;
+mod wire;
 pub mod write;
 
 use std::io;
