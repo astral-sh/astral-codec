@@ -8,7 +8,9 @@
 **Symlink targets.** Info-ZIP, libarchive, and our encoder put the target in
 the payload. APPNOTE puts it in the PKWARE UNIX extra field (`0x000d`, §4.5.7).
 We accept either form for Unix and Darwin entries whose mode marks them as
-symlinks. If both carry a target, the bytes must match.
+symlinks. If the UNIX field is present, it must contain a target. A target
+in the payload must agree with it. We reject UNIX targets on regular or
+untyped files because they can also denote hard links.
 
 **Empty files and directories.** Python can write a two-byte DEFLATE stream
 for either, though §4.3.8 calls for zero bytes of file data. We accept the
