@@ -1,5 +1,6 @@
 use crate::{
     CentralDirectoryEntry, Error, HostSystem, constants::version, invalid, record::array_at,
+    wire::wire_enum,
 };
 
 /// A ZIP member's kind, determined from its reconciled metadata.
@@ -50,7 +51,7 @@ impl EntryKind {
     ) -> Result<Self, Error> {
         let position = directory.position();
         let file_type = match (
-            UnixFileType::from(attributes.unix_mode),
+            UnixFileType::from_mode(attributes.unix_mode),
             directory.path().ends_with('/') || attributes.dos_directory,
         ) {
             (UnixFileType::Unspecified | UnixFileType::Directory, true) => UnixFileType::Directory,
@@ -157,55 +158,25 @@ fn parse_link_target(data: Vec<u8>, position: u64) -> Result<String, Error> {
     Ok(target)
 }
 
-/// The file-type bits of a UNIX mode, excluding permissions.
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-pub(crate) enum UnixFileType {
-    Unspecified,
-    Regular,
-    Directory,
-    SymbolicLink,
-    CharacterDevice,
-    BlockDevice,
-    Fifo,
-    Socket,
-    Unknown(u16),
-}
-
-impl UnixFileType {
-    /// The top 4 bits of a UNIX file mode, indicating the file type.
-    /// This is equivalent extracting the `S_IFMT` masked bits from a `st_mode`.
-    const TYPE_MASK: u16 = 0o170000;
-}
-
-impl From<u16> for UnixFileType {
-    fn from(mode: u16) -> Self {
-        match mode & Self::TYPE_MASK {
-            0 => Self::Unspecified,
-            0o100000 => Self::Regular,
-            0o040000 => Self::Directory,
-            0o120000 => Self::SymbolicLink,
-            0o020000 => Self::CharacterDevice,
-            0o060000 => Self::BlockDevice,
-            0o010000 => Self::Fifo,
-            0o140000 => Self::Socket,
-            mode => Self::Unknown(mode),
-        }
+wire_enum! {
+    /// The file type after masking out the permission bits.
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub(crate) enum UnixFileType(u16) {
+        Unspecified = 0,
+        Regular = 0o100000,
+        Directory = 0o040000,
+        SymbolicLink = 0o120000,
+        CharacterDevice = 0o020000,
+        BlockDevice = 0o060000,
+        Fifo = 0o010000,
+        Socket = 0o140000,
     }
 }
 
-impl From<UnixFileType> for u16 {
-    fn from(file_type: UnixFileType) -> Self {
-        match file_type {
-            UnixFileType::Unspecified => 0,
-            UnixFileType::Regular => 0o100000,
-            UnixFileType::Directory => 0o040000,
-            UnixFileType::SymbolicLink => 0o120000,
-            UnixFileType::CharacterDevice => 0o020000,
-            UnixFileType::BlockDevice => 0o060000,
-            UnixFileType::Fifo => 0o010000,
-            UnixFileType::Socket => 0o140000,
-            UnixFileType::Unknown(mode) => mode,
-        }
+impl UnixFileType {
+    fn from_mode(mode: u16) -> Self {
+        // S_IFMT selects the file type, excluding permissions.
+        Self::from(mode & 0o170000)
     }
 }
 
