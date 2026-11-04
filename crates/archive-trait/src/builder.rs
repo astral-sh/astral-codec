@@ -114,6 +114,28 @@ impl BuilderState {
         Ok(())
     }
 
+    fn prepare_entry<'a, E>(
+        &self,
+        path: &'a impl AsRef<Path>,
+        entry: ArchivedEntry,
+    ) -> Result<(&'a str, EntryReservation), BuildError<E>> {
+        self.ensure_active()?;
+        let archive_path = path.as_ref();
+        let Some(path) = archive_path.to_str() else {
+            return Err(BuildError::InvalidArchivePath {
+                path: archive_path.to_path_buf(),
+                reason: "path is not valid UTF-8",
+            });
+        };
+        if !self.policy.name_validation.accepts(path) {
+            return Err(BuildError::NameRejected {
+                context: "member path",
+                value: path.to_owned(),
+            });
+        }
+        Ok((path, self.entries.preflight_entry(path, entry)?))
+    }
+
     // Cancellation can leave partial output. Keep the builder poisoned until
     // the write returns and we know whether it is safe to continue.
     fn begin_write(&mut self) {
@@ -430,27 +452,9 @@ impl<B: ArchiveBuilder> Builder<B> {
     where
         P: AsRef<Path>,
     {
-        self.state.ensure_active()?;
-
-        let archive_path = path.as_ref();
-        let Some(path) = archive_path.to_str() else {
-            return Err(BuildError::InvalidArchivePath {
-                path: archive_path.to_path_buf(),
-                reason: "path is not valid UTF-8",
-            });
-        };
-        if !self.state.policy.name_validation.accepts(path) {
-            return Err(BuildError::NameRejected {
-                context: "member path",
-                value: path.to_owned(),
-            });
-        }
-
-        let path = path.to_owned();
-        let reservation = self
+        let (path, reservation) = self
             .state
-            .entries
-            .preflight_entry(&path, ArchivedEntry::NonDirectory)?;
+            .prepare_entry(&path, ArchivedEntry::NonDirectory)?;
         let mut payload = payload.into();
         if payload.started {
             return Err(BuildError::FilePayloadAlreadyRead);
@@ -461,12 +465,12 @@ impl<B: ArchiveBuilder> Builder<B> {
         self.state.begin_write();
         let result = self
             .backend
-            .write_file_member(&path, &mut payload, options)
+            .write_file_member(path, &mut payload, options)
             .await;
         payload.swap_buffer(&mut self.state.source_buffer);
         self.state.complete_write(result, false)?;
 
-        self.state.entries.commit_entry(&path, reservation);
+        self.state.entries.commit_entry(path, reservation);
         Ok(())
     }
 
@@ -479,29 +483,13 @@ impl<B: ArchiveBuilder> Builder<B> {
         &mut self,
         path: P,
     ) -> Result<(), BuildError<B::Error>> {
-        self.state.ensure_active()?;
-        let archive_path = path.as_ref();
-        let Some(path) = archive_path.to_str() else {
-            return Err(BuildError::InvalidArchivePath {
-                path: archive_path.to_path_buf(),
-                reason: "path is not valid UTF-8",
-            });
-        };
-        if !self.state.policy.name_validation.accepts(path) {
-            return Err(BuildError::NameRejected {
-                context: "member path",
-                value: path.to_owned(),
-            });
-        }
-        let path = path.to_owned();
-        let reservation = self
+        let (path, reservation) = self
             .state
-            .entries
-            .preflight_entry(&path, ArchivedEntry::Directory { explicit: true })?;
+            .prepare_entry(&path, ArchivedEntry::Directory { explicit: true })?;
         self.state.begin_write();
-        let result = self.backend.write_directory_member(&path).await;
+        let result = self.backend.write_directory_member(path).await;
         self.state.complete_write(result, false)?;
-        self.state.entries.commit_entry(&path, reservation);
+        self.state.entries.commit_entry(path, reservation);
         Ok(())
     }
 
