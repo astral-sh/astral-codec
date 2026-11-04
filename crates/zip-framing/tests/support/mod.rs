@@ -20,6 +20,8 @@ pub(super) struct Fixture {
     pub(super) zip64: bool,
     pub(super) zip64_extensions: Vec<u8>,
     pub(super) zip64_version: Option<u16>,
+    pub(super) version: Option<u16>,
+    pub(super) method: u16,
     pub(super) descriptor: Option<bool>,
     pub(super) crc: Option<u32>,
     pub(super) flags: Option<u16>,
@@ -31,7 +33,7 @@ pub(super) struct Fixture {
 pub(super) struct Archive {
     pub(super) bytes: Vec<u8>,
     pub(super) central: usize,
-    pub(super) descriptor: usize,
+    pub(super) payload: Range<usize>,
     pub(super) zip64_end: Option<usize>,
     pub(super) end: usize,
 }
@@ -66,6 +68,31 @@ pub(super) fn end_record(count: u16, offset: u32, size: u32, comment: &[u8]) -> 
 }
 
 impl Fixture {
+    pub(super) fn member(name: &str, external_attributes: u32, payload: &[u8]) -> Self {
+        Self {
+            name: name.as_bytes().to_vec(),
+            external_attributes,
+            payload: Some(payload.to_vec()),
+            ..Self::default()
+        }
+    }
+
+    pub(super) fn with_extra(mut self, local: bool, extra: Vec<u8>) -> Self {
+        if local {
+            self.local_extra = extra;
+        } else {
+            self.central_extra = extra;
+        }
+        self
+    }
+
+    pub(super) fn with_unix_data(self, data: &[u8]) -> Self {
+        Self {
+            local_extra: field(0x000d, &[&[0; 12], data].concat()),
+            ..self
+        }
+    }
+
     pub(super) fn build(self) -> Archive {
         let name = if self.name.is_empty() {
             b"file".to_vec()
@@ -76,7 +103,7 @@ impl Fixture {
         let payload = self.payload.unwrap_or_else(|| b"payload".to_vec());
         let checksum = self.crc.unwrap_or_else(|| crc32(&payload));
 
-        let version = if self.zip64 { 45 } else { 20 };
+        let version = self.version.unwrap_or(if self.zip64 { 45 } else { 20 });
         let flags = self
             .flags
             .unwrap_or(0x0800 | if self.descriptor.is_some() { 8 } else { 0 });
@@ -100,6 +127,7 @@ impl Fixture {
         set32(&mut bytes, 0, 0x0403_4b50);
         set16(&mut bytes, 4, version);
         set16(&mut bytes, 6, flags);
+        set16(&mut bytes, 8, self.method);
         set32(
             &mut bytes,
             14,
@@ -122,9 +150,10 @@ impl Fixture {
 
         bytes.extend_from_slice(&name);
         bytes.extend(local_extra);
+        let payload_start = bytes.len();
         bytes.extend_from_slice(&payload);
+        let payload_range = payload_start..bytes.len();
 
-        let descriptor = bytes.len();
         if let Some(signed) = self.descriptor {
             if signed {
                 bytes.extend_from_slice(&0x0807_4b50u32.to_le_bytes());
@@ -149,6 +178,7 @@ impl Fixture {
         set16(&mut header, 4, self.made_by.unwrap_or(0x032d));
         set16(&mut header, 6, version);
         set16(&mut header, 8, flags);
+        set16(&mut header, 10, self.method);
         set32(&mut header, 16, checksum);
 
         let size = if self.zip64 {
@@ -204,7 +234,7 @@ impl Fixture {
         Archive {
             bytes,
             central,
-            descriptor,
+            payload: payload_range,
             zip64_end,
             end,
         }
