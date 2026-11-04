@@ -61,6 +61,7 @@ impl From<ExtraHeaderId> for u16 {
     }
 }
 
+#[derive(Default)]
 pub(crate) struct Extras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
@@ -165,6 +166,7 @@ impl<'a> Extras<'a> {
             .map(|(sizes, _)| sizes)
     }
 
+    #[inline]
     pub(crate) fn central_sizes(
         &self,
         common: Common,
@@ -200,6 +202,7 @@ impl<'a> Extras<'a> {
         Ok((sizes, offset))
     }
 
+    #[inline]
     fn zip64_sizes(
         &self,
         common: Common,
