@@ -109,12 +109,6 @@ pub struct CentralDirectoryEntry {
     has_zip64_extra: bool,
 }
 
-pub(super) enum BufferedEntry {
-    Complete(CentralDirectoryEntry, usize),
-    /// The number of bytes needed from the start of this record.
-    Incomplete(usize),
-}
-
 impl CentralDirectoryEntry {
     /// Returns the exact UTF-8 archive path, without filesystem normalization.
     pub fn path(&self) -> &str {
@@ -163,44 +157,45 @@ impl CentralDirectoryEntry {
         self.common.version
     }
 
-    /// Parses one complete record in the read-ahead window. If it straddles
-    /// the window, the caller refills it with the requested record length.
-    #[inline]
-    pub(super) fn parse(
-        bytes: &[u8],
+    pub(super) async fn read<R: AsyncRead + AsyncSeek + Unpin>(
+        reader: &mut RecordReader<'_, R>,
         position: u64,
+        end: u64,
         budget: &mut Budget,
-    ) -> Result<BufferedEntry, Error> {
-        let Some((header, rest)) = bytes.split_first_chunk::<{ size::CENTRAL }>() else {
-            return Ok(BufferedEntry::Incomplete(size::CENTRAL));
-        };
-        if u32::from_le_bytes(array_at::<0, 4, _>(header)) != signature::CENTRAL {
+    ) -> Result<(Self, u64), Error> {
+        let mut header = [0; size::CENTRAL];
+        reader.read_at(position, &mut header, end).await?;
+        if u32::from_le_bytes(array_at::<0, 4, _>(&header)) != signature::CENTRAL {
             return Err(invalid(position, "invalid central header signature"));
         }
-        let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(header)));
-        let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(header)));
-        let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(header)));
-        let length = name_length + extra_length + comment_length;
-        let Some(variable) = rest.get(..length) else {
-            return Ok(BufferedEntry::Incomplete(size::CENTRAL + length));
-        };
 
-        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(header), position)?;
-        let offset = u32::from_le_bytes(array_at::<42, 4, _>(header));
-        let disk = u16::from_le_bytes(array_at::<34, 2, _>(header));
-        let (name, rest) = variable.split_at(name_length);
-        let (raw_extra, comment) = rest.split_at(extra_length);
-        let path = parse_name(name, common.flags, position)?;
-        let extras = if raw_extra.is_empty() {
-            Extras::default()
-        } else {
-            Extras::parse(raw_extra, Header::Central, position)?
-        };
-        let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
-        if !rest.is_empty() {
-            extras.check_name(path, position)?;
-            extras.comment(comment, position)?;
-        }
+        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(&header), position)?;
+        let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
+        let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(&header)));
+        let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(&header)));
+        let variable = reader
+            .read_slice(
+                position + size::CENTRAL as u64,
+                name_length + extra_length + comment_length,
+                end,
+            )
+            .await?;
+
+        let extras = Extras::parse(
+            &variable[name_length..name_length + extra_length],
+            Header::Central,
+            position,
+        )?;
+        let (sizes, local_offset) = extras.central_sizes(
+            common,
+            u32::from_le_bytes(array_at::<42, 4, _>(&header)),
+            u16::from_le_bytes(array_at::<34, 2, _>(&header)),
+            position,
+        )?;
+
+        let path = parse_name(&variable[..name_length], common.flags, position)?;
+        extras.check_name(path, position)?;
+        extras.comment(&variable[name_length + extra_length..], position)?;
 
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
             return Err(invalid(position, "stored member sizes differ"));
@@ -217,17 +212,20 @@ impl CentralDirectoryEntry {
             compressed_size: sizes.compressed,
             size: sizes.uncompressed,
             local_offset,
-            made_by: u16::from_le_bytes(array_at::<4, 2, _>(header)),
-            attributes: u32::from_le_bytes(array_at::<38, 4, _>(header)),
+            made_by: u16::from_le_bytes(array_at::<4, 2, _>(&header)),
+            attributes: u32::from_le_bytes(array_at::<38, 4, _>(&header)),
             extra: if extras.needs_reconciliation() {
-                raw_extra.into()
+                variable[name_length..name_length + extra_length].into()
             } else {
                 Box::default()
             },
             has_zip64_extra: sizes.zip64,
         };
 
-        Ok(BufferedEntry::Complete(entry, size::CENTRAL + length))
+        Ok((
+            entry,
+            position + size::CENTRAL as u64 + variable.len() as u64,
+        ))
     }
 }
 
@@ -260,11 +258,13 @@ impl IndexedEntry {
     }
 
     #[inline]
-    pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Self {
-        Self {
+    pub(super) fn new(directory: CentralDirectoryEntry, boundary: u64) -> Result<Self, Error> {
+        let mut entry = Self {
             directory,
             boundary,
-        }
+        };
+        entry.set_boundary(boundary)?;
+        Ok(entry)
     }
 
     #[inline]

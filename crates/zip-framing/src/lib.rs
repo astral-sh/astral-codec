@@ -24,7 +24,6 @@
 
 mod budget;
 pub mod constants;
-mod destination;
 mod extra;
 mod host;
 mod index;
@@ -37,11 +36,11 @@ use std::io;
 use thiserror::Error;
 
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
-pub use destination::member_destination;
 pub use extra::ExtraHeaderId;
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
 pub use kind::{DeviceNumbers, EntryKind};
+pub use record::member_destination;
 
 /// A supported ZIP compression method.
 ///
