@@ -24,7 +24,11 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 
 // Format-validation tests opt in to all supported extra fields. Tests of the
 // default policy and lazy access open the index directly.
-async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
+async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
+    read_validated_with(&mut Cursor::new(bytes), Limits::default()).await
+}
+
+async fn read_validated_with<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     limits: Limits,
 ) -> Result<Index, FrameError> {
@@ -47,8 +51,7 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
                 }
                 .build();
 
-                let index =
-                    read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+                let index = read_validated(&archive.bytes).await?;
                 assert_eq!(index.entries().len(), 1);
 
                 let entry = index.resolved(0).ok_or("unresolved entry")?;
@@ -57,7 +60,7 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
                 assert_eq!(entry.directory().compressed_size(), payload.len() as u64);
                 assert_eq!(entry.directory().crc32(), crc);
                 assert_eq!(
-                    &archive.bytes[entry.data_offset() as usize..archive.descriptor],
+                    &archive.bytes[entry.data_offset() as usize..archive.payload.end],
                     payload
                 );
             }
@@ -66,26 +69,25 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 
     // A ZIP64 extra containing only the local-header offset still selects
     // 64-bit descriptor sizes (APPNOTE 4.3.9.2).
-    let mut archive = Fixture {
+    let archive = Fixture {
         payload: Some(Vec::new()),
+        version: Some(45),
         descriptor: Some(false),
         local_offset: u32::MAX,
         central_extra: field(1, &0_u64.to_le_bytes()),
         ..Fixture::default()
     }
     .build();
-    set16(&mut archive.bytes, 4, 45);
-    set16(&mut archive.bytes, archive.central + 6, 45);
     let central_header = &archive.bytes[archive.central..archive.end];
     for (descriptor_length, valid) in [(12, false), (20, true)] {
-        let mut bytes = archive.bytes[..archive.descriptor].to_vec();
+        let mut bytes = archive.bytes[..archive.payload.end].to_vec();
         // Both descriptor widths are all zeros for the empty payload.
-        bytes.resize(archive.descriptor + descriptor_length, 0);
+        bytes.resize(archive.payload.end + descriptor_length, 0);
         let central = bytes.len();
         bytes.extend_from_slice(central_header);
         bytes.extend(end_records(1, central as u64, central_header.len() as u64)?);
 
-        let result = read_validated(&mut Cursor::new(bytes), Limits::default()).await;
+        let result = read_validated(&bytes).await;
         if valid {
             assert_eq!(result?.entries().len(), 1);
         } else {
@@ -121,16 +123,14 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
         let central_extra = field(1, &central_extra);
         let build = |local_extra, central_extra| {
             let mut archive = Fixture {
+                version: Some(45),
+                method: 8,
                 local_extra,
                 central_extra,
                 ..Fixture::default()
             }
             .build();
-            set16(&mut archive.bytes, 4, 45);
-            set16(&mut archive.bytes, archive.central + 6, 45);
             // Different decoded and compressed sizes expose swapped or shifted fields.
-            set16(&mut archive.bytes, 8, 8);
-            set16(&mut archive.bytes, archive.central + 10, 8);
             set32(&mut archive.bytes, 22, 17);
             set32(&mut archive.bytes, archive.central + 24, 17);
             if mask & 3 != 0 {
@@ -152,7 +152,7 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
         };
         let archive = build(local_extra.clone(), central_extra.clone());
 
-        let index = read_validated(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+        let index = read_validated(&archive.bytes).await?;
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(entry.directory().position(), 0);
         assert_eq!(entry.directory().size(), 17);
@@ -175,7 +175,7 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
             let expected = if local { 0 } else { missing.central as u64 };
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(missing.bytes), Limits::default()).await,
+                    read_validated(&missing.bytes).await,
                     Err(FrameError::Invalid {
                         position,
                         reason: "missing or superfluous ZIP64 values",
@@ -194,7 +194,7 @@ async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
         .build();
         set32(&mut archive.bytes, offset, 7);
         assert!(matches!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            read_validated(&archive.bytes).await,
             Err(FrameError::Invalid {
                 position: 0,
                 reason: "local ZIP64 must contain both sizes"
@@ -260,8 +260,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
         ..Fixture::default()
     }
     .build();
-    let mut reader = Cursor::new(archive.bytes);
-    let index = read_validated(&mut reader, Limits::default()).await?;
+    let index = read_validated(&archive.bytes).await?;
     let entry = index.resolved(0).ok_or("unresolved entry")?;
     assert_eq!(entry.directory().path(), "n".repeat(258));
     assert_eq!(entry.directory().host_system(), HostSystem::Os400);
@@ -401,14 +400,12 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
     ] {
         let unix_extra = field(0x000d, &[&[0; 12], data].concat());
         let archive = Fixture {
-            payload: Some(payload.to_vec()),
-            external_attributes: attributes,
             local_extra: unix_extra.clone(),
             central_extra: unix_extra,
-            ..Fixture::default()
+            ..Fixture::member("file", attributes, payload)
         }
         .build();
-        let index = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        let index = read_validated(&archive.bytes).await?;
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(entry.kind(), &expected);
         assert!(entry.has_unix_extra());
@@ -419,184 +416,74 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 
 #[tokio::test]
 async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> TestResult {
-    for (name, attributes, payload, data, version, expected) in [
+    let member = Fixture::member;
+    let link = |payload: &[u8]| member("link", 0o120777 << 16, payload);
+    let directory = |payload: &[u8]| member("directory/", 0, payload);
+    let fifo = |payload: &[u8]| member("fifo", 0o010600 << 16, payload);
+    let volume = |payload: &[u8]| member("volume", 0x08, payload);
+    let inconsistent = "inconsistent file attributes";
+    let non_file = "non-file member has payload data";
+    let unexpected = "unexpected UNIX file-type data";
+    let bad_device = "invalid UNIX device numbers";
+
+    for (fixture, expected) in [
+        (member("file", (0o100644 << 16) | 0x10, b""), inconsistent),
+        (member("link/", 0o120777 << 16, b"target"), inconsistent),
+        (member("volume/", 0x08, b""), inconsistent),
+        (member("volume", (0o100644 << 16) | 0x08, b""), inconsistent),
+        (directory(b"data"), non_file),
+        (fifo(b"data"), non_file),
+        (volume(b"data"), non_file),
         (
-            "file",
-            (0o100644 << 16) | 0x10,
-            b"".as_slice(),
-            None,
-            20,
-            "inconsistent file attributes",
-        ),
-        (
-            "link/",
-            0o120777 << 16,
-            b"target",
-            None,
-            20,
-            "inconsistent file attributes",
-        ),
-        (
-            "directory/",
-            0,
-            b"data",
-            None,
-            20,
-            "non-file member has payload data",
-        ),
-        (
-            "fifo",
-            0o010600 << 16,
-            b"data",
-            None,
-            20,
-            "non-file member has payload data",
-        ),
-        (
-            "directory/",
-            0,
-            b"",
-            None,
-            10,
+            Fixture {
+                version: Some(10),
+                ..directory(b"")
+            },
             "directory requires extraction version 2.0",
         ),
+        (link(b""), "empty symbolic-link target"),
         (
-            "link",
-            0o120777 << 16,
-            b"",
-            None,
-            20,
+            link(b"target").with_unix_data(b""),
             "empty symbolic-link target",
         ),
         (
-            "link",
-            0o120777 << 16,
-            b"",
-            Some(b"\xff".as_slice()),
-            20,
+            link(b"").with_unix_data(b"\xff"),
             "non-UTF-8 UNIX link target",
         ),
         (
-            "link",
-            0o120777 << 16,
-            b"",
-            Some(b"target\0"),
-            20,
+            link(b"").with_unix_data(b"target\0"),
             "NUL in UNIX link target",
         ),
+        (directory(b"").with_unix_data(b"target"), unexpected),
+        (fifo(b"").with_unix_data(b"target"), unexpected),
         (
-            "directory/",
-            0,
-            b"",
-            Some(b"target".as_slice()),
-            20,
-            "unexpected UNIX file-type data",
+            member("socket", 0o140600 << 16, b"").with_unix_data(b"opaque"),
+            unexpected,
         ),
         (
-            "fifo",
-            0o010600 << 16,
-            b"",
-            Some(b"target"),
-            20,
-            "unexpected UNIX file-type data",
+            member("unknown", 0o030600 << 16, b"").with_unix_data(b"opaque"),
+            unexpected,
+        ),
+        (volume(b"").with_unix_data(b"opaque"), unexpected),
+        (
+            member("device", 0o020600 << 16, b"").with_unix_data(&[]),
+            bad_device,
         ),
         (
-            "device",
-            0o020600 << 16,
-            b"",
-            Some(&[]),
-            20,
-            "invalid UNIX device numbers",
+            member("device", 0o020600 << 16, b"").with_unix_data(&[0; 7]),
+            bad_device,
         ),
         (
-            "link",
-            0o120777 << 16,
-            b"target",
-            Some(&[]),
-            20,
-            "empty symbolic-link target",
-        ),
-        (
-            "socket",
-            0o140600 << 16,
-            b"",
-            Some(b"opaque"),
-            20,
-            "unexpected UNIX file-type data",
-        ),
-        (
-            "unknown",
-            0o030600 << 16,
-            b"",
-            Some(b"opaque"),
-            20,
-            "unexpected UNIX file-type data",
-        ),
-        (
-            "volume",
-            0x08,
-            b"",
-            Some(b"opaque"),
-            20,
-            "unexpected UNIX file-type data",
-        ),
-        (
-            "volume/",
-            0x08,
-            b"",
-            None,
-            20,
-            "inconsistent file attributes",
-        ),
-        (
-            "volume",
-            (0o100644 << 16) | 0x08,
-            b"",
-            None,
-            20,
-            "inconsistent file attributes",
-        ),
-        (
-            "volume",
-            0x08,
-            b"data",
-            None,
-            20,
-            "non-file member has payload data",
-        ),
-        (
-            "device",
-            0o020600 << 16,
-            b"",
-            Some(&[0; 7]),
-            20,
-            "invalid UNIX device numbers",
-        ),
-        (
-            "device",
-            0o060600 << 16,
-            b"",
-            Some(&[0; 9]),
-            20,
-            "invalid UNIX device numbers",
+            member("device", 0o060600 << 16, b"").with_unix_data(&[0; 9]),
+            bad_device,
         ),
     ] {
-        let mut archive = Fixture {
-            name: name.as_bytes().to_vec(),
-            payload: Some(payload.to_vec()),
-            external_attributes: attributes,
-            local_extra: data
-                .map_or_else(Vec::new, |data| field(0x000d, &[&[0; 12], data].concat())),
-            ..Fixture::default()
-        }
-        .build();
-        set16(&mut archive.bytes, 4, version);
-        set16(&mut archive.bytes, archive.central + 6, version);
+        let archive = fixture.build();
         let mut source = Cursor::new(&archive.bytes);
         let mut index = Index::read_with_policy(
             &mut source,
             Limits {
-                metadata_size: (archive.end - payload.len()) as u64,
+                metadata_size: (archive.end - archive.payload.len()) as u64,
                 ..Limits::default()
             },
             AllowListed,
@@ -612,7 +499,8 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
             };
             assert!(
                 matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected),
-                "{name}, attributes {attributes:#x}: {result:?}"
+                "{}: expected {expected}, got {result:?}",
+                index.entries()[0].directory().path()
             );
             assert!(index.resolved(0).is_none());
         }
@@ -653,12 +541,7 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
         let mut archive = Fixture::default().build();
         archive.bytes[offset] = value;
 
-        assert!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
-                .await
-                .is_err(),
-            "{label}"
-        );
+        assert!(read_validated(&archive.bytes).await.is_err(), "{label}");
     }
 
     for flags in [
@@ -671,9 +554,7 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
         .build();
 
         assert!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default())
-                .await
-                .is_err(),
+            read_validated(&archive.bytes).await.is_err(),
             "flags {flags:#x}"
         );
     }
@@ -683,12 +564,13 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
 async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult {
     for (method, minimum) in [(0, 10), (8, 20)] {
         for version in [minimum - 1, minimum, 45, 46, 0x0314] {
-            let mut archive = Fixture::default().build();
-            set16(&mut archive.bytes, 8, method);
-            set16(&mut archive.bytes, archive.central + 10, method);
-            set16(&mut archive.bytes, 4, version);
-            set16(&mut archive.bytes, archive.central + 6, version);
-            let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+            let archive = Fixture {
+                method,
+                version: Some(version),
+                ..Fixture::default()
+            }
+            .build();
+            let result = read_validated(&archive.bytes).await;
             if version < minimum {
                 assert!(matches!(
                     result,
@@ -746,7 +628,7 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
             ),
             "{identifier:#06x}"
         );
-        read_validated(&mut reader, Limits::default()).await?;
+        read_validated_with(&mut reader, Limits::default()).await?;
 
         let mut reader = Cursor::new(archive(Vec::new()).bytes);
         let mut index = Index::read(&mut reader, Limits::default()).await?;
@@ -779,7 +661,7 @@ async fn rejects_unsupported_extras_in_either_header() {
             let offset = if central { archive.central as u64 } else { 0 };
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    read_validated(&archive.bytes).await,
                     Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
                         if position == offset && rejected == identifier
                 ),
@@ -801,9 +683,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     };
 
     assert_eq!(
-        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-            .await?
-            .entries()[0]
+        read_validated(&fixture.build().bytes).await?.entries()[0]
             .directory()
             .path(),
         "café"
@@ -819,15 +699,12 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     ] {
         assert!(
             read_validated(
-                &mut Cursor::new(
-                    Fixture {
-                        name,
-                        ..Fixture::default()
-                    }
-                    .build()
-                    .bytes
-                ),
-                Limits::default()
+                &Fixture {
+                    name,
+                    ..Fixture::default()
+                }
+                .build()
+                .bytes
             )
             .await
             .is_err()
@@ -850,19 +727,13 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     }
     for value in invalid {
         for local in [false, true] {
-            let mut fixture = Fixture {
+            let fixture = Fixture {
                 name: name.to_vec(),
                 ..Fixture::default()
-            };
-            if local {
-                fixture.local_extra = field(0x7075, &value);
-            } else {
-                fixture.central_extra = field(0x7075, &value);
             }
+            .with_extra(local, field(0x7075, &value));
             assert!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                    .await
-                    .is_err(),
+                read_validated(&fixture.build().bytes).await.is_err(),
                 "Unicode field={value:?}, local={local}"
             );
         }
@@ -889,7 +760,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         }
         .build();
         assert!(matches!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            read_validated(&archive.bytes).await,
             Err(FrameError::Invalid {
                 reason: "non-UTF-8 filename" | "non-ASCII filename without UTF-8 flag",
                 ..
@@ -966,7 +837,7 @@ async fn enforces_resource_budgets_before_exposing_members() {
         ),
     ] {
         assert!(matches!(
-            read_validated(&mut Cursor::new(&bytes), limits).await,
+            read_validated_with(&mut Cursor::new(&bytes), limits).await,
             Err(FrameError::Limit(limit)) if limit == expected
         ));
     }
@@ -1024,12 +895,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
 
         for length in 0..archive.bytes.len() {
             assert!(
-                read_validated(
-                    &mut Cursor::new(&archive.bytes[..length]),
-                    Limits::default()
-                )
-                .await
-                .is_err(),
+                read_validated(&archive.bytes[..length]).await.is_err(),
                 "prefix {length}, zip64={zip64}"
             );
         }
@@ -1054,9 +920,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
             bytes[offset] ^= 1;
 
             assert!(
-                read_validated(&mut Cursor::new(bytes), Limits::default())
-                    .await
-                    .is_err(),
+                read_validated(&bytes).await.is_err(),
                 "offset {offset}, zip64={zip64}"
             );
         }
@@ -1064,11 +928,7 @@ async fn rejects_truncation_bad_offsets_descriptors_and_end_records() {
         let mut bytes = archive.bytes;
         bytes.push(0);
 
-        assert!(
-            read_validated(&mut Cursor::new(bytes), Limits::default())
-                .await
-                .is_err()
-        );
+        assert!(read_validated(&bytes).await.is_err());
     }
 }
 
@@ -1082,10 +942,10 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                 ..Fixture::default()
             }
             .build();
-            let fields = archive.descriptor + if signed { 4 } else { 0 };
+            let fields = archive.payload.end + if signed { 4 } else { 0 };
             let mut corrupt_offsets = vec![fields, fields + 4, archive.central - 1];
             if signed {
-                corrupt_offsets.push(archive.descriptor);
+                corrupt_offsets.push(archive.payload.end);
             }
             for offset in corrupt_offsets {
                 let mut bytes = archive.bytes.clone();
@@ -1098,20 +958,20 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                         Err(FrameError::Invalid {
                             position,
                             reason: "invalid data descriptor signature" | "data descriptor disagrees with central header",
-                        }) if position == archive.descriptor as u64
+                        }) if position == archive.payload.end as u64
                     ),
                     "zip64={zip64}, signed={signed}, offset={offset}"
                 );
                 assert!(index.resolved(0).is_none());
             }
 
-            let descriptor = &archive.bytes[archive.descriptor..archive.central];
+            let descriptor = &archive.bytes[archive.payload.end..archive.central];
             for length in [0, descriptor.len() - 1, descriptor.len() + 1] {
                 // Rebuild the directory and footer so only the descriptor's span
                 // is wrong; truncating the whole archive would test its footer.
-                let mut bytes = archive.bytes[..archive.descriptor].to_vec();
+                let mut bytes = archive.bytes[..archive.payload.end].to_vec();
                 bytes.extend_from_slice(&descriptor[..length.min(descriptor.len())]);
-                bytes.resize(archive.descriptor + length, 0);
+                bytes.resize(archive.payload.end + length, 0);
                 let central = bytes.len();
                 bytes.extend_from_slice(
                     &archive.bytes[archive.central..archive.zip64_end.unwrap_or(archive.end)],
@@ -1120,7 +980,7 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                 bytes.extend(end_record(1, central as u32, size as u32, &[]));
                 assert!(
                     matches!(
-                        read_validated(&mut Cursor::new(bytes), Limits::default()).await,
+                        read_validated(&bytes).await,
                         Err(FrameError::Invalid {
                             reason: "member cannot fit before the next record"
                                 | "invalid data descriptor length",
@@ -1164,8 +1024,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
                 } else {
                     (archive.end as u64, "non-UTF-8 archive comment")
                 };
-                let result =
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+                let result = read_validated(&archive.bytes).await;
 
                 if valid {
                     assert!(
@@ -1238,7 +1097,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        let result = read_validated(&archive.bytes).await;
         if let Some(expected) = expected {
             assert!(
                 matches!(result, Err(FrameError::Invalid { reason, .. }) if reason == expected)
@@ -1255,12 +1114,7 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
 async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResult {
     let empty = end_record(0, 0, 0, &[]);
 
-    assert!(
-        read_validated(&mut Cursor::new(&empty), Limits::default())
-            .await?
-            .entries()
-            .is_empty()
-    );
+    assert!(read_validated(&empty).await?.entries().is_empty());
 
     // The signature can straddle the comment length (little-endian "PK").
     let mut split = vec![0; usize::from(u16::from_le_bytes(*b"PK"))];
@@ -1391,7 +1245,7 @@ async fn bounds_end_record_search_with_short_reads() -> TestResult {
         let mut source = Observed::new(end_record(0, 0, 0, &comment));
         source.max_read = 3;
         assert!(
-            read_validated(&mut source, Limits::default())
+            read_validated_with(&mut source, Limits::default())
                 .await?
                 .entries()
                 .is_empty()
@@ -1466,8 +1320,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
             ..Fixture::default()
         };
 
-        let index =
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+        let index = read_validated(&fixture.build().bytes).await?;
 
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(
@@ -1482,15 +1335,13 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         for attributes in [0, 0o100644 << 16] {
             for payload in [b"".as_slice(), b"replacement"] {
                 let archive = Fixture {
-                    external_attributes: attributes,
-                    payload: Some(payload.to_vec()),
                     local_extra: local_extra.clone(),
                     central_extra: central_extra.clone(),
-                    ..Fixture::default()
+                    ..Fixture::member("file", attributes, payload)
                 }
                 .build();
                 assert!(matches!(
-                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    read_validated(&archive.bytes).await,
                     Err(FrameError::Unsupported {
                         position: 0,
                         feature: "ambiguous UNIX hard link"
@@ -1515,7 +1366,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         };
 
         assert!(matches!(
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+            read_validated(&fixture.build().bytes).await,
             Err(FrameError::Invalid { reason, .. }) if reason == expected
         ));
     }
@@ -1538,7 +1389,7 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
             central_extra: field(identifier, &central),
             ..Fixture::default()
         };
-        read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await?;
+        read_validated(&fixture.build().bytes).await?;
     }
 
     for (local, central, expected) in [
@@ -1611,7 +1462,7 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
         .build();
         assert!(
             matches!(
-                read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                read_validated(&archive.bytes).await,
                 Err(FrameError::Invalid { reason, .. }) if reason == expected
             ),
             "{expected}"
@@ -1639,7 +1490,7 @@ async fn validates_info_zip_ownership() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await?;
+        read_validated(&archive.bytes).await?;
     }
 
     for data in [
@@ -1653,16 +1504,10 @@ async fn validates_info_zip_ownership() -> TestResult {
         &[1, 1, 1, 1, 2, 3],
     ] {
         for local in [false, true] {
-            let mut fixture = Fixture::default();
-            if local {
-                fixture.local_extra = field(0x7875, data);
-            } else {
-                fixture.central_extra = field(0x7875, data);
-            }
+            let fixture = Fixture::default().with_extra(local, field(0x7875, data));
             assert!(
                 matches!(
-                    read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                        .await,
+                    read_validated(&fixture.build().bytes).await,
                     Err(FrameError::Invalid {
                         reason: "invalid Info-ZIP extra field layout",
                         ..
@@ -1694,7 +1539,7 @@ async fn validates_info_zip_ownership() -> TestResult {
         }
         .build();
         assert!(matches!(
-            read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            read_validated(&archive.bytes).await,
             Err(FrameError::Invalid { reason: actual, .. }) if actual == reason
         ));
     }
@@ -1812,11 +1657,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
         &[],
     ));
 
-    assert!(
-        read_validated(&mut Cursor::new(unindexed), Limits::default())
-            .await
-            .is_err()
-    );
+    assert!(read_validated(&unindexed).await.is_err());
 
     Ok(())
 }
@@ -1960,17 +1801,10 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {
-            let mut fixture = Fixture::default();
-            if local {
-                fixture.local_extra.clone_from(&extra);
-            } else {
-                fixture.central_extra.clone_from(&extra);
-            }
+            let fixture = Fixture::default().with_extra(local, extra.clone());
 
             assert!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                    .await
-                    .is_err(),
+                read_validated(&fixture.build().bytes).await.is_err(),
                 "extra {extra:?}, local={local}"
             );
         }
@@ -1980,18 +1814,14 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
     // when the first field is empty or another identifier separates the two.
     for data in [&[][..], &[0; 16][..]] {
         for local in [false, true] {
-            let mut fixture = Fixture {
+            let extra = [field(1, data), field(0x5455, &[0])].concat();
+            let fixture = Fixture {
                 zip64: true,
                 ..Fixture::default()
-            };
-            let extra = [field(1, data), field(0x5455, &[0])].concat();
-            if local {
-                fixture.local_extra = extra;
-            } else {
-                fixture.central_extra = extra;
             }
+            .with_extra(local, extra);
             assert!(matches!(
-                read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+                read_validated(&fixture.build().bytes).await,
                 Err(FrameError::Invalid {
                     reason: "duplicate extra-field identifier",
                     ..
@@ -2007,7 +1837,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
     }
     .build();
     assert!(matches!(
-        read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        read_validated(&archive.bytes).await,
         Err(FrameError::Unsupported {
             feature: "ZIP64 version-2 directory",
             ..
@@ -2044,7 +1874,7 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
     }
     .build();
     let directory_budget = (archive.end - 20 - archive.central) as u64;
-    let total_budget = directory_budget + (archive.central - b"payload".len()) as u64;
+    let total_budget = directory_budget + (archive.central - archive.payload.len()) as u64;
     // Directory, ZIP64 end, and local metadata share one cumulative budget.
     for metadata_size in [total_budget - 1, total_budget] {
         let mut source = Cursor::new(&archive.bytes);
@@ -2214,7 +2044,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
         ..Fixture::default()
     }
     .build();
-    let exact_budget = (archive.end - archive.central + archive.central - 7) as u64;
+    let exact_budget = (archive.end - archive.payload.len()) as u64;
 
     for (budget, valid) in [(exact_budget - 1, false), (exact_budget, true)] {
         let mut source = Observed::new(archive.bytes.clone());
