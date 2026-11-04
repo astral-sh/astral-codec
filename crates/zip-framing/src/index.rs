@@ -1,4 +1,4 @@
-use std::{cell::RefCell, mem, str};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem, str};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -12,7 +12,7 @@ use crate::{
 
 mod entry;
 
-use entry::ResolvedMember;
+use entry::{BufferedEntry, ResolvedMember};
 pub use entry::{CentralDirectoryEntry, Entry, IndexedEntry};
 
 thread_local! {
@@ -154,6 +154,8 @@ impl Index {
             if let Some((_, error)) = first_error {
                 return Err(error);
             }
+
+            check_destination_order(&entries).await?;
         }
 
         Ok(Self {
@@ -391,12 +393,21 @@ impl CentralDirectory {
             }
         }
 
-        for _ in 0..self.count {
-            let (entry, next) = CentralDirectoryEntry::read(reader, position, end, budget).await?;
-            entries.push(IndexedEntry::new(entry, self.offset)?);
-            position = next;
-
-            tokio::task::consume_budget().await;
+        let mut bytes = reader.buffered(position, end);
+        while entries.len() < self.count as usize {
+            match CentralDirectoryEntry::parse(bytes, position, budget)? {
+                BufferedEntry::Complete(entry, length) => {
+                    entries.push(IndexedEntry::new(entry, self.offset)?);
+                    position += length as u64;
+                    bytes = &bytes[length..];
+                }
+                BufferedEntry::Incomplete(needed) => {
+                    // Yield between bounded read-ahead windows.
+                    tokio::task::yield_now().await;
+                    reader.read_slice(position, needed, end).await?;
+                    bytes = reader.buffered(position, end);
+                }
+            }
         }
 
         if position != end {
@@ -408,6 +419,43 @@ impl CentralDirectory {
 
         Ok(entries)
     }
+}
+
+/// Readers may visit members in directory or physical order. Both must visit
+/// repeated destinations in the same relative order.
+async fn check_destination_order(entries: &[IndexedEntry]) -> Result<(), Error> {
+    let mut last_offsets = HashMap::with_capacity(entries.len());
+    for entry in entries {
+        let directory = entry.directory();
+        let offset = directory.position();
+        if last_offsets
+            .insert(member_destination(directory.path()), offset)
+            .is_some_and(|previous| previous > offset)
+        {
+            return Err(invalid(
+                offset,
+                "duplicate destination order disagrees with local headers",
+            ));
+        }
+        tokio::task::consume_budget().await;
+    }
+    Ok(())
+}
+
+/// Ignore empty and `.` components and compare `..` literally.
+fn member_destination(path: &str) -> Cow<'_, str> {
+    let path = path.trim_end_matches('/');
+    if !path.split('/').any(|part| matches!(part, "" | ".")) {
+        return Cow::Borrowed(path);
+    }
+    let mut destination = String::with_capacity(path.len());
+    for part in path.split('/').filter(|part| !matches!(*part, "" | ".")) {
+        if !destination.is_empty() {
+            destination.push('/');
+        }
+        destination.push_str(part);
+    }
+    Cow::Owned(destination)
 }
 
 /// Scans the whole tail: a second EOCD reaching EOF is ambiguous even when the

@@ -1768,6 +1768,64 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 }
 
 #[tokio::test]
+async fn duplicate_destinations_must_preserve_local_order() -> TestResult {
+    let mut local = Vec::new();
+    let mut members = Vec::new();
+    for path in [
+        "d/config",
+        "./d//./config/",
+        "d/config",
+        "d/Config",
+        "d/../d/config",
+    ] {
+        let kind = if path.ends_with('/') {
+            WriteEntryKind::Directory
+        } else {
+            WriteEntryKind::File { executable: false }
+        };
+        let offset = local.len() as u64;
+        let member =
+            PendingMember::new(path, CompressionMethod::Stored, kind)?.finish(0, 0, 0, offset)?;
+        local.extend(member.local_header());
+        members.push((offset, member.central_header()));
+    }
+
+    // The first three members share a destination. The last two can move freely.
+    for (order, backwards) in [
+        ([0, 1, 2, 3, 4], None),
+        ([4, 3, 0, 1, 2], None),
+        ([0, 2, 3, 4, 1], Some(1)),
+        ([2, 0, 1, 3, 4], Some(0)),
+    ] {
+        let mut bytes = local.clone();
+        for index in order {
+            bytes.extend_from_slice(&members[index].1);
+        }
+        bytes.extend(end_records(
+            members.len() as u64,
+            local.len() as u64,
+            (bytes.len() - local.len()) as u64,
+        )?);
+
+        let mut source = Cursor::new(bytes);
+        let result = Index::read(&mut source, Limits::default()).await;
+        if let Some(index) = backwards {
+            assert!(
+                matches!(
+                    result,
+                    Err(FrameError::Invalid { position, reason: "duplicate destination order disagrees with local headers" })
+                        if position == members[index].0
+                ),
+                "{order:?}"
+            );
+        } else {
+            result?.validate_all(&mut source).await?;
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> TestResult {
     let size = u64::from(u32::MAX) + 1;
     let member = PendingMember::new(
