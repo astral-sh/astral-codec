@@ -6,6 +6,7 @@ use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
+    ExtraFieldPolicy::AllowListed,
     HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
@@ -21,13 +22,13 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
     data
 }
 
-// Format-validation cases exercise the complete metadata check. Lazy access
-// and its I/O behavior are covered separately below.
+// Format-validation tests opt in to all supported extra fields. Tests of the
+// default policy and lazy access open the index directly.
 async fn read_validated<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     limits: Limits,
 ) -> Result<Index, FrameError> {
-    let mut index = Index::read(reader, limits).await?;
+    let mut index = Index::read_with_policy(reader, limits, AllowListed).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -592,12 +593,13 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         set16(&mut archive.bytes, 4, version);
         set16(&mut archive.bytes, archive.central + 6, version);
         let mut source = Cursor::new(&archive.bytes);
-        let mut index = Index::read(
+        let mut index = Index::read_with_policy(
             &mut source,
             Limits {
                 metadata_size: (archive.end - payload.len()) as u64,
                 ..Limits::default()
             },
+            AllowListed,
         )
         .await?;
 
@@ -710,6 +712,53 @@ async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult
         }
     }
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult {
+    for (identifier, local, directory) in [
+        (0x000d, vec![0; 12], vec![0; 12]),
+        (0x5455, vec![0], vec![0]),
+        (0x5855, vec![0; 12], vec![0; 8]),
+        (0x6375, unicode_data(b""), unicode_data(b"")),
+        (0x7075, unicode_data(b"file"), unicode_data(b"file")),
+        (0x7855, vec![0; 4], Vec::new()),
+        (0x7875, vec![1, 1, 2, 1, 3], vec![1, 1, 2, 1, 3]),
+    ] {
+        let archive = |central_extra| {
+            Fixture {
+                zip64: true,
+                local_extra: field(identifier, &local),
+                central_extra,
+                ..Fixture::default()
+            }
+            .build()
+        };
+
+        let both = archive(field(identifier, &directory));
+        let mut reader = Cursor::new(both.bytes);
+        assert!(
+            matches!(
+                Index::read(&mut reader, Limits::default()).await,
+                Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
+                    if position == both.central as u64 && rejected == identifier
+            ),
+            "{identifier:#06x}"
+        );
+        read_validated(&mut reader, Limits::default()).await?;
+
+        let mut reader = Cursor::new(archive(Vec::new()).bytes);
+        let mut index = Index::read(&mut reader, Limits::default()).await?;
+        assert!(
+            matches!(
+                index.entry(&mut reader, 0).await,
+                Err(FrameError::UnsupportedExtraField { position: 0, identifier: rejected })
+                    if rejected == identifier
+            ),
+            "{identifier:#06x}"
+        );
+    }
     Ok(())
 }
 
@@ -1145,7 +1194,12 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await;
+        let result = Index::read_with_policy(
+            &mut Cursor::new(archive.bytes),
+            Limits::default(),
+            AllowListed,
+        )
+        .await;
         if length == unicode.len() {
             result?;
         } else {
@@ -1673,7 +1727,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
 
     let entries: &[IndexedEntry] = index.entries();
     let directory: &CentralDirectoryEntry = entries[0].directory();
@@ -1727,7 +1781,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     ordered.extend_from_slice(&second.bytes[second.central..second.end]);
     ordered.extend_from_slice(&bytes[end..]);
     let mut source = Cursor::new(ordered);
-    let mut ordered = Index::read(&mut source, Limits::default()).await?;
+    let mut ordered = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
     assert_eq!(
         ordered.entries()[1].record_range(),
@@ -2118,7 +2172,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     ));
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
     assert_eq!(index.entries().len(), names.len());
     for (entry, name) in index.entries().iter().zip(&names) {
         assert_eq!(entry.directory().path(), name);
@@ -2164,12 +2218,13 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
 
     for (budget, valid) in [(exact_budget - 1, false), (exact_budget, true)] {
         let mut source = Observed::new(archive.bytes.clone());
-        let mut index = Index::read(
+        let mut index = Index::read_with_policy(
             &mut source,
             Limits {
                 metadata_size: budget,
                 ..Limits::default()
             },
+            AllowListed,
         )
         .await?;
         if !valid {
