@@ -107,17 +107,16 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated extra-field data"));
             };
 
-            let identifier = u16::from_le_bytes([identifier_low, identifier_high]);
-            let identifier = match policy {
-                ExtraFieldPolicy::Zip64Only => {
-                    (identifier == u16::from(ExtraHeaderId::Zip64)).then_some(ExtraHeaderId::Zip64)
-                }
-                ExtraFieldPolicy::AllowListed => ExtraHeaderId::try_from(identifier).ok(),
-            }
-            .ok_or(Error::UnsupportedExtraField {
-                position,
-                identifier,
-            })?;
+            let raw_id = u16::from_le_bytes([identifier_low, identifier_high]);
+            let identifier = ExtraHeaderId::try_from(raw_id)
+                .ok()
+                .filter(|&field| {
+                    field == ExtraHeaderId::Zip64 || policy == ExtraFieldPolicy::AllowListed
+                })
+                .ok_or(Error::UnsupportedExtraField {
+                    position,
+                    identifier: raw_id,
+                })?;
 
             let previous = if identifier == ExtraHeaderId::Zip64 {
                 zip64.replace(data)
