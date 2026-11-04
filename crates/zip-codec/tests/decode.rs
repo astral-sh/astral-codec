@@ -2,13 +2,14 @@ use std::{
     cell::Cell,
     error::Error,
     future::{Future, poll_fn},
-    io::{self, Cursor, SeekFrom, Write},
+    io::{self, Cursor, Read, SeekFrom, Write},
     pin::Pin,
     rc::Rc,
     task::{Context, Poll},
 };
 
-use flate2::{Compression, Crc, write::DeflateEncoder};
+use crc32fast::hash as crc32;
+use flate2::{Compression, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip_codec::{
     Archive, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy,
@@ -23,6 +24,7 @@ type TestResult = Result<(), Box<dyn Error>>;
 
 const STORED: &[u8] = include_bytes!("fixtures/stored.zip");
 const DEFLATE: &[u8] = include_bytes!("fixtures/deflate.zip");
+const EMPTY_DEFLATE: &[u8] = include_bytes!("fixtures/empty-deflate.zip");
 
 // Only interoperability spans the record-layout matrix. Codec workflows below
 // use one fixture per compression method; framing owns the layout edge cases.
@@ -44,6 +46,13 @@ const FIXTURES: &[(&str, &[u8])] = &[
     ),
 ];
 
+fn file_payload<P>(member: Option<Member<P>>) -> io::Result<P> {
+    match member {
+        Some(Member::File { payload, .. }) => Ok(payload),
+        _ => Err(io::Error::other("expected file member")),
+    }
+}
+
 async fn contents<P: MemberPayload<Error = DecodeError>>(
     mut payload: P,
 ) -> Result<Vec<u8>, DecodeError> {
@@ -56,24 +65,28 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
     Ok(output)
 }
 
-fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Box<dyn Error>> {
-    let mut crc = Crc::new();
-    crc.update(payload);
+fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, FrameError> {
+    let size = payload.len() as u64;
     let member = PendingMember::new(
         "member",
         CompressionMethod::Stored,
         EntryKind::File { executable: false },
     )?
-    .finish(crc.sum(), payload.len() as u64, payload.len() as u64, 0)?;
-    let mut bytes = member.local_header();
-    bytes.extend_from_slice(payload);
-    let offset = bytes.len() as u64;
+    .finish(crc32(payload), size, size, 0)?;
     let mut central = member.central_header();
     central[38..42].copy_from_slice(&attributes.to_le_bytes());
-    let size = central.len() as u64;
-    bytes.extend(central);
-    bytes.extend(end_records(1, offset, size)?);
+    single_member_archive(member.local_header(), payload, central)
+}
 
+fn single_member_archive(
+    mut bytes: Vec<u8>,
+    payload: &[u8],
+    central: Vec<u8>,
+) -> Result<Vec<u8>, FrameError> {
+    bytes.extend_from_slice(payload);
+    let end = end_records(1, bytes.len() as u64, central.len() as u64)?;
+    bytes.extend(central);
+    bytes.extend(end);
     Ok(bytes)
 }
 
@@ -173,16 +186,9 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
     for (label, bytes) in FIXTURES {
         // Short reads must work across headers, descriptors, and payloads,
         // including when a DEFLATE input buffer needs more than one read.
-        let mut members = ZipArchive::open(Interruptible {
-            source: Cursor::new(bytes.to_vec()),
-            interrupt: Rc::new(Cell::new(false)),
-            read_bytes: Rc::new(Cell::new(0)),
-            max_read: 3,
-            yield_reads: true,
-            pending: false,
-        })
-        .await?
-        .members();
+        let mut members = ZipArchive::open(Interruptible::short_reads(bytes))
+            .await?
+            .members();
 
         assert!(
             matches!(members.next().await?, Some(Member::Directory { metadata }) if metadata.path == "directory/"),
@@ -240,11 +246,7 @@ async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
         ("stored", STORED, 1),
         ("deflate", DEFLATE, 1),
         ("empty", STORED, 3),
-        (
-            "empty DEFLATE stream",
-            include_bytes!("fixtures/empty-deflate.zip").as_slice(),
-            0,
-        ),
+        ("empty DEFLATE stream", EMPTY_DEFLATE, 0),
     ] {
         for initial_length in [0, 16] {
             let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
@@ -284,18 +286,8 @@ async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
 async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
     for bytes in [STORED, DEFLATE] {
         for reserve in [false, true] {
-            let mut archive = ZipArchive::open(Interruptible {
-                source: Cursor::new(bytes.to_vec()),
-                interrupt: Rc::new(Cell::new(false)),
-                read_bytes: Rc::new(Cell::new(0)),
-                max_read: 3,
-                yield_reads: true,
-                pending: false,
-            })
-            .await?;
-            let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
-                return Err(io::Error::other("expected file").into());
-            };
+            let mut archive = ZipArchive::open(Interruptible::short_reads(bytes)).await?;
+            let mut payload = file_payload(archive.member(1).await?)?;
             let expected = b"hello ZIP\n".repeat(14000);
             let mut first = Vec::new();
             assert!(payload.next_chunk(&mut first, 7).await?);
@@ -315,9 +307,7 @@ async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
             assert_eq!(payload.read_to_end(&mut output).await?, 0);
             assert_eq!(output, previous);
 
-            let Some(Member::File { mut payload, .. }) = archive.member(3).await? else {
-                return Err(io::Error::other("expected empty file").into());
-            };
+            let mut payload = file_payload(archive.member(3).await?)?;
             assert_eq!(payload.read_to_end(&mut output).await?, 0);
             assert_eq!(output, previous);
         }
@@ -325,13 +315,8 @@ async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
 
     // A compressed empty stream still invokes the decoder, which must not
     // expose scratch bytes appended while looking for output.
-    let mut archive = ZipArchive::open(Cursor::new(
-        include_bytes!("fixtures/empty-deflate.zip").as_slice(),
-    ))
-    .await?;
-    let Some(Member::File { mut payload, .. }) = archive.member(0).await? else {
-        return Err(io::Error::other("expected empty DEFLATE file").into());
-    };
+    let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
+    let mut payload = file_payload(archive.member(0).await?)?;
     let mut output = b"prefix".to_vec();
     assert_eq!(payload.read_to_end(&mut output).await?, 0);
     assert_eq!(output, b"prefix");
@@ -347,9 +332,7 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
         assert!(archive.resolved(1).is_none());
 
         {
-            let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
-                return Err(io::Error::other("expected file").into());
-            };
+            let mut payload = file_payload(archive.member(1).await?)?;
 
             let mut chunk = Vec::new();
             assert!(payload.next_chunk(&mut chunk, 1).await?);
@@ -366,9 +349,7 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
         // prefetching or seeking before the next member restores its cursor.
         archive.reader_mut().await?.seek(SeekFrom::End(0)).await?;
 
-        let Some(Member::File { payload, .. }) = archive.member(2).await? else {
-            return Err(io::Error::other("expected selected file").into());
-        };
+        let payload = file_payload(archive.member(2).await?)?;
 
         assert_eq!(contents(payload).await?, b"UTF-8 filename");
 
@@ -382,9 +363,7 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
             Some(Member::Directory { .. })
         ));
 
-        let Some(Member::File { payload, .. }) = archive.next_member().await? else {
-            return Err(io::Error::other("expected sequential file").into());
-        };
+        let payload = file_payload(archive.next_member().await?)?;
 
         payload.skip().await?;
         assert!(archive.member(usize::MAX).await?.is_none());
@@ -409,10 +388,7 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
                 bytes[position] ^= 0x40;
 
                 let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
-                let Some(Member::File { mut payload, .. }) = archive.member(entry_index).await?
-                else {
-                    return Err(io::Error::other("expected corrupt file").into());
-                };
+                let mut payload = file_payload(archive.member(entry_index).await?)?;
 
                 let result = match operation {
                     "read" => contents(payload).await.map(|_| ()),
@@ -443,8 +419,7 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
     let mut encoder = DeflateEncoder::new(Vec::new(), Compression::default());
     encoder.write_all(b"payload")?;
     let encoded = encoder.finish()?;
-    let mut crc = Crc::new();
-    crc.update(b"payload");
+    let crc = crc32(b"payload");
 
     for (label, payload, size) in [
         ("short size", encoded.clone(), 1),
@@ -465,19 +440,12 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
             CompressionMethod::Deflate,
             EntryKind::File { executable: false },
         )?
-        .finish(crc.sum(), payload.len() as u64, size, 0)?;
-        let mut bytes = member.local_header();
-        bytes.extend(payload);
-        let central_offset = bytes.len() as u64;
-        let central = member.central_header();
-        let central_size = central.len() as u64;
-        bytes.extend(central);
-        bytes.extend(end_records(1, central_offset, central_size)?);
+        .finish(crc, payload.len() as u64, size, 0)?;
+        let bytes =
+            single_member_archive(member.local_header(), &payload, member.central_header())?;
         for collect in [false, true] {
             let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
-            let Some(Member::File { mut payload, .. }) = archive.member(0).await? else {
-                return Err(io::Error::other("expected file").into());
-            };
+            let mut payload = file_payload(archive.member(0).await?)?;
 
             let result = if collect {
                 payload.read_to_end(&mut Vec::new()).await.map(|_| ())
@@ -499,25 +467,33 @@ async fn reads_nested_zip_payload_without_interpreting_its_records() -> TestResu
     let mut archive =
         ZipArchive::open(Cursor::new(member_with_attributes(STORED, 0o100644 << 16)?)).await?;
     assert_eq!(archive.entries().len(), 1);
-    let Some(Member::File { payload, .. }) = archive.next_member().await? else {
-        return Err(io::Error::other("expected outer file").into());
-    };
+    let payload = file_payload(archive.next_member().await?)?;
     assert_eq!(contents(payload).await?, STORED);
     assert!(archive.next_member().await?.is_none());
 
     Ok(())
 }
 
-struct Interruptible {
-    source: Cursor<Vec<u8>>,
+#[derive(Default)]
+struct Interruptible<'a> {
+    source: Cursor<&'a [u8]>,
     interrupt: Rc<Cell<bool>>,
     read_bytes: Rc<Cell<usize>>,
-    max_read: usize,
-    yield_reads: bool,
+    short_reads: bool,
     pending: bool,
 }
 
-impl AsyncRead for Interruptible {
+impl<'a> Interruptible<'a> {
+    fn short_reads(bytes: &'a [u8]) -> Self {
+        Self {
+            source: Cursor::new(bytes),
+            short_reads: true,
+            ..Self::default()
+        }
+    }
+}
+
+impl AsyncRead for Interruptible<'_> {
     fn poll_read(
         mut self: Pin<&mut Self>,
         context: &mut Context<'_>,
@@ -534,26 +510,26 @@ impl AsyncRead for Interruptible {
 
         let limit = if self.interrupt.get() {
             2
+        } else if self.short_reads {
+            3
         } else {
-            self.max_read
+            buffer.remaining()
         };
-        let start = self.source.position() as usize;
-        let length = limit
-            .min(buffer.remaining())
-            .min(self.source.get_ref().len() - start);
-
-        buffer.put_slice(&self.source.get_ref()[start..start + length]);
-        self.source.set_position((start + length) as u64);
-        self.pending = self.yield_reads;
+        let length = limit.min(buffer.remaining());
+        let read = self
+            .source
+            .read(&mut buffer.initialize_unfilled()[..length])?;
+        buffer.advance(read);
+        self.pending = self.short_reads;
         if self.interrupt.get() {
-            self.read_bytes.set(length);
+            self.read_bytes.set(read);
         }
 
         Poll::Ready(Ok(()))
     }
 }
 
-impl AsyncSeek for Interruptible {
+impl AsyncSeek for Interruptible<'_> {
     fn start_seek(mut self: Pin<&mut Self>, position: SeekFrom) -> io::Result<()> {
         io::Seek::seek(&mut self.source, position)?;
 
@@ -568,16 +544,12 @@ impl AsyncSeek for Interruptible {
 #[tokio::test]
 async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult {
     for operation in ["payload", "collect", "skip", "member", "validate", "reader"] {
-        let interrupt = Rc::new(Cell::new(false));
-        let read_bytes = Rc::new(Cell::new(0));
         let source = Interruptible {
-            source: Cursor::new(STORED.to_vec()),
-            interrupt: interrupt.clone(),
-            read_bytes: read_bytes.clone(),
-            max_read: usize::MAX,
-            yield_reads: false,
-            pending: false,
+            source: Cursor::new(STORED),
+            ..Interruptible::default()
         };
+        let interrupt = Rc::clone(&source.interrupt);
+        let read_bytes = Rc::clone(&source.read_bytes);
         let mut archive = ZipArchive::open(source).await?;
         if operation == "reader" {
             // Leave a payload active so lending the reader must drain it.
@@ -589,9 +561,7 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
 
         let mut future = Box::pin(async {
             if matches!(operation, "payload" | "collect" | "skip") {
-                let Some(Member::File { mut payload, .. }) = archive.member(1).await? else {
-                    return Err(DecodeError::Io(io::Error::other("expected file")));
-                };
+                let mut payload = file_payload(archive.member(1).await?)?;
 
                 interrupt.set(true);
                 match operation {
@@ -703,8 +673,7 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
 
 #[tokio::test]
 async fn validates_empty_deflate_streams_in_directories() -> TestResult {
-    let bytes = include_bytes!("fixtures/empty-deflate.zip");
-    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+    let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
 
     assert!(matches!(
         archive.member(1).await?,
@@ -713,7 +682,7 @@ async fn validates_empty_deflate_streams_in_directories() -> TestResult {
     assert!(archive.next_member().await?.is_none());
 
     let position = archive.resolved(1).ok_or("unresolved entry")?.data_offset() as usize;
-    let mut corrupt = bytes.to_vec();
+    let mut corrupt = EMPTY_DEFLATE.to_vec();
     corrupt[position] = 0xff;
 
     let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;
@@ -735,9 +704,7 @@ async fn local_metadata_errors_poison_selection_and_full_validation() -> TestRes
 
     for full_validation in [false, true] {
         let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;
-        let Some(Member::File { payload, .. }) = archive.member(2).await? else {
-            return Err(io::Error::other("expected unaffected member").into());
-        };
+        let payload = file_payload(archive.member(2).await?)?;
         assert_eq!(contents(payload).await?, b"UTF-8 filename");
 
         let result = if full_validation {
