@@ -81,9 +81,10 @@ unselected members, establishing complete nonoverlapping record coverage. Withou
 that call or traversal of every member, malformed unselected local records and
 some gaps or overlaps can remain undiscovered.
 
-Repeated member destinations are allowed when the central directory lists them
-in local-header order. This comparison is case-sensitive and ignores empty and
-`.` components, so `d/config` and `d/./config/` name the same destination.
+Duplicated member paths are allowed when they appear in the same relative order
+in the central directory and the local headers. Path comparison is case-sensitive
+and ignores empty and `.` components, so `d/config` and `d/./config/` name the
+same destination.
 
 Each member extra field must have a [supported identifier](crates/zip-codec/APPNOTE.md#member-extra-fields)
 and fit within its header. The reader rejects duplicate identifiers, conflicting
