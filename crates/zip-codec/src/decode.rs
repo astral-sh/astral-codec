@@ -32,17 +32,6 @@ struct DecoderState<R> {
     active: Option<Payload>,
 }
 
-struct Operation<'a, R> {
-    state: &'a mut DecoderState<R>,
-    poisoned: &'a mut bool,
-}
-
-impl<R> Operation<'_, R> {
-    fn commit(self) {
-        *self.poisoned = false;
-    }
-}
-
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
     /// Sets the resource limits for this archive.
     pub fn with_limits(mut self, limits: Limits) -> Self {
@@ -113,10 +102,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         &mut self,
         index: usize,
     ) -> Result<Option<Member<ZipMemberPayload<'_, R>>>, DecodeError> {
-        let operation = self.begin_operation()?;
-        let member = operation.state.prepare_member(index).await?;
-        operation.commit();
-
+        let member = self
+            .run(async |state| state.prepare_member(index).await)
+            .await?;
         Ok(member.map(|member| member.map_payload(|()| ZipMemberPayload { archive: self })))
     }
 
@@ -125,11 +113,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// An active payload is drained first. Other payloads are not decoded;
     /// their CRCs and decoded sizes are still checked when they are read.
     pub async fn validate_all(&mut self) -> Result<(), DecodeError> {
-        let operation = self.begin_operation()?;
-        operation.state.validate_all().await?;
-        operation.commit();
-
-        Ok(())
+        self.run(DecoderState::validate_all).await
     }
 
     /// Borrows the source for operations such as HTTP range prefetching.
@@ -138,10 +122,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// caller may change its cursor, but must not replace the source or change
     /// its contents. Subsequent member selection seeks to the checked offset.
     pub async fn reader_mut(&mut self) -> Result<&mut R, DecodeError> {
-        let operation = self.begin_operation()?;
-        operation.state.drain().await?;
-        operation.commit();
-
+        self.run(DecoderState::drain).await?;
         Ok(&mut self.state.reader)
     }
 
@@ -150,20 +131,19 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
         self.state.reader
     }
 
-    fn begin_operation(&mut self) -> Result<Operation<'_, R>, DecodeError> {
+    async fn run<T>(
+        &mut self,
+        operation: impl AsyncFnOnce(&mut DecoderState<R>) -> Result<T, DecodeError>,
+    ) -> Result<T, DecodeError> {
         if self.poisoned {
             return Err(DecodeError::Poisoned);
         }
 
-        // Poison before any work starts. Only a committed operation restores
-        // usability; errors and cancellation leave the archive poisoned without
-        // relying on Drop to run.
+        // An error or cancellation leaves the archive poisoned.
         self.poisoned = true;
-
-        Ok(Operation {
-            state: &mut self.state,
-            poisoned: &mut self.poisoned,
-        })
+        let value = operation(&mut self.state).await?;
+        self.poisoned = false;
+        Ok(value)
     }
 }
 
@@ -304,16 +284,12 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipMemberPayload<'_, R> {
     /// An error or cancellation poisons the archive and may leave partially
     /// appended data in `buffer`.
     pub async fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> Result<usize, DecodeError> {
-        let operation = self.archive.begin_operation()?;
-        let length = if let Some(active) = &mut operation.state.active {
-            active
-                .read_to_end(&mut operation.state.reader, buffer)
-                .await?
-        } else {
-            0
-        };
-        operation.commit();
-        Ok(length)
+        self.archive
+            .run(async |state| match &mut state.active {
+                Some(active) => active.read_to_end(&mut state.reader, buffer).await,
+                None => Ok(0),
+            })
+            .await
     }
 }
 
@@ -325,19 +301,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R>
         buffer: &mut Vec<u8>,
         target_len: usize,
     ) -> Result<bool, DecodeError> {
-        let operation = self.archive.begin_operation()?;
-        let result = operation.state.read_chunk(buffer, target_len).await?;
-        operation.commit();
-
-        Ok(result)
+        self.archive
+            .run(async |state| state.read_chunk(buffer, target_len).await)
+            .await
     }
 
     async fn skip(self) -> Result<(), DecodeError> {
-        let operation = self.archive.begin_operation()?;
-        operation.state.drain().await?;
-        operation.commit();
-
-        Ok(())
+        self.archive.run(DecoderState::drain).await
     }
 }
 
