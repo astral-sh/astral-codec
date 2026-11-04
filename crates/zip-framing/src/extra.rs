@@ -296,12 +296,11 @@ impl<'a> Extras<'a> {
                 continue;
             };
 
-            // APPNOTE and Info-ZIP define shorter central forms for these
-            // fields. ZIP64 values are resolved and compared separately.
+            // Some Info-ZIP fields have shorter central forms. APPNOTE 4.5.7
+            // defines no such form for the PKWARE UNIX field, so it uses the
+            // default equality check. ZIP64 values are compared separately.
             let equal = match *identifier {
-                ExtraHeaderId::Unix | ExtraHeaderId::InfoZipUnix => {
-                    local.get(..other.len()) == Some(*other)
-                }
+                ExtraHeaderId::InfoZipUnix => local.get(..other.len()) == Some(*other),
                 ExtraHeaderId::ExtendedTimestamp => {
                     local.first() == other.first() && local.get(..other.len()) == Some(*other)
                 }

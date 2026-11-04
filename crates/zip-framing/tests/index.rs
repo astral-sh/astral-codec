@@ -402,11 +402,12 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
             },
         ),
     ] {
+        let unix_extra = field(0x000d, &[&[0; 12], data].concat());
         let archive = Fixture {
             payload: Some(payload.to_vec()),
             external_attributes: attributes,
-            local_extra: field(0x000d, &[&[0; 12], data].concat()),
-            central_extra: field(0x000d, &[0; 12]),
+            local_extra: unix_extra.clone(),
+            central_extra: unix_extra,
             ..Fixture::default()
         }
         .build();
@@ -1320,7 +1321,7 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
     data.extend_from_slice(b"target");
 
     for (local_extra, central_extra) in [
-        (field(0x000d, &data), field(0x000d, &data[..12])),
+        (field(0x000d, &data), field(0x000d, &data)),
         (field(0x000d, &data), Vec::new()),
         (Vec::new(), field(0x000d, &data)),
     ] {
@@ -1342,7 +1343,11 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         );
     }
 
-    for data in [vec![0; 11], [vec![1; 12], b"different".to_vec()].concat()] {
+    for data in [
+        vec![0; 11],
+        [vec![1; 12], b"different".to_vec()].concat(),
+        data,
+    ] {
         let fixture = Fixture {
             local_extra: field(0x000d, &data),
             central_extra: field(0x000d, &[0; 12]),
