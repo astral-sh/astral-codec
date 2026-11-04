@@ -188,27 +188,19 @@ impl CentralDirectoryEntry {
         let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(header), position)?;
         let offset = u32::from_le_bytes(array_at::<42, 4, _>(header));
         let disk = u16::from_le_bytes(array_at::<34, 2, _>(header));
-        let path = parse_name(&variable[..name_length], common.flags, position)?;
-        let (sizes, local_offset, extra) = if extra_length == 0 && comment_length == 0 {
-            let (sizes, offset) =
-                Extras::default().central_sizes(common, offset, disk, position)?;
-            (sizes, offset, Box::default())
+        let (name, rest) = variable.split_at(name_length);
+        let (raw_extra, comment) = rest.split_at(extra_length);
+        let path = parse_name(name, common.flags, position)?;
+        let extras = if raw_extra.is_empty() {
+            Extras::default()
         } else {
-            let raw_extra = &variable[name_length..name_length + extra_length];
-            let extras = Extras::parse(raw_extra, Header::Central, position)?;
-            let (sizes, offset) = extras.central_sizes(common, offset, disk, position)?;
-            extras.check_name(path, position)?;
-            extras.comment(&variable[name_length + extra_length..], position)?;
-            (
-                sizes,
-                offset,
-                if extras.needs_reconciliation() {
-                    raw_extra.into()
-                } else {
-                    Box::default()
-                },
-            )
+            Extras::parse(raw_extra, Header::Central, position)?
         };
+        let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
+        if !rest.is_empty() {
+            extras.check_name(path, position)?;
+            extras.comment(comment, position)?;
+        }
 
         if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
             return Err(invalid(position, "stored member sizes differ"));
@@ -227,7 +219,11 @@ impl CentralDirectoryEntry {
             local_offset,
             made_by: u16::from_le_bytes(array_at::<4, 2, _>(header)),
             attributes: u32::from_le_bytes(array_at::<38, 4, _>(header)),
-            extra,
+            extra: if extras.needs_reconciliation() {
+                raw_extra.into()
+            } else {
+                Box::default()
+            },
             has_zip64_extra: sizes.zip64,
         };
 
