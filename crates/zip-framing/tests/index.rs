@@ -56,6 +56,41 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
         }
     }
 
+    // A ZIP64 extra containing only the local-header offset still selects
+    // 64-bit descriptor sizes (APPNOTE 4.3.9.2).
+    let mut archive = Fixture {
+        payload: Some(Vec::new()),
+        descriptor: Some(false),
+        local_offset: u32::MAX,
+        central_extra: field(1, &0_u64.to_le_bytes()),
+        ..Fixture::default()
+    }
+    .build();
+    set16(&mut archive.bytes, 4, 45);
+    set16(&mut archive.bytes, archive.central + 6, 45);
+    let central_header = &archive.bytes[archive.central..archive.end];
+    for (descriptor_length, valid) in [(12, false), (20, true)] {
+        let mut bytes = archive.bytes[..archive.descriptor].to_vec();
+        // Both descriptor widths are all zeros for the empty payload.
+        bytes.resize(archive.descriptor + descriptor_length, 0);
+        let central = bytes.len();
+        bytes.extend_from_slice(central_header);
+        bytes.extend(end_records(1, central as u64, central_header.len() as u64)?);
+
+        let result = read_validated(&mut Cursor::new(bytes), Limits::default()).await;
+        if valid {
+            assert_eq!(result?.entries().len(), 1);
+        } else {
+            assert!(matches!(
+                result,
+                Err(FrameError::Invalid {
+                    reason: "invalid data descriptor length",
+                    ..
+                })
+            ));
+        }
+    }
+
     Ok(())
 }
 

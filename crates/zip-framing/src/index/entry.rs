@@ -8,9 +8,7 @@ use crate::{
     extra::Extras,
     invalid,
     kind::ExternalAttributes,
-    record::{
-        Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at, parse_name,
-    },
+    record::{Common, GeneralPurposeFlags, RecordReader, array_at, bytes_at, parse_name},
 };
 
 /// A member whose local file entry, extras, and optional data descriptor
@@ -79,12 +77,12 @@ pub struct CentralDirectoryEntry {
     common: Common,
     /// The effective compressed size declared by the central directory.
     ///
-    /// If [`Common::compressed`] is [`SizeField::Zip64`], this comes from the
+    /// If [`Common::compressed`] is a ZIP64 sentinel, this comes from the
     /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
     compressed_size: u64,
     /// The effective uncompressed size declared by the central directory.
     ///
-    /// If [`Common::uncompressed`] is [`SizeField::Zip64`], this comes from the
+    /// If [`Common::uncompressed`] is a ZIP64 sentinel, this comes from the
     /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
     size: u64,
     /// An absolute offset to the central directory entry's corresponding
@@ -105,8 +103,10 @@ pub struct CentralDirectoryEntry {
     /// within [`Self::made_by`].
     attributes: u32,
     /// Extra data retained for local/central reconciliation. ZIP64-only extras
-    /// need no copy: their resolved values are already part of the metadata.
+    /// need no copy: their resolved values and presence are already retained.
     extra: Box<[u8]>,
+    /// Whether the central directory entry contained a ZIP64 extra field.
+    has_zip64_extra: bool,
 }
 
 impl CentralDirectoryEntry {
@@ -215,6 +215,7 @@ impl CentralDirectoryEntry {
             } else {
                 Box::default()
             },
+            has_zip64_extra: sizes.zip64,
         };
 
         Ok((
@@ -365,10 +366,8 @@ impl IndexedEntry {
         }
 
         if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
-            let zip64 = sizes.zip64
-                || directory.common.compressed == SizeField::Zip64
-                || directory.common.uncompressed == SizeField::Zip64;
-            self.check_descriptor(reader, data_end, zip64).await?;
+            self.check_descriptor(reader, data_end, sizes.zip64 || directory.has_zip64_extra)
+                .await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
