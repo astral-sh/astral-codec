@@ -48,6 +48,8 @@ pub enum ExtraHeaderId {
     UnicodeComment,
     /// Info-ZIP Unicode path.
     UnicodePath,
+    /// ASi UNIX mode and symbolic-link metadata.
+    AsiUnix,
     /// Info-ZIP UNIX UID/GID metadata (the "new" UNIX field).
     InfoZipUnixNew,
     /// WinZip AES encryption metadata.
@@ -73,6 +75,7 @@ impl From<u16> for ExtraHeaderId {
             0x5855 => Self::InfoZipUnix,
             0x6375 => Self::UnicodeComment,
             0x7075 => Self::UnicodePath,
+            0x756e => Self::AsiUnix,
             0x7855 => Self::InfoZipUnixNew,
             0x9901 => Self::Aes,
             _ => Self::Unknown(value),
@@ -97,6 +100,7 @@ impl From<ExtraHeaderId> for u16 {
             ExtraHeaderId::InfoZipUnix => 0x5855,
             ExtraHeaderId::UnicodeComment => 0x6375,
             ExtraHeaderId::UnicodePath => 0x7075,
+            ExtraHeaderId::AsiUnix => 0x756e,
             ExtraHeaderId::InfoZipUnixNew => 0x7855,
             ExtraHeaderId::Aes => 0x9901,
             ExtraHeaderId::Unknown(value) => value,
@@ -139,6 +143,7 @@ impl<'a> Extras<'a> {
                 | ExtraHeaderId::EncryptionRecipients
                 | ExtraHeaderId::Aes => Some("encryption extra field"),
                 ExtraHeaderId::ExtendedLanguageEncoding => Some("alternate name encoding"),
+                ExtraHeaderId::AsiUnix => Some("ASi UNIX file attributes"),
                 _ => None,
             };
             if let Some(feature) = unsupported {

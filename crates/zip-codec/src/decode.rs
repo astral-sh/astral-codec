@@ -170,12 +170,6 @@ impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
                 self.drain().await?;
                 Member::Directory { metadata }
             }
-            Kind::HardLink(target) => Member::HardLink {
-                metadata,
-                target: target.to_owned(),
-                size,
-                payload: (),
-            },
             Kind::SymbolicLink(expected) => {
                 let mut target = Vec::new();
                 active.read_to_end(&mut self.reader, &mut target).await?;
@@ -319,7 +313,6 @@ enum Kind<'a> {
     File(bool),
     Directory,
     SymbolicLink(Option<&'a str>),
-    HardLink(&'a str),
     Special(SpecialKind),
 }
 
@@ -333,7 +326,6 @@ impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
                 entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
             )),
             EntryKind::Directory => Ok(Self::Directory),
-            EntryKind::HardLink { target } => Ok(Self::HardLink(target)),
             EntryKind::SymbolicLink { unix_target } => {
                 if directory.size() > u64::from(u16::MAX) {
                     return Err(DecodeError::Integrity {
@@ -346,7 +338,7 @@ impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
             EntryKind::CharacterDevice { .. } => Ok(Self::Special(SpecialKind::CharacterDevice)),
             EntryKind::BlockDevice { .. } => Ok(Self::Special(SpecialKind::BlockDevice)),
             EntryKind::Fifo => Ok(Self::Special(SpecialKind::Fifo)),
-            EntryKind::VolumeLabel { .. } => Err(DecodeError::Unsupported {
+            EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
                 position: directory.position(),
                 feature: "volume label",
             }),
