@@ -80,22 +80,15 @@ fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Bo
 #[tokio::test]
 async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
     for (attributes, expected_kind, expected_error) in [
-        (
-            0x08,
-            Some(DecodedEntryKind::VolumeLabel { unix_data: None }),
-            "volume label",
-        ),
+        (0x08, Some(DecodedEntryKind::VolumeLabel), "volume label"),
         (
             0o140600 << 16,
-            Some(DecodedEntryKind::Socket { unix_data: None }),
+            Some(DecodedEntryKind::Socket),
             "unsupported file attributes",
         ),
         (
             0o030600 << 16,
-            Some(DecodedEntryKind::Unknown {
-                mode: 0o030000,
-                unix_data: None,
-            }),
+            Some(DecodedEntryKind::Unknown { mode: 0o030000 }),
             "unsupported file attributes",
         ),
         (
@@ -658,30 +651,25 @@ async fn extracts_with_shared_archive_policy() -> TestResult {
 }
 
 #[tokio::test]
-async fn projects_appnote_unix_links_and_compares_redundant_targets() -> TestResult {
-    let mut archive =
-        ZipArchive::open(Cursor::new(include_bytes!("fixtures/unix-links.zip"))).await?;
+async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestResult {
+    let bytes = include_bytes!("fixtures/unix-links.zip");
+    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
 
     assert!(
         matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );
 
-    let Some(Member::HardLink {
-        target,
-        size,
-        payload,
-        ..
-    }) = archive.next_member().await?
-    else {
-        return Err(io::Error::other("expected UNIX hard link").into());
-    };
+    assert!(matches!(
+        archive.next_member().await,
+        Err(DecodeError::Framing(FrameError::Unsupported {
+            feature: "ambiguous UNIX hard link",
+            ..
+        }))
+    ));
 
-    assert_eq!(target, "target");
-    assert_eq!(size, 0);
-    payload.skip().await?;
-
+    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
     assert!(
-        matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
+        matches!(archive.member(2).await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );
 
     assert!(matches!(

@@ -299,28 +299,13 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
             0o060600,
         ),
         ("fifo", 3, 0o010600 << 16, EntryKind::Fifo, 0o010600),
-        (
-            "socket",
-            3,
-            0o140600 << 16,
-            EntryKind::Socket { unix_data: None },
-            0o140600,
-        ),
-        (
-            "volume",
-            0,
-            0x08,
-            EntryKind::VolumeLabel { unix_data: None },
-            0,
-        ),
+        ("socket", 3, 0o140600 << 16, EntryKind::Socket, 0o140600),
+        ("volume", 0, 0x08, EntryKind::VolumeLabel, 0),
         (
             "unknown",
             3,
             0o030600 << 16,
-            EntryKind::Unknown {
-                mode: 0o030000,
-                unix_data: None,
-            },
+            EntryKind::Unknown { mode: 0o030000 },
             0o030600,
         ),
     ] {
@@ -363,25 +348,9 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
     };
     for (attributes, data, payload, expected) in [
         (
-            0,
-            b"target".as_slice(),
-            b"".as_slice(),
-            EntryKind::HardLink {
-                target: "target".to_owned(),
-            },
-        ),
-        (
-            0o100644 << 16,
-            b"target",
-            b"data",
-            EntryKind::HardLink {
-                target: "target".to_owned(),
-            },
-        ),
-        (
             0o120777 << 16,
             "../café".as_bytes(),
-            b"",
+            b"".as_slice(),
             EntryKind::SymbolicLink {
                 unix_target: Some("../café".to_owned()),
             },
@@ -409,31 +378,6 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
             b"",
             EntryKind::BlockDevice {
                 numbers: Some(device),
-            },
-        ),
-        (
-            0o140600 << 16,
-            b"opaque",
-            b"",
-            EntryKind::Socket {
-                unix_data: Some(b"opaque".to_vec()),
-            },
-        ),
-        (
-            0o030600 << 16,
-            b"opaque",
-            b"",
-            EntryKind::Unknown {
-                mode: 0o030000,
-                unix_data: Some(b"opaque".to_vec()),
-            },
-        ),
-        (
-            0x08,
-            b"opaque",
-            b"",
-            EntryKind::VolumeLabel {
-                unix_data: Some(b"opaque".to_vec()),
             },
         ),
     ] {
@@ -508,7 +452,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         ),
         (
             "link",
-            0o100644 << 16,
+            0o120777 << 16,
             b"",
             Some(b"\xff".as_slice()),
             20,
@@ -537,6 +481,70 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
             Some(b"target"),
             20,
             "unexpected UNIX file-type data",
+        ),
+        (
+            "device",
+            0o020600 << 16,
+            b"",
+            Some(&[]),
+            20,
+            "invalid UNIX device numbers",
+        ),
+        (
+            "link",
+            0o120777 << 16,
+            b"target",
+            Some(&[]),
+            20,
+            "empty symbolic-link target",
+        ),
+        (
+            "socket",
+            0o140600 << 16,
+            b"",
+            Some(b"opaque"),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "unknown",
+            0o030600 << 16,
+            b"",
+            Some(b"opaque"),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "volume",
+            0x08,
+            b"",
+            Some(b"opaque"),
+            20,
+            "unexpected UNIX file-type data",
+        ),
+        (
+            "volume/",
+            0x08,
+            b"",
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "volume",
+            (0o100644 << 16) | 0x08,
+            b"",
+            None,
+            20,
+            "inconsistent file attributes",
+        ),
+        (
+            "volume",
+            0x08,
+            b"data",
+            None,
+            20,
+            "non-file member has payload data",
         ),
         (
             "device",
@@ -706,6 +714,7 @@ async fn rejects_unsupported_extras_in_either_header() {
         (0x0016, "digital signature"),
         (0x0017, "encryption extra field"),
         (0x0019, "encryption extra field"),
+        (0x756e, "ASi UNIX file attributes"),
         (0x9901, "encryption extra field"),
     ] {
         for local in [false, true] {
@@ -1361,8 +1370,10 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         (Vec::new(), field(0x000d, &data)),
     ] {
         let fixture = Fixture {
-            local_extra,
-            central_extra,
+            external_attributes: 0o120777 << 16,
+            payload: Some(Vec::new()),
+            local_extra: local_extra.clone(),
+            central_extra: central_extra.clone(),
             ..Fixture::default()
         };
 
@@ -1372,16 +1383,41 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
         let entry = index.resolved(0).ok_or("unresolved entry")?;
         assert_eq!(
             entry.kind(),
-            &EntryKind::HardLink {
-                target: "target".to_owned()
+            &EntryKind::SymbolicLink {
+                unix_target: Some("target".to_owned())
             }
         );
+
+        // The same target on an untyped or regular file can be read as a hard
+        // link, even if the entry also has its own file contents.
+        for attributes in [0, 0o100644 << 16] {
+            for payload in [b"".as_slice(), b"replacement"] {
+                let archive = Fixture {
+                    external_attributes: attributes,
+                    payload: Some(payload.to_vec()),
+                    local_extra: local_extra.clone(),
+                    central_extra: central_extra.clone(),
+                    ..Fixture::default()
+                }
+                .build();
+                assert!(matches!(
+                    read_validated(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                    Err(FrameError::Unsupported {
+                        position: 0,
+                        feature: "ambiguous UNIX hard link"
+                    })
+                ));
+            }
+        }
     }
 
-    for data in [
-        vec![0; 11],
-        [vec![1; 12], b"different".to_vec()].concat(),
-        data,
+    for (data, expected) in [
+        (vec![0; 11], "truncated UNIX extra field"),
+        (
+            [vec![1; 12], b"different".to_vec()].concat(),
+            "local and central extra fields disagree",
+        ),
+        (data, "local and central extra fields disagree"),
     ] {
         let fixture = Fixture {
             local_extra: field(0x000d, &data),
@@ -1389,11 +1425,10 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
             ..Fixture::default()
         };
 
-        assert!(
-            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default())
-                .await
-                .is_err()
-        );
+        assert!(matches!(
+            read_validated(&mut Cursor::new(fixture.build().bytes), Limits::default()).await,
+            Err(FrameError::Invalid { reason, .. }) if reason == expected
+        ));
     }
 
     Ok(())
@@ -1471,6 +1506,8 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let unix_data = [vec![0; 12], b"target".to_vec()].concat();
     let second = Fixture {
         name: b"next".to_vec(),
+        external_attributes: 0o120777 << 16,
+        payload: Some(Vec::new()),
         local_extra: field(0x000d, &unix_data),
         descriptor: Some(true),
         local_offset: first.central as u32,
@@ -1504,8 +1541,8 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
     assert_eq!(entry.directory().path(), "next");
     assert_eq!(entry.record_range(), first.central as u64..central as u64);
-    let expected_link = EntryKind::HardLink {
-        target: "target".to_owned(),
+    let expected_link = EntryKind::SymbolicLink {
+        unix_target: Some("target".to_owned()),
     };
     assert_eq!(entry.kind(), &expected_link);
     assert!(index.resolved(0).is_some());

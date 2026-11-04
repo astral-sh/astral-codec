@@ -71,9 +71,9 @@ are rejected when the affected records are checked. Listing alone does not
 validate unselected local records. Archive and member comments must be UTF-8
 regardless of the member's UTF-8 flag.
 
-The member adapter supports regular files, directories, symbolic links, APPNOTE
-Unix hard links, and the special kinds represented by `archive-trait`. Volume
-labels, sockets, and conflicting file-type attributes cannot be projected.
+The member adapter supports regular files, directories, symbolic links, and
+the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
+Volume labels, sockets, and conflicting file-type attributes cannot be projected.
 Unknown extra fields are checked as bounded records and otherwise ignored.
 
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
