@@ -27,7 +27,10 @@ record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
 **Timestamps and ownership.** macOS `ditto` writes two timestamps in both
 copies of `0x5855` and a UID/GID pair in the local header. Info-ZIP `zip`
 writes timestamps in `0x5455` and ownership in `0x7875`. We ignore these
-values when extracting. [Info-ZIP field layouts][infozip]
+values when extracting. For `0x7855`, the local field holds a 16-bit UID/GID
+pair and the central field is empty. Central `0x5455` and `0x7855` fields
+require local copies. We reject either alongside `0x5855`.
+[Info-ZIP field layouts][infozip]
 
 ## Open policy questions
 

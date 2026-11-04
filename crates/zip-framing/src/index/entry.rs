@@ -5,7 +5,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use crate::{
     Budget, CompressionMethod, EntryKind, Error, HostSystem, add,
     constants::{signature, size},
-    extra::Extras,
+    extra::{Extras, Header},
     invalid,
     kind::ExternalAttributes,
     record::{Common, GeneralPurposeFlags, RecordReader, array_at, bytes_at, parse_name},
@@ -181,7 +181,11 @@ impl CentralDirectoryEntry {
             )
             .await?;
 
-        let extras = Extras::parse(&variable[name_length..name_length + extra_length], position)?;
+        let extras = Extras::parse(
+            &variable[name_length..name_length + extra_length],
+            Header::Central,
+            position,
+        )?;
         let (sizes, local_offset) = extras.central_sizes(
             common,
             u32::from_le_bytes(array_at::<42, 4, _>(&header)),
@@ -324,7 +328,7 @@ impl IndexedEntry {
             )
             .await?;
 
-        let extras = Extras::parse(&variable[name_length..], position)?;
+        let extras = Extras::parse(&variable[name_length..], Header::Local, position)?;
         let sizes = extras.local_sizes(common, position)?;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
         // Header agreement below also requires identical encoding flags.
@@ -333,7 +337,10 @@ impl IndexedEntry {
         }
         extras.check_name(&directory.path, position)?;
 
-        let unix_data = extras.resolve(Extras::parse(&directory.extra, position)?, position)?;
+        let unix_data = extras.resolve(
+            Extras::parse(&directory.extra, Header::Central, position)?,
+            position,
+        )?;
 
         if (Common {
             crc: directory.common.crc,
