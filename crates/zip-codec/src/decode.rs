@@ -5,7 +5,9 @@ use std::io::{self, SeekFrom};
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{Entry, EntryKind, Index, IndexedEntry, Limits, constants::attributes};
+use zip_framing::{
+    Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, constants::attributes,
+};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -13,6 +15,14 @@ use crate::payload::{CHUNK_SIZE, Payload};
 pub struct ZipArchive<R> {
     state: DecoderState<R>,
     poisoned: bool,
+}
+
+/// Configures a ZIP reader before opening its central directory.
+#[must_use]
+pub struct ZipArchiveBuilder<R> {
+    reader: R,
+    limits: Limits,
+    extra_fields: ExtraFieldPolicy,
 }
 
 struct DecoderState<R> {
@@ -33,28 +43,50 @@ impl<R> Operation<'_, R> {
     }
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens and validates the central directory using default resource limits.
-    pub async fn open(reader: R) -> Result<Self, DecodeError> {
-        Self::open_with_limits(reader, Limits::default()).await
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
+    /// Sets the resource limits for this archive.
+    pub fn with_limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
     }
 
-    /// Opens and validates the central directory using explicit resource limits.
-    ///
-    /// Local records are checked on member access. Use [`Self::validate_all`]
-    /// to check metadata for every member before reading any payloads.
-    pub async fn open_with_limits(mut reader: R, limits: Limits) -> Result<Self, DecodeError> {
-        let index = Index::read(&mut reader, limits).await?;
+    /// Sets the extra-field policy for both central and local headers.
+    pub fn with_policy(mut self, policy: ExtraFieldPolicy) -> Self {
+        self.extra_fields = policy;
+        self
+    }
 
-        Ok(Self {
+    /// Reads and validates the central directory. Local headers are checked
+    /// on member access or by [`ZipArchive::validate_all`].
+    pub async fn open(mut self) -> Result<ZipArchive<R>, DecodeError> {
+        let index =
+            Index::read_with_policy(&mut self.reader, self.limits, self.extra_fields).await?;
+
+        Ok(ZipArchive {
             state: DecoderState {
-                reader,
+                reader: self.reader,
                 index,
                 next: 0,
                 active: None,
             },
             poisoned: false,
         })
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
+    /// Opens with default resource limits and accepts only ZIP64 member extra fields.
+    pub async fn open(reader: R) -> Result<Self, DecodeError> {
+        Self::builder(reader).open().await
+    }
+
+    /// Configures resource limits and the member extra-field policy before opening the archive.
+    pub fn builder(reader: R) -> ZipArchiveBuilder<R> {
+        ZipArchiveBuilder {
+            reader,
+            limits: Limits::default(),
+            extra_fields: ExtraFieldPolicy::default(),
+        }
     }
 
     /// Returns indexed members without fetching local records or payloads.
