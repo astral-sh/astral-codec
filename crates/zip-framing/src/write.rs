@@ -14,7 +14,7 @@ use crate::{
 // APPNOTE 4.4.2: the high byte identifies the host system for external
 // attributes; the low byte is the ZIP specification version (45 = 4.5).
 // We always emit UNIX mode bits, regardless of the platform running the encoder.
-const VERSION_MADE_BY: u16 = ((HostSystem::Unix.to_byte() as u16) << 8) | version::ZIP64;
+const VERSION_MADE_BY: u16 = ((HostSystem::Unix.to_wire() as u16) << 8) | version::ZIP64;
 
 // 00:00:00, 1980-01-01 in the DOS date/time format.
 const DEFAULT_TIME: u16 = 0;
