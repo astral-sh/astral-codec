@@ -1204,17 +1204,26 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
             .is_empty()
     );
 
-    let archive = Fixture {
-        archive_comment: empty,
-        ..Fixture::default()
+    // The signature can straddle the comment length (little-endian "PK").
+    let mut split = vec![0; usize::from(u16::from_le_bytes(*b"PK"))];
+    split[..2].copy_from_slice(b"\x05\x06");
+    for (comment, shadow_offset) in [
+        ([empty.as_slice(), b"x"].concat(), 22), // Fake EOCD stops before EOF.
+        (empty, 22),                             // Both records reach EOF.
+        (b"dataPK\x05\x06".to_vec(), 26),        // Too short for a second EOCD.
+        (split, 20),
+    ] {
+        let archive = Fixture {
+            archive_comment: comment,
+            ..Fixture::default()
+        }
+        .build();
+        assert!(matches!(
+            Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Err(FrameError::Invalid { position, reason: "ambiguous end records" })
+                if position == archive.end as u64 + shadow_offset
+        ));
     }
-    .build();
-
-    assert!(
-        read_validated(&mut Cursor::new(archive.bytes), Limits::default())
-            .await
-            .is_err()
-    );
 
     Ok(())
 }
@@ -1318,12 +1327,9 @@ async fn finds_end_records_across_scan_groups() -> TestResult {
 async fn bounds_end_record_search_with_short_reads() -> TestResult {
     for byte in [0, b'a'] {
         let mut comment = vec![byte; usize::from(u16::MAX)];
-        // A signature whose declared comment does not reach EOF is not another
-        // end record. Place it across a short-read boundary near the real EOCD.
-        comment[1..5].copy_from_slice(b"PK\x05\x06");
-        // Searching complete signatures can also find one too close to EOF
-        // to hold an end record. It is comment data, not a second candidate.
-        comment[usize::from(u16::MAX) - 4..].copy_from_slice(b"PK\x05\x06");
+        // Partial signatures, even at EOF, are ordinary comment bytes.
+        comment[1..4].copy_from_slice(b"PK\x05");
+        comment[usize::from(u16::MAX) - 3..].copy_from_slice(b"PK\x05");
         let mut source = Observed::new(end_record(0, 0, 0, &comment));
         source.max_read = 3;
         assert!(
