@@ -95,38 +95,16 @@ async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> Te
 async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResult {
     let source = b"contents contents contents".as_slice();
 
+    let default = ZipFileOptions::default();
+    let stored = default.with_compression(CompressionMethod::Stored);
+    let deflated = default.with_compression(CompressionMethod::Deflate);
     for default_method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
         let cases = [
-            (
-                "stored",
-                ZipFileOptions::default().with_compression(CompressionMethod::Stored),
-                source,
-                CompressionMethod::Stored,
-            ),
-            (
-                "default-after-stored",
-                ZipFileOptions::default(),
-                source,
-                default_method,
-            ),
-            (
-                "deflated",
-                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
-                source,
-                CompressionMethod::Deflate,
-            ),
-            (
-                "default-after-deflated",
-                ZipFileOptions::default(),
-                source,
-                default_method,
-            ),
-            (
-                "empty",
-                ZipFileOptions::default().with_compression(CompressionMethod::Deflate),
-                b"".as_slice(),
-                CompressionMethod::Stored,
-            ),
+            ("stored", stored, source, CompressionMethod::Stored),
+            ("default-after-stored", default, source, default_method),
+            ("deflated", deflated, source, CompressionMethod::Deflate),
+            ("default-after-deflated", default, source, default_method),
+            ("empty", deflated, &b""[..], CompressionMethod::Stored),
         ];
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
             .with_compression(default_method)
@@ -157,11 +135,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
             assert_eq!(metadata.path, path);
 
             let mut decoded = Vec::new();
-            let mut chunk = Vec::new();
-            while payload.next_chunk(&mut chunk, usize::MAX).await? {
-                decoded.extend_from_slice(&chunk);
-            }
-
+            payload.read_to_end(&mut decoded).await?;
             assert_eq!(decoded, contents, "{path}");
         }
     }
@@ -226,39 +200,55 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
     Ok(())
 }
 
-#[derive(Default)]
+#[derive(Clone, Copy, Debug)]
+enum Fault {
+    WriteAfter(usize),
+    Seek(usize),
+    Flush,
+    PauseWrite,
+    PauseSeek(usize),
+}
+
 struct FailingWriter {
     inner: Cursor<Vec<u8>>,
-    remaining: usize,
-    fail_flush: bool,
-    pause_write: bool,
-    fail_seek: Option<usize>,
-    pause_seek: Option<usize>,
+    fault: Fault,
     seeks: Rc<Cell<usize>>,
+}
+
+impl FailingWriter {
+    fn new(fault: Fault) -> Self {
+        Self {
+            inner: Cursor::default(),
+            fault,
+            seeks: Rc::default(),
+        }
+    }
 }
 
 impl AsyncWrite for FailingWriter {
     fn poll_write(
-        mut self: Pin<&mut Self>,
+        self: Pin<&mut Self>,
         context: &mut Context<'_>,
         bytes: &[u8],
     ) -> Poll<io::Result<usize>> {
-        if self.pause_write && !self.inner.get_ref().is_empty() {
-            return Poll::Pending;
-        }
-
-        if self.remaining == 0 {
-            return Poll::Ready(Err(io::Error::other("injected write error")));
-        }
-
-        let length = bytes.len().min(self.remaining);
-        self.remaining -= length;
-
-        Pin::new(&mut self.inner).poll_write(context, &bytes[..length])
+        let writer = self.get_mut();
+        let bytes = match &mut writer.fault {
+            Fault::PauseWrite if !writer.inner.get_ref().is_empty() => return Poll::Pending,
+            Fault::WriteAfter(0) => {
+                return Poll::Ready(Err(io::Error::other("injected write error")));
+            }
+            Fault::WriteAfter(remaining) => {
+                let length = bytes.len().min(*remaining);
+                *remaining -= length;
+                &bytes[..length]
+            }
+            _ => bytes,
+        };
+        Pin::new(&mut writer.inner).poll_write(context, bytes)
     }
 
     fn poll_flush(self: Pin<&mut Self>, _: &mut Context<'_>) -> Poll<io::Result<()>> {
-        Poll::Ready(if self.fail_flush {
+        Poll::Ready(if matches!(self.fault, Fault::Flush) {
             Err(io::Error::other("injected flush error"))
         } else {
             Ok(())
@@ -277,50 +267,31 @@ impl AsyncSeek for FailingWriter {
     }
 
     fn poll_complete(mut self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<io::Result<u64>> {
-        if self.fail_seek == Some(self.seeks.get()) {
-            return Poll::Ready(Err(io::Error::other("injected seek error")));
+        match self.fault {
+            Fault::Seek(count) if self.seeks.get() == count => {
+                Poll::Ready(Err(io::Error::other("injected seek error")))
+            }
+            Fault::PauseSeek(count) if self.seeks.get() == count => Poll::Pending,
+            _ => Pin::new(&mut self.inner).poll_complete(context),
         }
-
-        // The cancellation test drops the future when this seek becomes pending.
-        if self.pause_seek == Some(self.seeks.get()) {
-            return Poll::Pending;
-        }
-
-        Pin::new(&mut self.inner).poll_complete(context)
     }
 }
 
 #[tokio::test]
 async fn output_and_short_source_errors_poison_builders() -> TestResult {
-    for remaining in [0, 1, 55, 80] {
-        let mut builder = ZipEncoder::new(FailingWriter {
-            remaining,
-            ..FailingWriter::default()
-        })
-        .builder();
-
+    for fault in [
+        Fault::WriteAfter(0),
+        Fault::WriteAfter(1),
+        Fault::WriteAfter(55),
+        Fault::WriteAfter(80),
+        Fault::Seek(1),
+        Fault::Seek(2),
+    ] {
+        let mut builder = ZipEncoder::new(FailingWriter::new(fault)).builder();
         let result = builder
             .add_file("file", &b"payload"[..], EntryMetadata::default())
             .await;
-
-        assert!(result.is_err());
-        assert!(matches!(builder.finish().await, Err(BuildError::Poisoned)));
-    }
-
-    for fail_seek in [1, 2] {
-        let mut builder = ZipEncoder::new(FailingWriter {
-            remaining: usize::MAX,
-            fail_seek: Some(fail_seek),
-            ..FailingWriter::default()
-        })
-        .builder();
-
-        assert!(
-            builder
-                .add_file("file", &b"payload"[..], EntryMetadata::default())
-                .await
-                .is_err()
-        );
+        assert!(result.is_err(), "{fault:?}");
         assert!(matches!(builder.finish().await, Err(BuildError::Poisoned)));
     }
 
@@ -336,13 +307,7 @@ async fn output_and_short_source_errors_poison_builders() -> TestResult {
 
     assert!(matches!(builder.finish().await, Err(BuildError::Poisoned)));
 
-    let builder = ZipEncoder::new(FailingWriter {
-        remaining: usize::MAX,
-        fail_flush: true,
-        ..FailingWriter::default()
-    })
-    .builder();
-
+    let builder = ZipEncoder::new(FailingWriter::new(Fault::Flush)).builder();
     assert!(matches!(
         builder.finish().await,
         Err(BuildError::Encoder(_))
@@ -353,13 +318,8 @@ async fn output_and_short_source_errors_poison_builders() -> TestResult {
 
 #[tokio::test]
 async fn cancellation_after_output_starts_poisoning_the_builder() -> TestResult {
-    for pause_seek in [None, Some(1), Some(2)] {
-        let mut writer = FailingWriter {
-            remaining: usize::MAX,
-            pause_write: pause_seek.is_none(),
-            pause_seek,
-            ..FailingWriter::default()
-        };
+    for fault in [Fault::PauseWrite, Fault::PauseSeek(1), Fault::PauseSeek(2)] {
+        let mut writer = FailingWriter::new(fault);
         let seeks = Rc::clone(&writer.seeks);
         let mut builder = ZipEncoder::new(&mut writer).builder();
 
@@ -369,10 +329,9 @@ async fn cancellation_after_output_starts_poisoning_the_builder() -> TestResult 
             poll_fn(|context| {
                 assert!(future.as_mut().poll(context).is_pending());
 
-                if pause_seek.is_none_or(|count| seeks.get() == count) {
-                    Poll::Ready(())
-                } else {
-                    Poll::Pending
+                match fault {
+                    Fault::PauseSeek(count) if seeks.get() != count => Poll::Pending,
+                    _ => Poll::Ready(()),
                 }
             })
             .await;
