@@ -23,7 +23,7 @@
 //! ## ZIP compatibility
 //!
 //! By default, zip-framing rejects Stored members with data descriptors because
-//! libarchive's streaming reader can mistake payload bytes for a descriptor.
+//! a streaming reader can mistake payload bytes for a descriptor.
 //! To accept these members, set [`ReadOptions::allow_stored_data_descriptors`].
 
 #![forbid(unsafe_code)]
