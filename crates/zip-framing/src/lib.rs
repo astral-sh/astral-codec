@@ -19,6 +19,19 @@
 //!   then verify their decoded sizes and CRC32s.
 //!
 //! - zip-framing assumes that the ZIP source does not change.
+//!
+//! ## ZIP compatibility
+//!
+//! [APPNOTE] §§4.3.9 and 4.4.4 permit Stored members with data descriptors
+//! (general purpose bit 3).
+//! By default, zip-framing rejects these members when opening the central directory.
+//! When reading from a pipe, libarchive can mistake bytes in a Stored payload for
+//! a descriptor and extract the bytes that follow as another member. DEFLATE marks
+//! its own stream boundary, so zip-framing accepts DEFLATE descriptors by default.
+//! Set [`ReadOptions::allow_stored_data_descriptors`] to accept Stored descriptors.
+//! The reader locates the descriptor using the size in the central directory.
+//!
+//! [APPNOTE]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
 
 #![forbid(unsafe_code)]
 

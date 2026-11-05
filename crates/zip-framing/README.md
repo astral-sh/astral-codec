@@ -13,9 +13,6 @@ unselected members. Payload integrity and compression belong to `zip-codec`.
 `Index::read` accepts only the ZIP64 extra field in member headers.
 `Index::read_with_policy(reader, limits, ExtraFieldPolicy::AllowListed)` also
 accepts the [seven supported metadata fields](../zip-codec/APPNOTE.md#member-extra-fields).
-Opening also rejects Stored members with data descriptors by default.
-To accept them, set `ReadOptions::allow_stored_data_descriptors` when calling
-`Index::read_with_options`. DEFLATE descriptors are accepted by default.
 
 Kinds include volume labels, sockets, and unknown Unix types even though
 `zip-codec` cannot project them. `EntryKind` carries type-specific PKWARE UNIX

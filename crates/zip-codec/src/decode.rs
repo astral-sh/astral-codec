@@ -48,10 +48,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 
     /// Allows Stored members with data descriptors (general purpose bit 3).
     ///
-    /// Disabled by default because streaming extractors can mistake Stored
-    /// payload bytes for a descriptor. DEFLATE marks its own stream boundary,
-    /// so its descriptors are accepted by default. All descriptors must agree with
-    /// the central directory.
+    /// Disabled by default. See the [ZIP compatibility notes](zip_framing#zip-compatibility).
     pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
         self.options.allow_stored_data_descriptors = allow;
         self

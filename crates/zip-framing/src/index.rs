@@ -59,9 +59,7 @@ impl Drop for DirectoryWindow {
 pub struct ReadOptions {
     /// Extra fields accepted in central and local headers.
     pub extra_fields: ExtraFieldPolicy,
-    /// Accept Stored members with data descriptors (general purpose bit 3).
-    /// Disabled by default because a streaming reader can mistake payload bytes
-    /// for a descriptor and interpret the remaining bytes as another member.
+    /// Accept Stored members with data descriptors. Disabled by default.
     pub allow_stored_data_descriptors: bool,
 }
 

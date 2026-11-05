@@ -18,12 +18,7 @@ two files, `outer` containing `PUBLIC` and `ghost` containing `SECRET`.
 The split occurs with either a signed or an unsigned real descriptor.
 Clearing bit 3 or switching the member to DEFLATE made the readers agree.
 
-**Decision.** Reject Stored members with general purpose bit 3 set when
-opening the central directory. APPNOTE §§4.3.9 and 4.4.4 permit these members,
-and Python produces them when writing Stored data to a pipe. Call
-`allow_stored_data_descriptors(true)` to read them using the central
-directory's sizes and CRC. DEFLATE descriptors are accepted by default
-because DEFLATE marks its own stream boundary.
+**Decision.** Stored members with data descriptors require an opt-in.
 
 <details>
 <summary>Reproduce the member lists on macOS</summary>

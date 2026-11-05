@@ -23,8 +23,6 @@ descriptor and finish the archive with a classic end record. We accept this
 when the descriptor agrees with the central directory and the directory's
 entry count, size, and offset fit in the classic record. A sentinel in the end
 record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
-For Stored members, descriptors of either width require
-`allow_stored_data_descriptors(true)`.
 
 ## Member extra fields
 
