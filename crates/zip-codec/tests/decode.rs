@@ -23,7 +23,6 @@ use zip_framing::{
 type TestResult = Result<(), Box<dyn Error>>;
 
 const STORED: &[u8] = include_bytes!("fixtures/stored.zip");
-const STORED_DESCRIPTOR: &[u8] = include_bytes!("fixtures/stored-descriptor.zip");
 const DEFLATE: &[u8] = include_bytes!("fixtures/deflate.zip");
 const EMPTY_DEFLATE: &[u8] = include_bytes!("fixtures/empty-deflate.zip");
 
@@ -31,7 +30,10 @@ const EMPTY_DEFLATE: &[u8] = include_bytes!("fixtures/empty-deflate.zip");
 // use one fixture per compression method; framing owns the layout edge cases.
 const FIXTURES: &[(&str, &[u8])] = &[
     ("stored", STORED),
-    ("stored descriptor", STORED_DESCRIPTOR),
+    (
+        "stored descriptor",
+        include_bytes!("fixtures/stored-descriptor.zip"),
+    ),
     ("stored ZIP64", include_bytes!("fixtures/stored-zip64.zip")),
     ("deflate", DEFLATE),
     (
@@ -375,13 +377,8 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
 
 #[tokio::test]
 async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult {
-    for (original, allow) in [(STORED, false), (DEFLATE, false), (STORED_DESCRIPTOR, true)] {
-        let open = |bytes| {
-            ZipArchive::builder(Cursor::new(bytes))
-                .allow_stored_data_descriptors(allow)
-                .open()
-        };
-        let mut archive = open(original.to_vec()).await?;
+    for original in [STORED, DEFLATE] {
+        let mut archive = ZipArchive::open(Cursor::new(original)).await?;
         archive.validate_all().await?;
         for entry_index in [1, 2] {
             let position = archive
@@ -393,7 +390,7 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
                 let mut bytes = original.to_vec();
                 bytes[position] ^= 0x40;
 
-                let mut archive = open(bytes).await?;
+                let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
                 let mut payload = file_payload(archive.member(entry_index).await?)?;
 
                 let result = match operation {
@@ -627,7 +624,7 @@ async fn extracts_deflate_with_a_data_descriptor_by_default() -> TestResult {
 }
 
 #[tokio::test]
-async fn stored_descriptor_opt_in_reads_the_entire_indexed_member() -> TestResult {
+async fn rejects_stored_data_descriptors_at_open_by_default() {
     let bytes = include_bytes!("fixtures/stored-descriptor-ghost.zip");
     assert!(matches!(
         ZipArchive::open(Cursor::new(bytes)).await,
@@ -636,24 +633,6 @@ async fn stored_descriptor_opt_in_reads_the_entire_indexed_member() -> TestResul
             ..
         }))
     ));
-
-    let mut archive = ZipArchive::builder(Cursor::new(bytes))
-        .allow_stored_data_descriptors(true)
-        .open()
-        .await?;
-    let Some(Member::File {
-        metadata, payload, ..
-    }) = archive.next_member().await?
-    else {
-        return Err("expected outer member".into());
-    };
-    assert_eq!(metadata.path, "outer");
-    let data = contents(payload).await?;
-    assert_eq!(data.len(), 63);
-    assert!(data.starts_with(b"PUBLICPK\x07\x08"));
-    assert!(data.ends_with(b"ghostSECRET"));
-    assert!(archive.next_member().await?.is_none());
-    Ok(())
 }
 
 #[tokio::test]
