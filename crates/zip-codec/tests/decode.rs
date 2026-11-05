@@ -23,6 +23,7 @@ use zip_framing::{
 type TestResult = Result<(), Box<dyn Error>>;
 
 const STORED: &[u8] = include_bytes!("fixtures/stored.zip");
+const STORED_DESCRIPTOR: &[u8] = include_bytes!("fixtures/stored-descriptor.zip");
 const DEFLATE: &[u8] = include_bytes!("fixtures/deflate.zip");
 const EMPTY_DEFLATE: &[u8] = include_bytes!("fixtures/empty-deflate.zip");
 
@@ -30,10 +31,7 @@ const EMPTY_DEFLATE: &[u8] = include_bytes!("fixtures/empty-deflate.zip");
 // use one fixture per compression method; framing owns the layout edge cases.
 const FIXTURES: &[(&str, &[u8])] = &[
     ("stored", STORED),
-    (
-        "stored descriptor",
-        include_bytes!("fixtures/stored-descriptor.zip"),
-    ),
+    ("stored descriptor", STORED_DESCRIPTOR),
     ("stored ZIP64", include_bytes!("fixtures/stored-zip64.zip")),
     ("deflate", DEFLATE),
     (
@@ -186,7 +184,10 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
     for (label, bytes) in FIXTURES {
         // Short reads must work across headers, descriptors, and payloads,
         // including when a DEFLATE input buffer needs more than one read.
-        let mut members = ZipArchive::open(Interruptible::short_reads(bytes))
+        // Python also stores empty members in the streaming DEFLATE fixtures.
+        let mut members = ZipArchive::builder(Interruptible::short_reads(bytes))
+            .allow_stored_data_descriptors(true)
+            .open()
             .await?
             .members();
 
@@ -374,8 +375,13 @@ async fn seeks_by_index_and_drains_partially_read_payloads() -> TestResult {
 
 #[tokio::test]
 async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult {
-    for original in [STORED, DEFLATE] {
-        let mut archive = ZipArchive::open(Cursor::new(original)).await?;
+    for (original, allow) in [(STORED, false), (DEFLATE, false), (STORED_DESCRIPTOR, true)] {
+        let open = |bytes| {
+            ZipArchive::builder(Cursor::new(bytes))
+                .allow_stored_data_descriptors(allow)
+                .open()
+        };
+        let mut archive = open(original.to_vec()).await?;
         archive.validate_all().await?;
         for entry_index in [1, 2] {
             let position = archive
@@ -387,7 +393,7 @@ async fn verifies_corrupt_payloads_when_read_skipped_or_dropped() -> TestResult 
                 let mut bytes = original.to_vec();
                 bytes[position] ^= 0x40;
 
-                let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+                let mut archive = open(bytes).await?;
                 let mut payload = file_payload(archive.member(entry_index).await?)?;
 
                 let result = match operation {
@@ -604,7 +610,7 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
 }
 
 #[tokio::test]
-async fn extracts_with_shared_archive_policy() -> TestResult {
+async fn extracts_deflate_with_a_data_descriptor_by_default() -> TestResult {
     let destination = tempfile::tempdir()?;
     let bytes = include_bytes!("fixtures/extract.zip");
     ZipArchive::open(Cursor::new(bytes))
@@ -617,6 +623,36 @@ async fn extracts_with_shared_archive_policy() -> TestResult {
         b"payload"
     );
 
+    Ok(())
+}
+
+#[tokio::test]
+async fn stored_descriptor_opt_in_reads_the_entire_indexed_member() -> TestResult {
+    let bytes = include_bytes!("fixtures/stored-descriptor-ghost.zip");
+    assert!(matches!(
+        ZipArchive::open(Cursor::new(bytes)).await,
+        Err(DecodeError::Framing(FrameError::Unsupported {
+            feature: "data descriptor for Stored member",
+            ..
+        }))
+    ));
+
+    let mut archive = ZipArchive::builder(Cursor::new(bytes))
+        .allow_stored_data_descriptors(true)
+        .open()
+        .await?;
+    let Some(Member::File {
+        metadata, payload, ..
+    }) = archive.next_member().await?
+    else {
+        return Err("expected outer member".into());
+    };
+    assert_eq!(metadata.path, "outer");
+    let data = contents(payload).await?;
+    assert_eq!(data.len(), 63);
+    assert!(data.starts_with(b"PUBLICPK\x07\x08"));
+    assert!(data.ends_with(b"ghostSECRET"));
+    assert!(archive.next_member().await?.is_none());
     Ok(())
 }
 

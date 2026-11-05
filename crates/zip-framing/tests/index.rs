@@ -7,7 +7,7 @@ use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
+    HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -22,8 +22,12 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
     data
 }
 
-// Format-validation tests opt in to all supported extra fields. Tests of the
-// default policy and lazy access open the index directly.
+// Exercise the format checks for features that require an opt-in.
+const ALL_FEATURES: ReadOptions = ReadOptions {
+    extra_fields: AllowListed,
+    allow_stored_data_descriptors: true,
+};
+
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
     read_validated_with(&mut Cursor::new(bytes), Limits::default()).await
 }
@@ -32,7 +36,7 @@ async fn read_validated_with<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     limits: Limits,
 ) -> Result<Index, FrameError> {
-    let mut index = Index::read_with_policy(reader, limits, AllowListed).await?;
+    let mut index = Index::read_with_options(reader, limits, ALL_FEATURES).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -951,7 +955,8 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                 let mut bytes = archive.bytes.clone();
                 bytes[offset] ^= 1;
                 let mut source = Cursor::new(bytes);
-                let mut index = Index::read(&mut source, Limits::default()).await?;
+                let mut index =
+                    Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
                 assert!(
                     matches!(
                         index.entry(&mut source, 0).await,
@@ -1572,7 +1577,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
 
     let entries: &[IndexedEntry] = index.entries();
     let directory: &CentralDirectoryEntry = entries[0].directory();
@@ -1626,7 +1631,14 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     ordered.extend_from_slice(&second.bytes[second.central..second.end]);
     ordered.extend_from_slice(&bytes[end..]);
     let mut source = Cursor::new(ordered);
-    let mut ordered = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    // Even an unselected member with a Stored descriptor must fail at open.
+    assert!(matches!(
+        Index::read_with_policy(&mut source, Limits::default(), AllowListed).await,
+        Err(FrameError::Unsupported { position, feature: "data descriptor for Stored member" })
+            if position == (central + first.end - first.central) as u64
+    ));
+    let mut ordered =
+        Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
     assert_eq!(
         ordered.entries()[1].record_range(),
@@ -1643,7 +1655,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 
     // Repeated offsets must fail during indexing, before any local resolution.
     assert!(
-        Index::read(&mut Cursor::new(shared), Limits::default())
+        Index::read_with_options(&mut Cursor::new(shared), Limits::default(), ALL_FEATURES)
             .await
             .is_err()
     );

@@ -81,6 +81,9 @@ the [other supported fields](APPNOTE.md#member-extra-fields), call
 `.with_policy(ExtraFieldPolicy::AllowListed)` on the archive builder before
 `.open().await`.
 
+DEFLATE members may use data descriptors. To also accept descriptors on
+Stored members, call `.allow_stored_data_descriptors(true)` on the builder.
+
 Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
 the encoder seeks back to fill in the local header's CRC and sizes. No data
 descriptors are emitted. Empty members and symbolic-link targets are stored

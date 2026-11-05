@@ -2,7 +2,9 @@
 
 import io
 from pathlib import Path
+import struct
 import zipfile
+import zlib
 
 
 class Streaming(io.BytesIO):
@@ -39,7 +41,8 @@ for method, label in [(zipfile.ZIP_STORED, "stored"), (zipfile.ZIP_DEFLATED, "de
         suffix = "-zip64" if zip64 else "-descriptor" if streaming else ""
         (root / f"{label}{suffix}.zip").write_bytes(output.getvalue())
 
-output = io.BytesIO()
+# Exercise default extraction of a DEFLATE member with a data descriptor.
+output = Streaming()
 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     entry = zipfile.ZipInfo("nested/file", (1980, 1, 1, 0, 0, 0))
     entry.compress_type = zipfile.ZIP_DEFLATED
@@ -48,6 +51,20 @@ with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
     archive.writestr(entry, b"payload")
 
 (root / "extract.zip").write_bytes(output.getvalue())
+
+# A streaming extractor can accept the first descriptor and see a second member.
+inner = io.BytesIO()
+with zipfile.ZipFile(inner, "w") as archive:
+    archive.writestr(zipfile.ZipInfo("ghost"), b"SECRET")
+    ghost = inner.getvalue()  # Local record, before the central directory.
+
+prefix = b"PUBLIC"
+descriptor = struct.pack("<4I", 0x08074B50, zlib.crc32(prefix), len(prefix), len(prefix))
+output = Streaming()
+with zipfile.ZipFile(output, "w") as archive:
+    archive.writestr(zipfile.ZipInfo("outer"), prefix + descriptor + ghost)
+
+(root / "stored-descriptor-ghost.zip").write_bytes(output.getvalue())
 
 output = io.BytesIO()
 with zipfile.ZipFile(output, "w") as archive:

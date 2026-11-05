@@ -39,7 +39,7 @@ use thiserror::Error;
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
-pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
+pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry, ReadOptions};
 pub use kind::{DeviceNumbers, EntryKind};
 
 /// A supported ZIP compression method.

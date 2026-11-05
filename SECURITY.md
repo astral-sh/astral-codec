@@ -63,9 +63,9 @@ within tar-codec:
 ### ZIP archives
 
 ZIP framing targets [PKWARE APPNOTE 6.3.3](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT).
-The supported profile includes stored and DEFLATE members, classic and ZIP64
-version-1 directories, and signed or unsigned data descriptors. Encryption,
-digital signatures, patched data, and multi-volume archives are rejected.
+The supported profile includes Stored and DEFLATE members and classic and ZIP64
+version-1 directories. Encryption, digital signatures, patched data, and
+multi-volume archives are rejected.
 The reader also rejects archive extra data records, nonempty ZIP64 extensible
 data sectors, and ZIP64 version-2 directories. Self-extracting prefixes,
 padding outside records, trailing bytes, and ambiguous end records are also
@@ -80,6 +80,15 @@ must exactly fill its assigned span. Checked local metadata is cached.
 unselected members, establishing complete nonoverlapping record coverage. Without
 that call or traversal of every member, malformed unselected local records and
 some gaps or overlaps can remain undiscovered.
+
+By default, the reader rejects the archive at open if any Stored member has
+general purpose bit 3 set.
+A streaming extractor can mistake part of a Stored payload for a data descriptor
+and expose the bytes that follow it as another member. A DEFLATE stream marks
+its own end, so the reader accepts signed and unsigned DEFLATE descriptors by
+default. With `allow_stored_data_descriptors(true)`, the reader locates the
+descriptor using the central directory's compressed size and checks the same
+sizes and CRC as for other members.
 
 Duplicated member paths are allowed when they appear in the same relative order
 in the central directory and the local headers. Path comparison is case-sensitive
