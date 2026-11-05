@@ -6,7 +6,8 @@ use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind}
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use zip_framing::{
-    Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, constants::attributes,
+    Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, ReadOptions,
+    constants::attributes,
 };
 
 use crate::payload::{CHUNK_SIZE, Payload};
@@ -22,7 +23,7 @@ pub struct ZipArchive<R> {
 pub struct ZipArchiveBuilder<R> {
     reader: R,
     limits: Limits,
-    extra_fields: ExtraFieldPolicy,
+    options: ReadOptions,
 }
 
 struct DecoderState<R> {
@@ -41,15 +42,22 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 
     /// Sets the extra-field policy for both central and local headers.
     pub fn with_policy(mut self, policy: ExtraFieldPolicy) -> Self {
-        self.extra_fields = policy;
+        self.options.extra_fields = policy;
+        self
+    }
+
+    /// Allows Stored members with data descriptors (general purpose bit 3).
+    ///
+    /// Disabled by default. See the [ZIP compatibility notes](zip_framing#zip-compatibility).
+    pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
+        self.options.allow_stored_data_descriptors = allow;
         self
     }
 
     /// Reads and validates the central directory. Local headers are checked
     /// on member access or by [`ZipArchive::validate_all`].
     pub async fn open(mut self) -> Result<ZipArchive<R>, DecodeError> {
-        let index =
-            Index::read_with_policy(&mut self.reader, self.limits, self.extra_fields).await?;
+        let index = Index::read_with_options(&mut self.reader, self.limits, self.options).await?;
 
         Ok(ZipArchive {
             state: DecoderState {
@@ -64,17 +72,18 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens with default resource limits and accepts only ZIP64 member extra fields.
+    /// Opens with default resource limits. Only ZIP64 member extra fields and
+    /// DEFLATE data descriptors are accepted by default.
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
         Self::builder(reader).open().await
     }
 
-    /// Configures resource limits and the member extra-field policy before opening the archive.
+    /// Configures resource limits and accepted ZIP features before opening the archive.
     pub fn builder(reader: R) -> ZipArchiveBuilder<R> {
         ZipArchiveBuilder {
             reader,
             limits: Limits::default(),
-            extra_fields: ExtraFieldPolicy::default(),
+            options: ReadOptions::default(),
         }
     }
 

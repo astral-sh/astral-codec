@@ -19,6 +19,12 @@
 //!   then verify their decoded sizes and CRC32s.
 //!
 //! - zip-framing assumes that the ZIP source does not change.
+//!
+//! ## ZIP compatibility
+//!
+//! By default, zip-framing rejects Stored members with data descriptors because
+//! a streaming reader can mistake payload bytes for a descriptor.
+//! To accept these members, set [`ReadOptions::allow_stored_data_descriptors`].
 
 #![forbid(unsafe_code)]
 
@@ -39,7 +45,7 @@ use thiserror::Error;
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
-pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
+pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry, ReadOptions};
 pub use kind::{DeviceNumbers, EntryKind};
 
 /// A supported ZIP compression method.

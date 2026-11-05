@@ -186,7 +186,10 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
     for (label, bytes) in FIXTURES {
         // Short reads must work across headers, descriptors, and payloads,
         // including when a DEFLATE input buffer needs more than one read.
-        let mut members = ZipArchive::open(Interruptible::short_reads(bytes))
+        // Python also stores empty members in the streaming DEFLATE fixtures.
+        let mut members = ZipArchive::builder(Interruptible::short_reads(bytes))
+            .allow_stored_data_descriptors(true)
+            .open()
             .await?
             .members();
 
@@ -604,7 +607,7 @@ async fn cancellation_after_partial_io_poisoning_prevents_resume() -> TestResult
 }
 
 #[tokio::test]
-async fn extracts_with_shared_archive_policy() -> TestResult {
+async fn extracts_deflate_with_a_data_descriptor_by_default() -> TestResult {
     let destination = tempfile::tempdir()?;
     let bytes = include_bytes!("fixtures/extract.zip");
     ZipArchive::open(Cursor::new(bytes))
@@ -618,6 +621,18 @@ async fn extracts_with_shared_archive_policy() -> TestResult {
     );
 
     Ok(())
+}
+
+#[tokio::test]
+async fn rejects_stored_data_descriptors_at_open_by_default() {
+    let bytes = include_bytes!("fixtures/stored-descriptor-ghost.zip");
+    assert!(matches!(
+        ZipArchive::open(Cursor::new(bytes)).await,
+        Err(DecodeError::Framing(FrameError::Unsupported {
+            feature: "data descriptor for Stored member",
+            ..
+        }))
+    ));
 }
 
 #[tokio::test]

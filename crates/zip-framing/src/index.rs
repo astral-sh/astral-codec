@@ -54,6 +54,15 @@ impl Drop for DirectoryWindow {
     }
 }
 
+/// Which optional ZIP features the reader accepts.
+#[derive(Clone, Copy, Debug, Default)]
+pub struct ReadOptions {
+    /// Extra fields accepted in central and local headers.
+    pub extra_fields: ExtraFieldPolicy,
+    /// Accept Stored members with data descriptors. Disabled by default.
+    pub allow_stored_data_descriptors: bool,
+}
+
 /// A ZIP member index.
 ///
 /// This is constructed from the central directory, with referenced
@@ -91,7 +100,7 @@ impl Index {
     }
 
     /// Indexes the directory and checks bounds derivable from its records.
-    /// Only ZIP64 member extra fields are accepted by default.
+    /// By default, only ZIP64 member extra fields and DEFLATE data descriptors are accepted.
     ///
     /// Local headers and descriptors are checked by [`Self::entry`] on access,
     /// or by [`Self::validate_all`]. The source must remain unchanged and be the
@@ -101,7 +110,7 @@ impl Index {
         reader: &mut R,
         limits: Limits,
     ) -> Result<Self, Error> {
-        Self::read_with_policy(reader, limits, ExtraFieldPolicy::default()).await
+        Self::read_with_options(reader, limits, ReadOptions::default()).await
     }
 
     /// Indexes the directory with the given member extra-field policy.
@@ -111,6 +120,23 @@ impl Index {
         limits: Limits,
         extra_fields: ExtraFieldPolicy,
     ) -> Result<Self, Error> {
+        Self::read_with_options(
+            reader,
+            limits,
+            ReadOptions {
+                extra_fields,
+                ..ReadOptions::default()
+            },
+        )
+        .await
+    }
+
+    /// Indexes the directory with the supplied limits and feature options.
+    pub async fn read_with_options<R: AsyncRead + AsyncSeek + Unpin>(
+        reader: &mut R,
+        limits: Limits,
+        options: ReadOptions,
+    ) -> Result<Self, Error> {
         // Opening owns this budget until the index is complete. Errors and
         // cancellation discard all charges made by the opening helpers.
         let mut budget = Budget::new(limits);
@@ -118,7 +144,7 @@ impl Index {
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
         let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
         let mut entries = end
-            .read_entries(&mut buffered, &mut budget, extra_fields)
+            .read_entries(&mut buffered, &mut budget, options)
             .await?;
 
         if entries.is_sorted_by_key(|entry| entry.directory().position()) {
@@ -177,7 +203,7 @@ impl Index {
             resolved: Vec::new(),
             entries,
             budget,
-            extra_fields,
+            extra_fields: options.extra_fields,
             buffer: Vec::new(),
         })
     }
@@ -364,7 +390,7 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        extra_fields: ExtraFieldPolicy,
+        options: ReadOptions,
     ) -> Result<Vec<IndexedEntry>, Error> {
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
@@ -384,7 +410,7 @@ impl CentralDirectory {
 
         let mut bytes = reader.buffered(position, end);
         while entries.len() < self.count as usize {
-            match CentralDirectoryEntry::parse(bytes, position, budget, extra_fields)? {
+            match CentralDirectoryEntry::parse(bytes, position, budget, options)? {
                 BufferedEntry::Complete(entry, length) => {
                     entries.push(IndexedEntry::new(entry, self.offset)?);
                     position += length as u64;

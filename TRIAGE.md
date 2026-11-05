@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-All nine questions are open. The first three affect which members a reader
+Items 2–9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -12,44 +12,21 @@ payload begins with `PUBLIC`, followed by a valid data descriptor for those
 six bytes and a local file record for `ghost` containing `SECRET`. The real
 descriptor follows all 63 bytes. Both CRCs and both sets of sizes check out.
 
-`zip-codec` and macOS `bsdtar -xf` on a file extract only the 63-byte
+`zip-codec` at `33a197b` and macOS `bsdtar -xf` on a file extract only the 63-byte
 `outer`. Pipe the same bytes into `bsdtar -xf -` and it successfully writes
 two files, `outer` containing `PUBLIC` and `ghost` containing `SECRET`.
 The split occurs with either a signed or an unsigned real descriptor.
 Clearing bit 3 or switching the member to DEFLATE made the readers agree.
 
-**Open question.** Should `zip-framing` reject Stored members with general
-purpose bit 3 set? APPNOTE §§4.3.9 and 4.4.4 permit them. Our encoder writes
-the sizes into the local header, but Python can produce Stored descriptors
-when writing to a pipe. [Descriptor validation](crates/zip-framing/src/index/entry.rs)
-and [Python fixture generator](crates/zip-codec/tests/fixtures/generate.py).
+**Decision.** Stored members with data descriptors require an opt-in.
 
 <details>
 <summary>Reproduce the member lists on macOS</summary>
 
-Run in a scratch directory. The pipe makes Python write the outer archive to
-a non-seekable stream, so it emits a descriptor.
-
 ```sh
-python3 - <<'PY' | cat > descriptor.zip
-import io
-import struct
-import sys
-import zipfile
-import zlib
-
-data = io.BytesIO()
-with zipfile.ZipFile(data, "w") as inner:
-    inner.writestr(zipfile.ZipInfo("ghost"), b"SECRET")
-    ghost = data.getvalue()  # Local record, before the central directory.
-
-prefix = b"PUBLIC"
-descriptor = struct.pack("<4I", 0x08074B50, zlib.crc32(prefix), len(prefix), len(prefix))
-with zipfile.ZipFile(sys.stdout.buffer, "w") as outer:
-    outer.writestr(zipfile.ZipInfo("outer"), prefix + descriptor + ghost)
-PY
-/usr/bin/bsdtar -tf descriptor.zip         # outer
-cat descriptor.zip | /usr/bin/bsdtar -tf - # outer, ghost
+archive=crates/zip-codec/tests/fixtures/stored-descriptor-ghost.zip
+/usr/bin/bsdtar -tf "$archive"         # outer
+cat "$archive" | /usr/bin/bsdtar -tf - # outer, ghost
 ```
 
 </details>
