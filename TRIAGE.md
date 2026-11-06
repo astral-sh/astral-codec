@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2 and 4–9 are open. The first three items affect which members a reader
+Items 2 and 5–9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -66,8 +66,8 @@ in the payload. Given a symlink produced by the encoder, macOS `bsdtar`
 created a symlink when reading from a file. Reading from a pipe, it created a
 regular file containing the target text. Both extractions succeeded.
 
-**Open question.** Does the agreement requirement include streaming readers
-for member types? That decision affects the symlinks we write ourselves.
+**Decision.** Won't fix. Our seekable reader gets the file type from the
+central directory, and our encoder uses the conventional Unix symlink layout.
 [Writer conventions](crates/zip-codec/APPNOTE.md#writer-conventions).
 
 ## 5. Info-ZIP strips version suffixes

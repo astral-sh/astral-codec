@@ -12,6 +12,10 @@ If the UNIX field is present, it must contain a target. A target
 in the payload must agree with it. We reject UNIX targets on regular or
 untyped files because they can also denote hard links.
 
+Our encoder records the symlink mode only in the central directory. A reader
+extracting from a pipe can therefore create a regular file containing the
+target path. [Upstream example](https://github.com/libarchive/libarchive/issues/3688).
+
 **Empty files and directories.** Python can write a two-byte DEFLATE stream
 for either, though §4.3.8 calls for zero bytes of file data. We accept the
 stream after checking its boundary, CRC, and zero decoded size. Our encoder
