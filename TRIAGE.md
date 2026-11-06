@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2 and 6–9 are open. The first three items affect which members a reader
+Items 2 and 7–9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -82,13 +82,14 @@ VMS version suffixes is an Info-ZIP extraction convention.
 
 ## 6. AppleDouble sidecars
 
-Given `ordinary` and `__MACOSX/._ordinary`, `zip-codec` exposes two files.
+Given `ordinary` and `__MACOSX/._ordinary`, both `zip-codec` and CPython
+3.15.2's `zipfile` extract the two files byte-for-byte.
 On macOS, seekable libarchive 3.8.10 exposes only `ordinary` and attaches the
 sidecar's 46 bytes as metadata. Its streaming reader exposes both files.
 Our encoder accepts both names. [Libarchive sidecar handling](https://github.com/libarchive/libarchive/blob/v3.8.10/libarchive/archive_read_support_format_zip.c#L4501-L4556).
 
-**Open question.** Should we reject AppleDouble sidecar names under
-`__MACOSX/` on read and write?
+**Decision.** Won't fix. AppleDouble sidecars are ordinary members in our
+archive model.
 
 ## 7. Conflicting timestamps and ownership across extra fields
 

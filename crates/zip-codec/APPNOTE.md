@@ -5,6 +5,9 @@
 
 ## Writer conventions
 
+**AppleDouble sidecars.** `zip-codec` preserves `__MACOSX/._name` as a
+separate file. A macOS extractor may attach its contents to `name` as metadata.
+
 **VMS version suffixes.** `zip-codec` preserves filenames such as `config;1`.
 Info-ZIP's `unzip` strips the suffix by default, so `config;1` and `config`
 can extract to the same path. Use `unzip -V` to preserve both names.
