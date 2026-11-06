@@ -258,8 +258,9 @@ pub trait Archive: Sized {
     /// Consumes this archive and returns its lending member cursor.
     ///
     /// Member paths may repeat, and distinct paths may resolve to the same file
-    /// on disk. Callers that write members to disk themselves must decide how
-    /// to handle those collisions.
+    /// on disk. Callers that write members to disk themselves (i.e. without
+    /// [`Self::extract_in`]) must decide how to handle those collisions. Doing so
+    /// is non-trivial, and most users are **strongly** encouraged to use [`Self::extract_in`].
     fn members(self) -> Members<Self> {
         Members { archive: self }
     }
