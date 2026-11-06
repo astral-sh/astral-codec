@@ -7,7 +7,7 @@ use crate::{
     constants::{signature, size},
     extra::{Extras, Header},
     invalid,
-    kind::ExternalAttributes,
+    kind::{ExternalAttributes, UnixFileType},
     record::{Common, GeneralPurposeFlags, RecordReader, array_at, bytes_at, parse_name},
 };
 
@@ -236,6 +236,17 @@ impl CentralDirectoryEntry {
             },
             has_zip64_extra: sizes.zip64,
         };
+
+        let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
+        if UnixFileType::from_mode(mode) == UnixFileType::SymbolicLink
+            && entry.host_system() != HostSystem::Unix
+            && !options.allow_ambiguous_symlink_modes
+        {
+            return Err(Error::Unsupported {
+                position,
+                feature: "symlink mode from a non-Unix creator system",
+            });
+        }
 
         Ok(BufferedEntry::Complete(entry, size::CENTRAL + length))
     }

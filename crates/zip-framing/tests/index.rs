@@ -26,6 +26,7 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 const ALL_FEATURES: ReadOptions = ReadOptions {
     extra_fields: AllowListed,
     allow_stored_data_descriptors: true,
+    allow_ambiguous_symlink_modes: true,
 };
 
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
@@ -280,7 +281,7 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
     for (name, host, attributes, expected, mode) in [
         ("file", 3, 0, EntryKind::File, 0),
         ("file", 3, 0o106755 << 16, EntryKind::File, 0o106755),
-        ("file", 0, 0o120777 << 16, EntryKind::File, 0),
+        ("file", 2, 0o100666 << 16, EntryKind::File, 0),
         ("file", 255, (0o040755 << 16) | 0x18, EntryKind::File, 0),
         ("directory/", 3, 0, EntryKind::Directory, 0),
         ("directory", 0, 0x10, EntryKind::Directory, 0),

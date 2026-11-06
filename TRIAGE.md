@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2–9 are open. The first three items affect which members a reader
+Items 2 and 4–9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -50,12 +50,14 @@ payload, changing the creator system changes what readers extract.
 
 | Creator system | `zip-codec` | Apple's Info-ZIP `unzip` | Seekable libarchive |
 | --- | --- | --- | --- |
-| OpenVMS (2), Atari ST (5), BeOS (16) | File containing `target` | Symlink to `target` | File containing `target` |
+| OpenVMS (2), Atari ST (5), BeOS (16), ID 30 | File containing `target` | Symlink to `target` | File containing `target` |
 | Darwin (19) | Symlink to `target` | File containing `target` | File containing `target` |
 
-**Open question.** Which creator systems can we accept with symlink mode bits?
-APPNOTE §4.4.15 leaves the meaning of external attributes to the creator
-system. [Attribute interpretation](crates/zip-framing/src/kind.rs).
+With an MS-DOS creator (0), mode `0120666`, and clear DOS attributes, Apple's
+`unzip` also creates a symlink. Both `zip-codec` at `33a197b` and seekable
+libarchive read a regular file.
+
+**Decision.** Symlink mode bits from creators other than Unix (3) require an opt-in.
 
 ## 4. Unix symlinks in streaming readers
 

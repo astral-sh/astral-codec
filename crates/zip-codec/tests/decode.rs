@@ -16,7 +16,7 @@ use zip_codec::{
     LimitExceeded, Limits, Member, MemberPayload, ZipArchive, extract::ExtractPolicy,
 };
 use zip_framing::{
-    Error as FrameError,
+    Error as FrameError, HostSystem,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -65,7 +65,11 @@ async fn contents<P: MemberPayload<Error = DecodeError>>(
     Ok(output)
 }
 
-fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, FrameError> {
+fn member_with_attributes(
+    payload: &[u8],
+    host: HostSystem,
+    attributes: u32,
+) -> Result<Vec<u8>, FrameError> {
     let size = payload.len() as u64;
     let member = PendingMember::new(
         "member",
@@ -74,6 +78,7 @@ fn member_with_attributes(payload: &[u8], attributes: u32) -> Result<Vec<u8>, Fr
     )?
     .finish(crc32(payload), size, size, 0)?;
     let mut central = member.central_header();
+    central[5] = host.into();
     central[38..42].copy_from_slice(&attributes.to_le_bytes());
     single_member_archive(member.local_header(), payload, central)
 }
@@ -110,7 +115,7 @@ async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
             "inconsistent file attributes",
         ),
     ] {
-        let bytes = member_with_attributes(&[], attributes)?;
+        let bytes = member_with_attributes(&[], HostSystem::Unix, attributes)?;
         for full_validation in [false, true] {
             let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
             let result = if full_validation {
@@ -147,7 +152,7 @@ async fn enforces_kind_projection_after_metadata_resolution() -> TestResult {
 #[tokio::test]
 async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
     for length in [usize::from(u16::MAX), usize::from(u16::MAX) + 1] {
-        let bytes = member_with_attributes(&vec![b'x'; length], 0o120777 << 16)?;
+        let bytes = member_with_attributes(&vec![b'x'; length], HostSystem::Unix, 0o120777 << 16)?;
         for full_validation in [false, true] {
             let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
             let result = if full_validation {
@@ -467,8 +472,12 @@ async fn rejects_deflate_size_lies_truncation_and_trailing_streams() -> TestResu
 
 #[tokio::test]
 async fn reads_nested_zip_payload_without_interpreting_its_records() -> TestResult {
-    let mut archive =
-        ZipArchive::open(Cursor::new(member_with_attributes(STORED, 0o100644 << 16)?)).await?;
+    let mut archive = ZipArchive::open(Cursor::new(member_with_attributes(
+        STORED,
+        HostSystem::Unix,
+        0o100644 << 16,
+    )?))
+    .await?;
     assert_eq!(archive.entries().len(), 1);
     let payload = file_payload(archive.next_member().await?)?;
     assert_eq!(contents(payload).await?, STORED);
@@ -633,6 +642,38 @@ async fn rejects_stored_data_descriptors_at_open_by_default() {
             ..
         }))
     ));
+}
+
+#[tokio::test]
+async fn non_unix_symlink_modes_require_opt_in() -> TestResult {
+    for host in [
+        HostSystem::MsDos,
+        HostSystem::Darwin,
+        HostSystem::Unknown(30),
+    ] {
+        let bytes = member_with_attributes(b"target", host, 0o120666 << 16)?;
+        assert!(matches!(
+            ZipArchive::open(Cursor::new(&bytes)).await,
+            Err(DecodeError::Framing(FrameError::Unsupported {
+                feature: "symlink mode from a non-Unix creator system",
+                ..
+            }))
+        ));
+
+        let mut archive = ZipArchive::builder(Cursor::new(&bytes))
+            .allow_ambiguous_symlink_modes(true)
+            .open()
+            .await?;
+        let member = archive.next_member().await?;
+        if host == HostSystem::Darwin {
+            assert!(
+                matches!(member, Some(Member::SymbolicLink { target, .. }) if target == "target")
+            );
+        } else {
+            assert_eq!(contents(file_payload(member)?).await?, b"target");
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]
