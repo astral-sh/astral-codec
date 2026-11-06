@@ -207,7 +207,10 @@ impl CentralDirectoryEntry {
             Extras::parse(raw_extra, Header::Central, position, options.extra_fields)?
         };
         let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
-        if extras.needs_reconciliation() || !comment.is_empty() {
+        options
+            .member_comments
+            .check(comment, Some(common.flags), position)?;
+        if extras.needs_reconciliation() {
             extras.check_name(path, position)?;
             extras.comment(comment, position)?;
         }

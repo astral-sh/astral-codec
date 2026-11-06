@@ -67,10 +67,10 @@ output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited t
 65,535 bytes. The source must remain unchanged while reading the archive.
 
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
-directories, non-UTF-8 names or comments, ambiguous records, and unaccounted bytes
+directories, non-UTF-8 names, ambiguous records, and unaccounted bytes
 are rejected when the affected records are checked. Listing alone does not
-validate unselected local records. Archive and member comments must be UTF-8
-regardless of the member's UTF-8 flag.
+validate unselected local records. Use `with_member_comment_policy` and
+`with_archive_comment_policy` to configure which comments the reader accepts.
 
 The member adapter supports regular files, directories, symbolic links, and
 the special kinds represented by `archive-trait`. ZIP hard links are unsupported.

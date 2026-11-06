@@ -1,4 +1,4 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem, str};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
@@ -7,7 +7,7 @@ use crate::{
     Budget, Error, ExtraFieldPolicy, Limits, add,
     constants::{extra, signature, size, version},
     invalid,
-    record::{RecordReader, array_at},
+    record::{GeneralPurposeFlags, RecordReader, array_at},
 };
 
 mod entry;
@@ -54,15 +54,71 @@ impl Drop for DirectoryWindow {
     }
 }
 
+/// Which ZIP comment bytes the reader accepts. Empty comments are always accepted.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[non_exhaustive]
+pub enum CommentPolicy {
+    /// Reject nonempty comments.
+    Reject,
+    /// Accept only ASCII bytes.
+    AllowAscii,
+    /// Accept UTF-8. Non-ASCII member comments must set the UTF-8 flag (bit 11).
+    AllowUtf8,
+    /// Accept arbitrary bytes. Member comments with bit 11 set must still be UTF-8.
+    AllowAll,
+}
+
+impl CommentPolicy {
+    fn check(
+        self,
+        bytes: &[u8],
+        member_flags: Option<GeneralPurposeFlags>,
+        position: u64,
+    ) -> Result<(), Error> {
+        if bytes.is_empty() {
+            return Ok(());
+        }
+        let utf8 = member_flags.map(|flags| flags.contains(GeneralPurposeFlags::UTF8));
+        let unsupported = |feature| Error::Unsupported { position, feature };
+        match (self, utf8) {
+            (Self::Reject, _) => Err(unsupported("nonempty comment")),
+            (Self::AllowAscii, _) | (Self::AllowUtf8, Some(false)) => bytes
+                .is_ascii()
+                .then_some(())
+                .ok_or_else(|| unsupported("non-ASCII comment")),
+            (Self::AllowUtf8, _) | (Self::AllowAll, Some(true)) => str::from_utf8(bytes)
+                .map(|_| ())
+                .map_err(|_| invalid(position, "non-UTF-8 comment")),
+            (Self::AllowAll, _) => Ok(()),
+        }
+    }
+}
+
 /// Which optional ZIP features the reader accepts.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ReadOptions {
     /// Extra fields accepted in central and local headers.
     pub extra_fields: ExtraFieldPolicy,
+    /// Comments in central directory entries. Defaults to [`CommentPolicy::Reject`].
+    pub member_comments: CommentPolicy,
+    /// Comment in the end record. Defaults to [`CommentPolicy::AllowAscii`].
+    pub archive_comment: CommentPolicy,
     /// Accept Stored members with data descriptors. Disabled by default.
     pub allow_stored_data_descriptors: bool,
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     pub allow_ambiguous_symlink_modes: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            extra_fields: ExtraFieldPolicy::default(),
+            member_comments: CommentPolicy::Reject,
+            archive_comment: CommentPolicy::AllowAscii,
+            allow_stored_data_descriptors: false,
+            allow_ambiguous_symlink_modes: false,
+        }
+    }
 }
 
 /// A ZIP member index.
@@ -144,7 +200,8 @@ impl Index {
         let mut budget = Budget::new(limits);
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
-        let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
+        let end =
+            CentralDirectory::read(&mut buffered, &mut budget, options.archive_comment).await?;
         let mut entries = end
             .read_entries(&mut buffered, &mut budget, options)
             .await?;
@@ -293,6 +350,7 @@ impl CentralDirectory {
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
+        archive_comment: CommentPolicy,
     ) -> Result<Self, Error> {
         let length = reader.length().await?;
         budget.check_archive_size(length)?;
@@ -321,7 +379,7 @@ impl CentralDirectory {
                 "ambiguous end records",
             ));
         }
-        str::from_utf8(comment).map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
+        archive_comment.check(comment, None, position)?;
 
         let disk = u16::from_le_bytes(array_at::<4, 2, _>(&end));
         let directory_disk = u16::from_le_bytes(array_at::<6, 2, _>(&end));

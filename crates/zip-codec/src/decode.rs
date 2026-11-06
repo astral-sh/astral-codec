@@ -6,7 +6,7 @@ use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind}
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use zip_framing::{
-    Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, ReadOptions,
+    CommentPolicy, Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, ReadOptions,
     constants::attributes,
 };
 
@@ -43,6 +43,18 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
     /// Sets the extra-field policy for both central and local headers.
     pub fn with_policy(mut self, policy: ExtraFieldPolicy) -> Self {
         self.options.extra_fields = policy;
+        self
+    }
+
+    /// Sets the member comment policy. Defaults to [`CommentPolicy::Reject`].
+    pub fn with_member_comment_policy(mut self, policy: CommentPolicy) -> Self {
+        self.options.member_comments = policy;
+        self
+    }
+
+    /// Sets the archive comment policy. Defaults to [`CommentPolicy::AllowAscii`].
+    pub fn with_archive_comment_policy(mut self, policy: CommentPolicy) -> Self {
+        self.options.archive_comment = policy;
         self
     }
 
