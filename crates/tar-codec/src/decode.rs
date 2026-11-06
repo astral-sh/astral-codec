@@ -59,6 +59,7 @@ impl<R> TarArchive<R> {
             .allow_header_uname_and_gname_without_terminator(
                 policy.allow_header_uname_and_gname_without_terminator,
             )
+            .allow_pax_base256_uid_and_gid(policy.pax_policy.allow_base256_uid_and_gid)
             .max_gnu_extension_size(policy.max_gnu_extension_size);
         self.reader = self.reader.with_policy(stream_policy);
         self.policy = policy;
@@ -91,6 +92,7 @@ pub struct PaxDecodePolicy {
     allow_duplicate_pax_records: bool,
     allow_global_pax_member_metadata: bool,
     allow_hardlink_linkdata: bool,
+    allow_base256_uid_and_gid: bool,
 }
 
 /// Controls which vendor-namespaced pax records may be ignored during decoding.
@@ -139,6 +141,7 @@ impl Default for PaxDecodePolicy {
             allow_duplicate_pax_records: false,
             allow_global_pax_member_metadata: false,
             allow_hardlink_linkdata: false,
+            allow_base256_uid_and_gid: false,
         }
     }
 }
@@ -370,6 +373,15 @@ impl PaxDecodePolicy {
     /// is also enabled, a nonempty payload replaces the target file's contents.
     pub fn allow_hardlink_linkdata(mut self, allow: bool) -> Self {
         self.allow_hardlink_linkdata = allow;
+        self
+    }
+
+    /// Configures whether ustar header `uid` and `gid` fields may use GNU base-256 encoding.
+    ///
+    /// This compatibility option is **disabled by default**. Every other ustar
+    /// header numeric field must still be octal.
+    pub fn allow_base256_uid_and_gid(mut self, allow: bool) -> Self {
+        self.allow_base256_uid_and_gid = allow;
         self
     }
 

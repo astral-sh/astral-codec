@@ -106,6 +106,11 @@
 //! missing rather than assigned a value. This can be disabled with
 //! [`StreamPolicy::allow_all_nul_numeric_fields`].
 //!
+//! By default, tar-framing requires the numeric fields of pax/ustar headers to be octal.
+//! Some writers, including the Rust `tar` crate, encode large `uid` and `gid` values
+//! with GNU base-256 notation even in ustar headers. These two fields can be accepted with
+//! [`StreamPolicy::allow_pax_base256_uid_and_gid`].
+//!
 //! By default, tar-framing follows a strict reading of pax and requires the `uname` and `gname`
 //! header fields to be NUL terminated (the `magic` field is also required to be NUL terminated, but
 //! is so by definition). However, some encoders will incorrectly pack a 32-byte value into
