@@ -146,7 +146,7 @@ impl<'a> Extras<'a> {
                 (ExtraHeaderId::InfoZipUnix, Header::Central) => data.len() == 8,
                 (ExtraHeaderId::InfoZipOwnership16, Header::Local) => data.len() == 4,
                 (ExtraHeaderId::InfoZipOwnership16, Header::Central) => data.is_empty(),
-                (ExtraHeaderId::InfoZipOwnership, _) => valid_ownership(data),
+                (ExtraHeaderId::InfoZipOwnership, _) => ownership_ids(data).is_some(),
                 // ZIP64, UNIX and Unicode fields are checked against the member metadata.
                 (
                     ExtraHeaderId::Zip64
@@ -163,7 +163,11 @@ impl<'a> Extras<'a> {
             bytes = remaining;
         }
 
-        Ok(Self { zip64, fields })
+        let extras = Self { zip64, fields };
+        if let Some(unix) = extras.fields.get(&ExtraHeaderId::Unix) {
+            extras.check_unix_agreement(unix, position)?;
+        }
+        Ok(extras)
     }
 
     /// Whether any fields need comparison beyond the resolved ZIP64 sizes.
@@ -171,10 +175,37 @@ impl<'a> Extras<'a> {
         !self.fields.is_empty()
     }
 
-    fn unix_data(&self) -> Option<&[u8]> {
-        self.fields
-            .get(&ExtraHeaderId::Unix)
-            .map(|data| &data[extra::UNIX_PREFIX_SIZE..])
+    /// Compare the fixed PKWARE UNIX prefix (atime, mtime, UID, GID) with
+    /// the Info-ZIP fields in this header.
+    fn check_unix_agreement(&self, unix: &[u8], position: u64) -> Result<(), Error> {
+        for (identifier, &data) in &self.fields {
+            let agrees = match identifier {
+                ExtraHeaderId::InfoZipUnix => unix.starts_with(data),
+                ExtraHeaderId::InfoZipOwnership16 => unix[8..12].starts_with(data),
+                ExtraHeaderId::InfoZipOwnership => ownership_ids(data).is_some_and(|(uid, gid)| {
+                    significant_bytes(uid) == significant_bytes(&unix[8..10])
+                        && significant_bytes(gid) == significant_bytes(&unix[10..12])
+                }),
+                ExtraHeaderId::ExtendedTimestamp => {
+                    // UT stores mtime before atime. Only the local field stores atime,
+                    // even when the central flags announce it.
+                    let (times, _) = data[1..].as_chunks::<4>();
+                    [(1, &unix[4..8]), (2, &unix[..4])]
+                        .into_iter()
+                        .filter(|(flag, _)| data[0] & flag != 0)
+                        .zip(times)
+                        .all(|((_, expected), time)| time == expected)
+                }
+                _ => true,
+            };
+            if !agrees {
+                return Err(invalid(
+                    position,
+                    "conflicting UNIX metadata in extra fields",
+                ));
+            }
+        }
+        Ok(())
     }
 
     pub(crate) fn local_sizes(&self, common: Common, position: u64) -> Result<Sizes, Error> {
@@ -352,22 +383,37 @@ impl<'a> Extras<'a> {
             }
         }
 
-        Ok(self
-            .unix_data()
-            .or_else(|| central.unix_data())
-            .map(<[u8]>::to_vec))
+        let local_unix = self.fields.get(&ExtraHeaderId::Unix);
+        let central_unix = central.fields.get(&ExtraHeaderId::Unix);
+        // Each header was checked on its own. If only one carries PKWARE UNIX,
+        // its values must also agree with the Info-ZIP fields in the other.
+        match (local_unix, central_unix) {
+            (Some(unix), None) => central.check_unix_agreement(unix, position)?,
+            (None, Some(unix)) => self.check_unix_agreement(unix, position)?,
+            _ => {}
+        }
+        Ok(local_unix
+            .or(central_unix)
+            .map(|unix| unix[extra::UNIX_PREFIX_SIZE..].to_vec()))
     }
 }
 
 /// Version 1 stores two length-prefixed integers: UID, then GID.
-fn valid_ownership(data: &[u8]) -> bool {
+fn ownership_ids(data: &[u8]) -> Option<(&[u8], &[u8])> {
     let [1, uid_size, rest @ ..] = data else {
-        return false;
+        return None;
     };
-    let Some([gid_size, gid @ ..]) = rest.get(usize::from(*uid_size)..) else {
-        return false;
-    };
-    *uid_size != 0 && *gid_size != 0 && gid.len() == usize::from(*gid_size)
+    let (uid, rest) = rest.split_at_checked(usize::from(*uid_size))?;
+    let (&gid_size, gid) = rest.split_first()?;
+    (!uid.is_empty() && !gid.is_empty() && gid.len() == usize::from(gid_size)).then_some((uid, gid))
+}
+
+/// Ignore high zero bytes when comparing unsigned little-endian IDs of different widths.
+fn significant_bytes(mut bytes: &[u8]) -> &[u8] {
+    while let [rest @ .., 0] = bytes {
+        bytes = rest;
+    }
+    bytes
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {

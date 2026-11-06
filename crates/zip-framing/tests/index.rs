@@ -1381,6 +1381,76 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
+async fn checks_overlapping_unix_extra_fields() -> TestResult {
+    // PKWARE UNIX stores atime 11, mtime 22, UID 42 and GID 43.
+    let prefix = [11, 0, 0, 0, 22, 0, 0, 0, 42, 0, 43, 0];
+    let unix = field(0x000d, &prefix);
+    for (identifier, data, agrees) in [
+        (0x5855, &prefix[..8], true),
+        (0x5855, &[11, 0, 0, 0, 22, 0, 0, 0, 42, 0, 99, 0], false),
+        // UT can carry a creation time, which has no PKWARE counterpart.
+        (0x5455, &[7, 22, 0, 0, 0, 11, 0, 0, 0, 99, 0, 0, 0], true),
+        (0x5455, &[2, 11, 0, 0, 0], true),
+        (0x5455, &[2, 22, 0, 0, 0], false),
+        (0x5455, &[1, 11, 0, 0, 0], false),
+        (0x7855, &[42, 0, 43, 0], true),
+        (0x7855, &[42, 0, 44, 0], false),
+        // Short and zero-extended IDs compare equal. High bits cannot be discarded.
+        (0x7875, &[1, 1, 42, 3, 43, 0, 0], true),
+        (0x7875, &[1, 3, 42, 0, 1, 1, 43], false),
+        (0x7875, &[1, 1, 42, 1, 44], false),
+    ] {
+        let archive = Fixture {
+            local_extra: field(identifier, data),
+            central_extra: unix.clone(),
+            ..Fixture::default()
+        }
+        .build();
+        let result = read_validated(&archive.bytes).await;
+        if agrees {
+            result?;
+        } else {
+            assert!(matches!(
+                result,
+                Err(FrameError::Invalid {
+                    position: 0,
+                    reason: "conflicting UNIX metadata in extra fields"
+                })
+            ));
+        }
+    }
+
+    let ownership = field(0x7875, &[1, 1, 50, 1, 51]);
+    for (local_extra, central_extra) in [
+        ([ownership.clone(), unix.clone()].concat(), Vec::new()),
+        (unix.clone(), ownership.clone()),
+        (Vec::new(), [unix, ownership].concat()),
+    ] {
+        let directory_conflict = local_extra.is_empty();
+        let archive = Fixture {
+            local_extra,
+            central_extra,
+            ..Fixture::default()
+        }
+        .build();
+        let expected = if directory_conflict {
+            archive.central as u64
+        } else {
+            0
+        };
+        let result = read_validated(&archive.bytes).await;
+        assert!(matches!(
+            result,
+            Err(FrameError::Invalid {
+                reason: "conflicting UNIX metadata in extra fields",
+                position
+            }) if position == expected
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconciles_shortened_info_zip_extras() -> TestResult {
     for (identifier, local, central) in [
         (0x5855, vec![1; 12], vec![1; 8]),

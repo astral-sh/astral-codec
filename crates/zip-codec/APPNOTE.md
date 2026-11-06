@@ -58,7 +58,9 @@ and mark the payload as MacBinary (§4.6.4).
 
 macOS `ditto` writes `0x5855`; Info-ZIP `zip` writes `0x5455` and `0x7875` together.
 We validate these [Info-ZIP layouts](https://github.com/LuaDist/zip/blob/master/proginfo/extrafld.txt)
-without applying timestamps or ownership. We reject `0x5855` alongside any
+without applying timestamps or ownership. When an Info-ZIP field and a PKWARE
+UNIX field supply the same timestamp, UID, or GID, their values must agree,
+even across local and central headers. We reject `0x5855` alongside any
 newer Info-ZIP timestamp or ownership field, and reject `0x7855` alongside
 `0x7875`, rather than choosing which copy takes precedence.
 
