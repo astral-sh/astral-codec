@@ -87,8 +87,9 @@ use crate::{
     GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
     header::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
-        MODE_RANGE, MTIME_RANGE, NAME_RANGE, PREFIX_RANGE, SIZE_RANGE, TYPEFLAG_OFFSET, UID_RANGE,
-        UNAME_RANGE, USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul, parse_number, parse_octal,
+        MODE_RANGE, MTIME_RANGE, NAME_RANGE, NumericFormat, PREFIX_RANGE, SIZE_RANGE,
+        TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE, USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul,
+        parse_number, parse_octal,
     },
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
@@ -183,7 +184,7 @@ impl HeaderFrame {
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
                 position,
-                ArchiveFormat::Pax,
+                NumericFormat::Octal,
                 field,
                 &block[range],
                 policy.allow_all_nul_numeric_fields,
@@ -236,7 +237,7 @@ impl HeaderFrame {
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
                 position,
-                ArchiveFormat::Gnu,
+                NumericFormat::Gnu,
                 field,
                 &block[range],
                 policy.allow_all_nul_numeric_fields,
@@ -283,7 +284,7 @@ impl HeaderFrame {
 
     fn parse_numeric_field(
         position: u64,
-        format: ArchiveFormat,
+        format: NumericFormat,
         field: &'static str,
         bytes: &[u8],
         allow_all_nul_numeric_fields: bool,
@@ -1235,7 +1236,7 @@ impl TryFromFramed<&Block> for ParsedHeader {
         }
 
         let size_bytes: [u8; 12] = block[SIZE_RANGE].try_into().expect("fixed header range");
-        let size = parse_number(format, &size_bytes).ok_or_else(|| {
+        let size = parse_number(format.into(), &size_bytes).ok_or_else(|| {
             FrameError::at(position, FrameErrorInner::InvalidSize { found: size_bytes })
         })?;
 

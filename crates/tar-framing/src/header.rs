@@ -160,14 +160,29 @@ pub(crate) fn is_all_nul(bytes: &[u8]) -> bool {
     bytes.iter().all(|byte| *byte == 0)
 }
 
-/// Parse a number from the given bytes, depending on the archive format.
-///
-/// See [`parse_octal`] for the pax parsing rules and [`parse_gnu_number`]
-/// for the GNU parsing rules.
-pub(crate) fn parse_number(format: ArchiveFormat, bytes: &[u8]) -> Option<u64> {
+/// The encoding of a numeric header field.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) enum NumericFormat {
+    /// The pax octal encoding, as parsed by [`parse_octal`].
+    Octal,
+    /// The GNU octal or base-256 encoding, as parsed by [`parse_gnu_number`].
+    Gnu,
+}
+
+impl From<ArchiveFormat> for NumericFormat {
+    fn from(format: ArchiveFormat) -> Self {
+        match format {
+            ArchiveFormat::Pax => Self::Octal,
+            ArchiveFormat::Gnu => Self::Gnu,
+        }
+    }
+}
+
+/// Parse a number from the given bytes in the given numeric encoding.
+pub(crate) fn parse_number(format: NumericFormat, bytes: &[u8]) -> Option<u64> {
     match format {
-        ArchiveFormat::Pax => parse_octal(bytes),
-        ArchiveFormat::Gnu => parse_gnu_number(bytes),
+        NumericFormat::Octal => parse_octal(bytes),
+        NumericFormat::Gnu => parse_gnu_number(bytes),
     }
 }
 
