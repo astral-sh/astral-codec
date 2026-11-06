@@ -1,38 +1,29 @@
 # zip-framing
 
-Asynchronous, bounded indexing of seekable ZIP archives. `Index::read` checks
-the central directory; `Index::entry` reconciles a selected local header,
-ZIP64 extensions, and data descriptor before returning a checked `Entry`.
-Resolution also interprets host-specific attributes and checks kind-specific
-metadata. `Entry::kind()` returns the cached `EntryKind`; `Entry::unix_mode()`
-preserves the Unix file type and permission bits. `Index::resolved()` returns
-an already checked entry without I/O. `Index::validate_all` checks
-complete physical coverage, redundant metadata, and member kinds, including
-unselected members. Payload integrity and compression belong to `zip-codec`.
+`zip-framing` reads ZIP records from a seekable source and serializes ZIP64
+headers. Use [`zip-codec`](../zip-codec) for payload decoding, integrity
+checks, and filesystem extraction.
 
-`Index::read` accepts only the ZIP64 extra field in member headers.
-`Index::read_with_policy(reader, limits, ExtraFieldPolicy::AllowListed)` also
-accepts the [seven supported metadata fields](../zip-codec/APPNOTE.md#member-extra-fields).
+## Reading
 
-Kinds include volume labels, sockets, and unknown Unix types even though
-`zip-codec` cannot project them. `EntryKind` carries type-specific PKWARE UNIX
-metadata for symbolic links and device nodes. Framing rejects UNIX file-type
-data on other kinds, including possible hard links. `Entry::has_unix_extra()`
-distinguishes a prefix-only UNIX extra field from an absent one.
-Symbolic links can also store targets in their
-payloads, which the codec decodes and validates. The symbolic-link size limit
-belongs to the codec.
+Pass the same, unchanged source to each operation on an `Index`.
 
-Directory reads use a bounded 64 KiB window; selected local records use a 4 KiB
-window bounded by the next record. Small amounts of payload data may be read
-ahead. `IndexedEntry::record_range` exposes the declared member span for
-caller-controlled prefetching, before local validation. `IndexedEntry::directory`
-provides the metadata declared by the central directory.
+- `Index::read` checks the central directory. Each `IndexedEntry` exposes the
+  directory metadata and the declared byte range for prefetching.
+- `Index::entry` checks one member's local header, extra fields, and any data
+  descriptor against the directory. The resulting `Entry` exposes the member
+  kind and payload offset. `Index::resolved` returns a cached entry without I/O.
+- `Index::validate_all` checks every member's local records and verifies that
+  their byte ranges cover the archive's member data without gaps or overlaps.
 
-Targets PKWARE APPNOTE 6.3.3 with stored/DEFLATE entries and UTF-8 names.
-Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
-directories, and bytes outside declared records are rejected when the affected
-records are checked. Listing alone does not validate unselected local records.
+`Limits` bounds archive size, entry count, metadata, and declared output sizes.
+`Index::read_with_options` configures accepted ZIP features through
+`ReadOptions`. By default, the only accepted member extra field is ZIP64.
+See the [supported extra fields](../zip-codec/APPNOTE.md#member-extra-fields).
 
-See [ZIP compatibility and open policy questions](../zip-codec/APPNOTE.md)
-for writer conventions and cases where readers can disagree.
+## Writing
+
+`write::PendingMember` gives the local header size before the payload is
+written. Pass the CRC-32, sizes, and local header offset to `finish`, then
+serialize the local and central headers from the resulting `CompletedMember`.
+`write::end_records` serializes the ZIP64 and classic end records.

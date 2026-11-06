@@ -1,7 +1,7 @@
 # ZIP compatibility
 
 `zip-codec` targets [PKWARE APPNOTE 6.3.3][appnote]. See the
-[security model](../../SECURITY.md#zip-archives) for validation and limits.
+[security model](../../SECURITY.md#zip-codec) for the reader's security guarantees.
 
 ## Writer conventions
 

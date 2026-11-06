@@ -39,8 +39,7 @@ metadata and projection, but does not verify unread payloads.
 When writing, `zip-codec` streams payloads and retains bounded central-directory
 metadata; `zip-framing` serializes UTF-8 ZIP64 headers and end records. The
 encoder requires seekable output to fill in each local header after streaming
-its payload. See [SECURITY.md](SECURITY.md#zip-archives) for validation
-guarantees and resource limits.
+its payload. See [SECURITY.md](SECURITY.md#zip-codec) for the ZIP security model.
 
 ## Development checks
 

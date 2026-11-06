@@ -1,111 +1,65 @@
 # zip-codec
 
-Strict, asynchronous ZIP decoding for seekable inputs and streaming ZIP64
-encoding, with format-neutral construction and extraction through `archive-trait`.
+`zip-codec` reads and writes ZIP archives using seekable Tokio I/O. It supports
+Stored and DEFLATE members and writes ZIP64 archives.
+
+## Reading
+
+`ZipArchive::open` reads the central directory. Use `entries()` to list its
+members, `member(index)` to open one, or `extract_in` to extract the archive.
 
 ```rust,no_run
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
 use zip_codec::{Archive, ZipArchive, extract::ExtractPolicy};
 
-let source = tokio::fs::File::open("input.zip").await?;
-ZipArchive::open(source).await?
-    .extract_in("destination", ExtractPolicy::default()).await?;
-# Ok(())
-# }
+async fn extract() -> Result<(), Box<dyn std::error::Error>> {
+    let input = tokio::fs::File::open("input.zip").await?;
+    ZipArchive::open(input).await?
+        .extract_in("destination", ExtractPolicy::default())
+        .await?;
+    Ok(())
+}
 ```
 
-Build an archive with seekable output, without buffering whole files:
+Keep the source unchanged while the archive is open. Selecting a member checks
+its local records. `validate_all()` checks every member's metadata. Reading a
+payload to the end verifies its size and CRC-32. For DEFLATE, the compressed
+stream must also end at the declared boundary. Advancing to another member
+drains and checks the previous payload.
 
-```rust,no_run
-# async fn example() -> Result<(), Box<dyn std::error::Error>> {
-use zip_codec::{ArchiveBuilder, CompressionMethod, EntryMetadata, ZipEncoder, ZipFileOptions};
+Use `ZipArchive::builder` to set read limits and ZIP policies before opening.
+`ExtractPolicy` controls how members are written to disk.
 
-let output = tokio::fs::File::create("output.zip").await?;
-let mut builder = ZipEncoder::new(output)
-    .with_compression(CompressionMethod::Deflate)
-    .builder();
-builder.add_file("hello.txt", &b"hello\n"[..], EntryMetadata::default()).await?;
-builder.add_file(
-    "raw.bin",
-    &b"store these bytes"[..],
-    ZipFileOptions::default().with_compression(CompressionMethod::Stored),
-).await?;
-builder.finish().await?;
-# Ok(())
-# }
-```
-
-The output must implement `AsyncWrite + AsyncSeek + Unpin`, be empty, and start
-at byte zero. Use `std::io::Cursor<Vec<u8>>` for an in-memory archive.
-
-`ZipFileOptions` overrides compression for one file. Use
-`ZipFileOptions::from(metadata)` to combine an override with `EntryMetadata`.
-Files without an override and recursive builds use the encoder's configured
-compression method. Empty files are always stored.
-
-`ZipArchive::entries` exposes indexed members; call `directory()` on an entry
-to access its central-directory metadata. `ZipArchive::member(index)` selects
-an entry. Sequential iteration resumes after the selected entry.
-Use `with_limits` on `ZipArchive::builder(reader)` or `ZipEncoder` to set
-resource budgets.
-
-Opening validates the directory. Selecting a member reconciles its local
-header, extras, and descriptor before exposing it. `validate_all().await` checks
-metadata and codec projection policy for every member, including unselected
-members. Resolved entries expose their ZIP-native kind through `Entry::kind()`;
-the codec maps these kinds into `archive-trait` members. Inconsistent kind
-metadata is a framing error; unrepresentable kinds are codec errors. Payload
-reads check CRC-32, exact decoded size, and exact DEFLATE stream consumption.
-Advancing or selecting another member drains and validates an unfinished payload.
-Errors or cancellation poison the reader.
-
-`ZipMemberPayload::read_to_end` appends the remaining payload to a `Vec`.
-Use `next_chunk` for bounded streaming.
-
-`Limits` bounds archive size, entry count, metadata, per-member output, and total
-output. Payload chunks are capped at 64 KiB. Symbolic-link targets are limited to
-65,535 bytes. The source must remain unchanged while reading the archive.
-
-Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
-directories, non-UTF-8 names, ambiguous records, and unaccounted bytes
-are rejected when the affected records are checked. Listing alone does not
-validate unselected local records.
-
-The member adapter supports regular files, directories, symbolic links, and
-the special kinds represented by `archive-trait`. ZIP hard links are unsupported.
-Volume labels, sockets, and conflicting file-type attributes cannot be projected.
-
-The reader accepts only the ZIP64 member extra field by default. To opt in to
-the [other supported fields](APPNOTE.md#member-extra-fields), call
-`.with_policy(ExtraFieldPolicy::AllowListed)` on the archive builder before
-`.open().await`.
-
-Encoding uses ZIP64 even for small archives. Each payload is streamed once, then
-the encoder seeks back to fill in the local header's CRC and sizes. No data
-descriptors are emitted. Empty members and symbolic-link targets are stored
-without compression. Timestamps are fixed at 1980-01-01; Unix permissions retain
-only executable intent. DEFLATE and CRC use `flate2` with its pure-Rust `zlib-rs`
-backend. `CompressionMethod` is non-exhaustive so further methods can be added
-without redesigning the APIs.
-
-See [SECURITY.md](../../SECURITY.md) for resource bounds and validation guarantees,
-and [APPNOTE.md](APPNOTE.md) for writer conventions and open policy questions.
-
-For HTTP range sources, metadata reads use bounded read-ahead. Local records
-are fetched only when selected. To prefetch a whole selected member, obtain its
-`record_range()` from `entries()` and call the source's prefetch method through
-`reader_mut().await?` before selecting it. The ZIP crates have no HTTP dependency.
-Lending the reader drains an active payload first; the caller may move the cursor
-but must preserve the source and its contents. Prefetch sizes and the underlying
-source's cache policy remain under caller control.
-
-For a source with an async `prefetch` method, the access pattern is:
+For an HTTP range source with its own `prefetch` method, the member's declared
+range can be fetched before opening it.
 
 ```rust,ignore
 let range = archive.entries()[index].record_range();
-archive.reader_mut().await?.prefetch(range).await;
+archive.reader_mut().await?.prefetch(range).await?;
 let member = archive.member(index).await?;
 ```
 
-The declared range includes the local header, compressed payload, and any
-trailing descriptor. Prefetching does not mark those records as validated.
+## Writing
+
+`ZipEncoder` streams each payload, then seeks back to fill in its local header.
+Start with an empty output positioned at byte zero. Call `finish()` to write
+the central directory and end records.
+
+```rust,no_run
+use zip_codec::{ArchiveBuilder, EntryMetadata, FilePayload, ZipEncoder};
+
+async fn create() -> Result<(), Box<dyn std::error::Error>> {
+    let output = tokio::fs::File::create("output.zip").await?;
+    let mut builder = ZipEncoder::new(output).builder();
+    let readme = FilePayload::from_path("README.md").await?;
+    builder.add_file("README.md", readme, EntryMetadata::default()).await?;
+    builder.finish().await?;
+    Ok(())
+}
+```
+
+Nonempty regular files use DEFLATE by default. Set the archive default with
+`ZipEncoder::with_compression` or override it for one file with
+`ZipFileOptions::with_compression`. Empty files are stored uncompressed.
+
+See the [ZIP compatibility notes](APPNOTE.md) and the
+[security model](../../SECURITY.md#zip-codec).
