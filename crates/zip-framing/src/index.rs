@@ -97,15 +97,16 @@ impl CommentPolicy {
 /// Which optional ZIP features the reader accepts.
 #[derive(Clone, Copy, Debug)]
 pub struct ReadOptions {
-    /// Extra fields accepted in central and local headers.
+    /// Extra fields accepted in both headers. Defaults to [`ExtraFieldPolicy::Zip64Only`].
     pub extra_fields: ExtraFieldPolicy,
     /// Comments in central directory entries. Defaults to [`CommentPolicy::Reject`].
     pub member_comments: CommentPolicy,
     /// Comment in the end record. Defaults to [`CommentPolicy::AllowAscii`].
     pub archive_comment: CommentPolicy,
-    /// Accept Stored members with data descriptors. Disabled by default.
+    /// Accept Stored members with data descriptors (bit 3). Disabled by default.
     pub allow_stored_data_descriptors: bool,
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
+    /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
     pub allow_ambiguous_symlink_modes: bool,
 }
 
@@ -157,8 +158,7 @@ impl Index {
         })
     }
 
-    /// Indexes the directory and checks bounds derivable from its records.
-    /// By default, only ZIP64 member extra fields and DEFLATE data descriptors are accepted.
+    /// Indexes the directory with default [`ReadOptions`] and checks bounds derivable from its records.
     ///
     /// Local headers and descriptors are checked by [`Self::entry`] on access,
     /// or by [`Self::validate_all`]. The source must remain unchanged and be the

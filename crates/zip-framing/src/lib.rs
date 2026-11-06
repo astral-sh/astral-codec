@@ -11,8 +11,7 @@
 //!   the central directory entry) to the most invariants preserved (a member whose
 //!   central and local states are fully reconciled).
 //!
-//! - Filenames and UNIX extra-field link targets must be UTF-8. [`CommentPolicy`]
-//!   controls which member and archive comments the reader accepts.
+//! - Filenames and UNIX extra-field link targets must be UTF-8.
 //!
 //! - zip-framing does not decode or validate member payloads. It exposes their
 //!   offsets and compressed sizes so consumers can read and decode them,
@@ -22,13 +21,10 @@
 //!
 //! ## ZIP compatibility
 //!
-//! By default, zip-framing rejects Stored members with data descriptors because
-//! a streaming reader can mistake payload bytes for a descriptor.
-//! To accept these members, set [`ReadOptions::allow_stored_data_descriptors`].
-//!
-//! By default, symlink mode bits require a Unix creator (3). For other creators,
-//! readers disagree on whether the member is a file or a symlink. Set
-//! [`ReadOptions::allow_ambiguous_symlink_modes`] to accept the host-specific interpretation.
+//! Stored members with data descriptors require an opt-in because a streaming
+//! reader can mistake payload bytes for a descriptor. Symlink mode bits from
+//! creators other than Unix (3) require an opt-in because readers disagree on
+//! the file type. See [`ReadOptions`].
 
 #![forbid(unsafe_code)]
 

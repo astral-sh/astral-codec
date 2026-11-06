@@ -58,18 +58,13 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
         self
     }
 
-    /// Allows Stored members with data descriptors (general purpose bit 3).
-    ///
-    /// Disabled by default. See the [ZIP compatibility notes](zip_framing#zip-compatibility).
+    /// Allows [Stored members with data descriptors](ReadOptions::allow_stored_data_descriptors).
     pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
         self.options.allow_stored_data_descriptors = allow;
         self
     }
 
-    /// Allows Unix symlink mode bits from non-Unix creator systems.
-    ///
-    /// Disabled by default. When enabled, Darwin also uses Unix modes.
-    /// Other creator systems use their usual file attributes.
+    /// Allows [Unix symlink modes from non-Unix creators](ReadOptions::allow_ambiguous_symlink_modes).
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
         self.options.allow_ambiguous_symlink_modes = allow;
         self
@@ -93,8 +88,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens with default resource limits. Only ZIP64 member extra fields and
-    /// DEFLATE data descriptors are accepted by default.
+    /// Opens the archive with default limits and [read options](ReadOptions).
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
         Self::builder(reader).open().await
     }
