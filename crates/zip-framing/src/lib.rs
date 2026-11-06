@@ -21,10 +21,13 @@
 //!
 //! ## ZIP compatibility
 //!
-//! Stored members with data descriptors require an opt-in because a streaming
-//! reader can mistake payload bytes for a descriptor. Symlink mode bits from
-//! creators other than Unix (3) require an opt-in because readers disagree on
-//! the file type. See [`ReadOptions`].
+//! - By default, zip-framing rejects stored members that use a data descriptor,
+//!   since other streaming ZIP parsers frequently misinterpret them.
+//!   See [`ReadOptions::allow_stored_data_descriptors`].
+//!
+//! - By default, zip-framing does not honor symlink mode bits unless the host
+//!   system indicated by the "version made by" field indicates a UNIX host (3).
+//!   See [`ReadOptions::allow_ambiguous_symlink_modes`].
 
 #![forbid(unsafe_code)]
 
