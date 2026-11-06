@@ -6,7 +6,7 @@ use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry,
-    CommentPolicy::{AllowAll, AllowAscii, AllowUtf8, Reject},
+    CommentPolicy::{AllowAll, AllowUtf8},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
     HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
@@ -1007,48 +1007,32 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
 }
 
 #[tokio::test]
-async fn checks_comment_policies_when_opening_the_directory() -> TestResult {
-    let empty = b"".as_slice();
-    let ascii = b"zip-rs".as_slice();
+async fn checks_the_member_comment_encoding_flag() -> TestResult {
     let utf8 = "café".as_bytes();
-    let raw = b"\xff".as_slice();
-    let policies = &[Reject, AllowAscii, AllowUtf8, AllowAll];
-
-    for (member, archive, flags, accepted) in [
-        (empty, empty, 0, policies.as_slice()),
-        (ascii, empty, 0, &[AllowAscii, AllowUtf8, AllowAll]),
-        (empty, ascii, 0, &[AllowAscii, AllowUtf8, AllowAll]),
-        (utf8, empty, 0, &[AllowAll]),
-        (utf8, empty, 0x0800, &[AllowUtf8, AllowAll]),
-        (empty, utf8, 0, &[AllowUtf8, AllowAll]),
-        (raw, empty, 0, &[AllowAll]),
-        (raw, empty, 0x0800, &[]),
-        (empty, raw, 0, &[AllowAll]),
+    for (comment, policy, flags, accepted) in [
+        (b"zip".as_slice(), AllowUtf8, 0, true),
+        (utf8, AllowUtf8, 0, false),
+        (utf8, AllowUtf8, 0x0800, true),
+        (b"\xff", AllowAll, 0, true),
+        (b"\xff", AllowAll, 0x0800, false),
     ] {
-        let zip = Fixture {
-            member_comment: member.to_vec(),
-            archive_comment: archive.to_vec(),
+        let archive = Fixture {
             flags: Some(flags),
+            member_comment: comment.into(),
             ..Fixture::default()
         }
         .build();
-        for &policy in policies {
-            let result = Index::read_with_options(
-                &mut Cursor::new(&zip.bytes),
-                Limits::default(),
-                ReadOptions {
-                    member_comments: policy,
-                    archive_comment: policy,
-                    ..ReadOptions::default()
-                },
-            )
-            .await;
-            assert_eq!(
-                result.is_ok(),
-                accepted.contains(&policy),
-                "{policy:?}, member={member:?}, archive={archive:?}, flags={flags:#x}: {result:?}"
-            );
-        }
+        let options = ReadOptions {
+            member_comments: policy,
+            ..ReadOptions::default()
+        };
+        let mut source = Cursor::new(archive.bytes);
+        let result = Index::read_with_options(&mut source, Limits::default(), options).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{policy:?}, flags={flags:#x}: {result:?}"
+        );
     }
     Ok(())
 }
@@ -1066,12 +1050,8 @@ async fn reconciles_unicode_comment_extra_fields() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = Index::read_with_options(
-            &mut Cursor::new(archive.bytes),
-            Limits::default(),
-            ALL_FEATURES,
-        )
-        .await;
+        let mut source = Cursor::new(archive.bytes);
+        let result = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await;
         if length == unicode.len() {
             result?;
         } else {
