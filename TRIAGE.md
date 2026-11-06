@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2, 8, and 9 are open. The first three items affect which members a reader
+Items 2 and 9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -111,8 +111,8 @@ Framing accepts 2024-02-31 when both headers contain that date. Python
 exposes the tuple `(2024, 2, 31, 0, 0, 0)`. Java reports 2024-03-02.
 APPNOTE §4.4.6 specifies the MS-DOS date and time format.
 
-**Open question.** Should framing validate the calendar date and clock fields
-as well as checking agreement between headers?
+**Decision.** Won't fix. Framing requires the two headers to agree on the DOS
+timestamp. The filesystem supplies timestamps during extraction.
 
 ## 9. Member comments with the UTF-8 flag clear
 
