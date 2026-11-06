@@ -1381,141 +1381,75 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
-async fn checks_overlapping_unix_extra_fields() -> TestResult {
-    // PKWARE UNIX stores atime 11, mtime 22, UID 42 and GID 43.
-    let prefix = [11, 0, 0, 0, 22, 0, 0, 0, 42, 0, 43, 0];
-    let unix = || field(0x000d, &prefix);
-    let timestamp = |data: &[u8]| field(0x5455, data);
-    let ownership = |data: &[u8]| field(0x7875, data);
-    let other_owner = || ownership(&[1, 1, 50, 1, 51]);
-    let original_times = || field(0x5855, &prefix[..8]);
-    let mut different_gid = prefix;
-    different_gid[10] = 99;
-    // UT supplies mtime, atime and creation time locally, but only mtime centrally.
-    let local_times = timestamp(&[7, 22, 0, 0, 0, 11, 0, 0, 0, 99, 0, 0, 0]);
-    let central_times = timestamp(&[7, 22, 0, 0, 0]);
-    let wrong_mtime = || timestamp(&[1, 11, 0, 0, 0]);
-    for (local_extra, central_extra, agrees) in [
-        (original_times(), unix(), true),
-        (field(0x5855, &different_gid), unix(), false),
-        (local_times, [unix(), central_times].concat(), true),
-        (timestamp(&[2, 11, 0, 0, 0]), unix(), true),
-        (timestamp(&[2, 22, 0, 0, 0]), unix(), false),
-        (wrong_mtime(), unix(), false),
-        (field(0x7855, &[42, 0, 43, 0]), unix(), true),
-        (field(0x7855, &[42, 0, 44, 0]), unix(), false),
-        // Short and zero-extended IDs compare equal. High bits cannot be discarded.
-        (ownership(&[1, 1, 42, 3, 43, 0, 0]), unix(), true),
-        (ownership(&[1, 3, 42, 0, 1, 1, 43]), unix(), false),
-        (ownership(&[1, 1, 42, 1, 44]), unix(), false),
-        ([other_owner(), unix()].concat(), vec![], false),
-        (unix(), other_owner(), false),
-        (vec![], [unix(), other_owner()].concat(), false),
-        (vec![], [original_times(), wrong_mtime()].concat(), false),
+async fn reconciles_unix_extra_fields() -> TestResult {
+    // Four-byte tags distinguish the timestamps. PKWARE stores each ID in two bytes.
+    let prefix = b"atimmtimu\0g\0";
+    let unix = || field(0x000d, prefix);
+    let padded_owner = &[1, 1, b'u', 3, b'g', 0, 0];
+    for (identifier, local, central) in [
+        (0x5855, &prefix[..], &prefix[..8]),
+        (0x5855, &prefix[..8], &prefix[..8]),
+        (0x5455, b"\x03mtimatim", b"\x03mtim"),
+        (0x5455, b"\x02atim", b"\x02"),
+        (0x5455, b"\x07mtimatimctim", b"\x07mtim"),
+        (0x7855, &prefix[8..], &[]),
+        (0x7875, padded_owner, padded_owner),
     ] {
-        let central_only = local_extra.is_empty();
         let archive = Fixture {
-            local_extra,
-            central_extra,
+            local_extra: field(identifier, local),
+            central_extra: [unix(), field(identifier, central)].concat(),
             ..Fixture::default()
         }
         .build();
-        let result = read_validated(&archive.bytes).await;
-        if agrees {
-            result?;
-        } else {
-            let expected = if central_only {
-                archive.central as u64
-            } else {
-                0
-            };
-            assert!(matches!(result, Err(FrameError::Invalid {
-                reason: "conflicting UNIX metadata in extra fields", position
-            }) if position == expected));
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn reconciles_shortened_info_zip_extras() -> TestResult {
-    for (identifier, local, central) in [
-        (0x5855, vec![1; 12], vec![1; 8]),
-        (0x5855, vec![1; 8], vec![1; 8]),
-        (0x5455, vec![3; 9], vec![3; 5]),
-        (0x5455, vec![2; 5], vec![2]),
-        (0x5455, vec![7; 13], vec![7; 5]),
-        (0x7855, vec![1; 4], Vec::new()),
-    ] {
-        let fixture = Fixture {
-            local_extra: field(identifier, &local),
-            central_extra: field(identifier, &central),
-            ..Fixture::default()
-        };
-        read_validated(&fixture.build().bytes).await?;
+        read_validated(&archive.bytes).await?;
     }
 
+    let bad_layout = "invalid Info-ZIP extra field layout";
+    let copy_mismatch = "local and central extra fields disagree";
+    let missing_local = "central Info-ZIP field has no local copy";
+    let conflict = "conflicting UNIX metadata in extra fields";
     for (local, central, expected) in [
-        (
-            field(0x5855, &[1; 12]),
-            field(0x5855, &[1; 7]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x5855, &[1; 10]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
+        (field(0x5855, &[1; 12]), field(0x5855, &[1; 7]), bad_layout),
+        (field(0x5855, &[1; 10]), vec![], bad_layout),
         (
             field(0x5855, &[1; 12]),
             field(0x5855, &[2; 8]),
-            "local and central extra fields disagree",
+            copy_mismatch,
         ),
-        (
-            field(0x5455, &[3; 9]),
-            field(0x5455, &[3]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x5455, &[8; 5]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
+        (field(0x5455, &[3; 9]), field(0x5455, &[3]), bad_layout),
+        (field(0x5455, &[8; 5]), vec![], bad_layout),
         (
             field(0x5455, &[]),
-            Vec::new(),
+            vec![],
             "missing Info-ZIP timestamp flags",
         ),
         (
             field(0x5455, &[3; 9]),
             field(0x5455, &[1; 5]),
-            "local and central extra fields disagree",
+            copy_mismatch,
         ),
-        (
-            field(0x7855, &[1; 4]),
-            field(0x7855, &[1; 4]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x7855, &[1; 2]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            Vec::new(),
-            field(0x7855, &[]),
-            "central Info-ZIP field has no local copy",
-        ),
-        (
-            Vec::new(),
-            field(0x5455, &[3; 5]),
-            "central Info-ZIP field has no local copy",
-        ),
+        (field(0x7855, &[1; 4]), field(0x7855, &[1; 4]), bad_layout),
+        (field(0x7855, &[1; 2]), vec![], bad_layout),
+        (vec![], field(0x7855, &[]), missing_local),
+        (vec![], field(0x5455, &[3; 5]), missing_local),
         (
             field(0x5855, &[0; 12]),
             field(0x5455, &[1; 5]),
             "mixed old and new Info-ZIP UNIX metadata",
         ),
+        (field(0x5855, b"atimmtimu\0x\0"), unix(), conflict),
+        (field(0x5455, b"\x02mtim"), unix(), conflict),
+        (
+            [unix(), field(0x7855, b"u\0x\0")].concat(),
+            vec![],
+            conflict,
+        ),
+        (
+            unix(),
+            field(0x7875, &[1, 3, b'u', 0, 1, 1, b'g']),
+            conflict,
+        ),
+        (unix(), field(0x7875, &[1, 1, b'u', 1, b'x']), conflict),
     ] {
         let archive = Fixture {
             local_extra: local,
@@ -1530,6 +1464,16 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
             ),
             "{expected}"
         );
+    }
+
+    // Reject conflicting directory fields at open, before reading the local header.
+    for times in [unix(), field(0x5855, &prefix[..8])] {
+        let central = [times, field(0x5455, b"\x01oops")].concat();
+        let archive = Fixture::default().with_extra(false, central).build();
+        assert!(matches!(
+            Index::read_with_policy(&mut Cursor::new(archive.bytes), Limits::default(), AllowListed).await,
+            Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
+        ));
     }
     Ok(())
 }

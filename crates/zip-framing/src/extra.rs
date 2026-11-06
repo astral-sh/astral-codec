@@ -408,12 +408,13 @@ fn agree<T: Eq>(left: Option<T>, right: Option<T>, position: u64) -> Result<Opti
 
 /// Version 1 stores two length-prefixed integers: UID, then GID.
 fn ownership_ids(data: &[u8]) -> Option<(&[u8], &[u8])> {
-    let [1, uid_size, rest @ ..] = data else {
-        return None;
+    let mut data = data.strip_prefix(&[1])?;
+    let mut next_id = || {
+        let length = usize::from(*data.split_off_first()?);
+        data.split_off(..length).filter(|id| !id.is_empty())
     };
-    let (uid, rest) = rest.split_at_checked(usize::from(*uid_size))?;
-    let (&gid_size, gid) = rest.split_first()?;
-    (!uid.is_empty() && !gid.is_empty() && gid.len() == usize::from(gid_size)).then_some((uid, gid))
+    let owner = (next_id()?, next_id()?);
+    data.is_empty().then_some(owner)
 }
 
 /// Ignore high zero bytes when comparing unsigned little-endian IDs of different widths.
