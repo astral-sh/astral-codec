@@ -1,8 +1,8 @@
 # ZIP differential triage
 
-Only item 2 is open. The first three items affect which members a reader
-sees, which bytes it returns, or which filesystem object it creates. Results
-are from `ww/zip-codec` at `33a197b`. The format reference is
+Triage is complete for all nine findings. The first three items affect which
+members a reader sees, which bytes it returns, or which filesystem object it
+creates. Results are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
 
 ## 1. Stored members with data descriptors
@@ -39,9 +39,9 @@ Go's `archive/zip.Reader.Open("same")` returns `FIRST`. Python's
 `ZipFile.read("same")` returns `LAST`. Rust's `zip` 9.0.4 exposes only the
 latter entry even during iteration by index.
 
-**Open question.** Should framing reject repeated destinations even when their
-order agrees? Under the current rule, a validator and a consumer can look up
-the same name successfully and get different bytes. [Current duplicate policy](SECURITY.md#zip-archives).
+**Decision.** Accept repeated destinations when their relative order agrees
+in the central directory and local headers. Callers that write members to disk
+themselves decide how to handle collisions. [`Archive::members` documentation](crates/archive-trait/src/lib.rs#L258-L263).
 
 ## 3. Creator systems and symlink mode bits
 
