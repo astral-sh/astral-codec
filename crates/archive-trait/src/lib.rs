@@ -256,6 +256,10 @@ pub trait Archive: Sized {
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
 
     /// Consumes this archive and returns its lending member cursor.
+    ///
+    /// Member paths may repeat, and distinct paths may resolve to the same file
+    /// on disk. Callers that write members to disk themselves must decide how
+    /// to handle those collisions.
     fn members(self) -> Members<Self> {
         Members { archive: self }
     }
