@@ -61,6 +61,8 @@ pub struct ReadOptions {
     pub extra_fields: ExtraFieldPolicy,
     /// Accept Stored members with data descriptors. Disabled by default.
     pub allow_stored_data_descriptors: bool,
+    /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
+    pub allow_ambiguous_symlink_modes: bool,
 }
 
 /// A ZIP member index.

@@ -25,6 +25,10 @@
 //! By default, zip-framing rejects Stored members with data descriptors because
 //! a streaming reader can mistake payload bytes for a descriptor.
 //! To accept these members, set [`ReadOptions::allow_stored_data_descriptors`].
+//!
+//! By default, symlink mode bits require a Unix creator (3). For other creators,
+//! readers disagree on whether the member is a file or a symlink. Set
+//! [`ReadOptions::allow_ambiguous_symlink_modes`] to accept the host-specific interpretation.
 
 #![forbid(unsafe_code)]
 

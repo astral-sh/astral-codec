@@ -54,6 +54,15 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
         self
     }
 
+    /// Allows Unix symlink mode bits from non-Unix creator systems.
+    ///
+    /// Disabled by default. When enabled, Darwin also uses Unix modes.
+    /// Other creator systems use their usual file attributes.
+    pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
+        self.options.allow_ambiguous_symlink_modes = allow;
+        self
+    }
+
     /// Reads and validates the central directory. Local headers are checked
     /// on member access or by [`ZipArchive::validate_all`].
     pub async fn open(mut self) -> Result<ZipArchive<R>, DecodeError> {
