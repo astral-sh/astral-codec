@@ -116,7 +116,7 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
         let allow_members =
             || ZipArchive::builder(Cursor::new(&bytes)).with_member_comment_policy(AllowAscii);
         assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
-        allow_members().open().await?;
+        assert_eq!(allow_members().open().await.is_ok(), comment.is_ascii());
         for policy in policies {
             let builder = allow_members().with_archive_comment_policy(policy);
             assert_eq!(

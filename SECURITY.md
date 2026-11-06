@@ -99,8 +99,8 @@ declared type may carry the fixed UNIX metadata, but a nonempty file-type
 field is ambiguous and causes rejection. ZIP extraction never creates hard links.
 Filesystem containment and configurable name/link policy remain in `archive-trait`.
 
-By default, the reader rejects nonempty member comments and accepts arbitrary
-archive comment bytes. Callers can configure these policies independently.
+By default, the reader rejects nonempty member comments and requires archive
+comments to be ASCII. Callers can configure these policies independently.
 Member comments with the UTF-8 flag set must be valid UTF-8.
 A Unicode comment extra field must agree with the central directory's member
 comment. A local copy requires an identical central extra field. When an archive

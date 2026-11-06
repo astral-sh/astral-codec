@@ -121,8 +121,8 @@ purpose bit 11 clear. Java reads them as `é` with its UTF-8 default and as `├
 IBM437 selected. Setting bit 11 made both reads return `é`. APPNOTE
 Appendix D.2 applies the encoding flag to both names and member comments.
 
-**Decision.** Reject nonempty member comments by default and allow arbitrary
-archive comment bytes. Callers can set the two policies independently. A
+**Decision.** Reject nonempty member comments and require ASCII archive
+comments by default. Callers can set the two policies independently. A
 survey of 4,619 PyPI ZIPs found no member comments and eight archive comments,
 all `zip-rs`. PyPI checks the member comment length and skips the declared
 archive comment. [Warehouse ZIP validator](https://github.com/pypi/warehouse/blob/c781d360f6a5435b54af7b6a242d0cbfc733b49a/warehouse/utils/zipfiles.py#L165-L204).

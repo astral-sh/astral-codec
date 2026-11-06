@@ -52,7 +52,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
         self
     }
 
-    /// Sets the archive comment policy. Defaults to [`CommentPolicy::AllowAll`].
+    /// Sets the archive comment policy. Defaults to [`CommentPolicy::AllowAscii`].
     pub fn with_archive_comment_policy(mut self, policy: CommentPolicy) -> Self {
         self.options.archive_comment = policy;
         self

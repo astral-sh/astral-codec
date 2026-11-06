@@ -101,7 +101,7 @@ pub struct ReadOptions {
     pub extra_fields: ExtraFieldPolicy,
     /// Comments in central directory entries. Defaults to [`CommentPolicy::Reject`].
     pub member_comments: CommentPolicy,
-    /// Comment in the end record. Defaults to [`CommentPolicy::AllowAll`].
+    /// Comment in the end record. Defaults to [`CommentPolicy::AllowAscii`].
     pub archive_comment: CommentPolicy,
     /// Accept Stored members with data descriptors. Disabled by default.
     pub allow_stored_data_descriptors: bool,
@@ -114,7 +114,7 @@ impl Default for ReadOptions {
         Self {
             extra_fields: ExtraFieldPolicy::default(),
             member_comments: CommentPolicy::Reject,
-            archive_comment: CommentPolicy::AllowAll,
+            archive_comment: CommentPolicy::AllowAscii,
             allow_stored_data_descriptors: false,
             allow_ambiguous_symlink_modes: false,
         }
