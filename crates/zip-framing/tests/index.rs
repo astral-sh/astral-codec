@@ -1384,25 +1384,39 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 async fn checks_overlapping_unix_extra_fields() -> TestResult {
     // PKWARE UNIX stores atime 11, mtime 22, UID 42 and GID 43.
     let prefix = [11, 0, 0, 0, 22, 0, 0, 0, 42, 0, 43, 0];
-    let unix = field(0x000d, &prefix);
-    for (identifier, data, agrees) in [
-        (0x5855, &prefix[..8], true),
-        (0x5855, &[11, 0, 0, 0, 22, 0, 0, 0, 42, 0, 99, 0], false),
-        // UT can carry a creation time, which has no PKWARE counterpart.
-        (0x5455, &[7, 22, 0, 0, 0, 11, 0, 0, 0, 99, 0, 0, 0], true),
-        (0x5455, &[2, 11, 0, 0, 0], true),
-        (0x5455, &[2, 22, 0, 0, 0], false),
-        (0x5455, &[1, 11, 0, 0, 0], false),
-        (0x7855, &[42, 0, 43, 0], true),
-        (0x7855, &[42, 0, 44, 0], false),
+    let unix = || field(0x000d, &prefix);
+    let timestamp = |data: &[u8]| field(0x5455, data);
+    let ownership = |data: &[u8]| field(0x7875, data);
+    let other_owner = || ownership(&[1, 1, 50, 1, 51]);
+    let original_times = || field(0x5855, &prefix[..8]);
+    let mut different_gid = prefix;
+    different_gid[10] = 99;
+    // UT supplies mtime, atime and creation time locally, but only mtime centrally.
+    let local_times = timestamp(&[7, 22, 0, 0, 0, 11, 0, 0, 0, 99, 0, 0, 0]);
+    let central_times = timestamp(&[7, 22, 0, 0, 0]);
+    let wrong_mtime = || timestamp(&[1, 11, 0, 0, 0]);
+    for (local_extra, central_extra, agrees) in [
+        (original_times(), unix(), true),
+        (field(0x5855, &different_gid), unix(), false),
+        (local_times, [unix(), central_times].concat(), true),
+        (timestamp(&[2, 11, 0, 0, 0]), unix(), true),
+        (timestamp(&[2, 22, 0, 0, 0]), unix(), false),
+        (wrong_mtime(), unix(), false),
+        (field(0x7855, &[42, 0, 43, 0]), unix(), true),
+        (field(0x7855, &[42, 0, 44, 0]), unix(), false),
         // Short and zero-extended IDs compare equal. High bits cannot be discarded.
-        (0x7875, &[1, 1, 42, 3, 43, 0, 0], true),
-        (0x7875, &[1, 3, 42, 0, 1, 1, 43], false),
-        (0x7875, &[1, 1, 42, 1, 44], false),
+        (ownership(&[1, 1, 42, 3, 43, 0, 0]), unix(), true),
+        (ownership(&[1, 3, 42, 0, 1, 1, 43]), unix(), false),
+        (ownership(&[1, 1, 42, 1, 44]), unix(), false),
+        ([other_owner(), unix()].concat(), vec![], false),
+        (unix(), other_owner(), false),
+        (vec![], [unix(), other_owner()].concat(), false),
+        (vec![], [original_times(), wrong_mtime()].concat(), false),
     ] {
+        let central_only = local_extra.is_empty();
         let archive = Fixture {
-            local_extra: field(identifier, data),
-            central_extra: unix.clone(),
+            local_extra,
+            central_extra,
             ..Fixture::default()
         }
         .build();
@@ -1410,42 +1424,15 @@ async fn checks_overlapping_unix_extra_fields() -> TestResult {
         if agrees {
             result?;
         } else {
-            assert!(matches!(
-                result,
-                Err(FrameError::Invalid {
-                    position: 0,
-                    reason: "conflicting UNIX metadata in extra fields"
-                })
-            ));
+            let expected = if central_only {
+                archive.central as u64
+            } else {
+                0
+            };
+            assert!(matches!(result, Err(FrameError::Invalid {
+                reason: "conflicting UNIX metadata in extra fields", position
+            }) if position == expected));
         }
-    }
-
-    let ownership = field(0x7875, &[1, 1, 50, 1, 51]);
-    for (local_extra, central_extra) in [
-        ([ownership.clone(), unix.clone()].concat(), Vec::new()),
-        (unix.clone(), ownership.clone()),
-        (Vec::new(), [unix, ownership].concat()),
-    ] {
-        let directory_conflict = local_extra.is_empty();
-        let archive = Fixture {
-            local_extra,
-            central_extra,
-            ..Fixture::default()
-        }
-        .build();
-        let expected = if directory_conflict {
-            archive.central as u64
-        } else {
-            0
-        };
-        let result = read_validated(&archive.bytes).await;
-        assert!(matches!(
-            result,
-            Err(FrameError::Invalid {
-                reason: "conflicting UNIX metadata in extra fields",
-                position
-            }) if position == expected
-        ));
     }
     Ok(())
 }
