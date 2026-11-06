@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2 and 7–9 are open. The first three items affect which members a reader
+Items 2, 8, and 9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -93,17 +93,17 @@ archive model.
 
 ## 7. Conflicting timestamps and ownership across extra fields
 
-With `ExtraFieldPolicy::AllowListed`, each header can contain the same pair
-of fields with different values for the same property. With modification time
-in both PKWARE UNIX (`0x000d`) and Info-ZIP extended timestamp (`0x5455`),
+At `33a197b`, `ExtraFieldPolicy::AllowListed` accepted fields with different
+values for the same property. With modification time in both PKWARE UNIX
+(`0x000d`) and Info-ZIP extended timestamp (`0x5455`),
 Java reported 2021-01-01 and libarchive reported 2000-01-01 for the same
 bytes. With ownership in both `0x000d` and `0x7875`, reversing field order
 changed libarchive's UID/GID from 50/51 to 42/43. The default ZIP64-only
 policy rejects these fields.
 
-**Open question.** Should the opt-in policy require agreement on overlapping
-values across field IDs? The common `0x5455` and `0x7875` pair carries
-different properties. [Extra-field policy](crates/zip-codec/APPNOTE.md#member-extra-fields).
+**Decision.** Require PKWARE and Info-ZIP extra fields to agree wherever both
+supply an access time, modification time, UID, or GID, including across local
+and central headers. [Extra-field policy](crates/zip-codec/APPNOTE.md#member-extra-fields).
 
 ## 8. Invalid DOS dates
 
