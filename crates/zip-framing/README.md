@@ -1,29 +1,47 @@
 # zip-framing
 
-`zip-framing` reads ZIP records from a seekable source and serializes ZIP64
-headers. Use [`zip-codec`](../zip-codec) for payload decoding, integrity
-checks, and filesystem extraction.
+Low-level, asynchronous record framing for classic ZIP and ZIP64 archives.
+
+This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
+Most callers should use [zip-codec](../zip-codec) for encoding, payload
+decoding, and extraction.
 
 ## Reading
 
-Pass the same, unchanged source to each operation on an `Index`.
+`Index::read` reads the central directory from a seekable source. Use the same
+source for subsequent reads and keep its contents unchanged while using the index.
 
-- `Index::read` checks the central directory. Each `IndexedEntry` exposes the
-  directory metadata and the declared byte range for prefetching.
-- `Index::entry` checks one member's local header, extra fields, and any data
-  descriptor against the directory. The resulting `Entry` exposes the member
-  kind and payload offset. `Index::resolved` returns a cached entry without I/O.
-- `Index::validate_all` checks every member's local records and verifies that
-  their byte ranges cover the archive's member data without gaps or overlaps.
+- `Index::entries` returns an `IndexedEntry` for each member in directory order.
+  It exposes the directory metadata and the declared byte range for prefetching.
+- `Index::entry` checks a selected member's local header, extra fields, and any
+  data descriptor against the directory. The resulting `Entry` exposes the
+  member kind and payload offset. `Index::resolved` retrieves a cached entry
+  without I/O.
+
+Use `Index::validate_all` to check every member's local records and verify
+that the member ranges cover the space before the central directory without
+gaps or overlaps. Payload decoding and CRC-32 verification belong to zip-codec.
 
 `Limits` bounds archive size, entry count, metadata, and declared output sizes.
-`Index::read_with_options` configures accepted ZIP features through
-`ReadOptions`. By default, the only accepted member extra field is ZIP64.
-See the [supported extra fields](../zip-codec/APPNOTE.md#member-extra-fields).
+Pass `ReadOptions` to `Index::read_with_options` to enable features such as
+[member extra fields beyond ZIP64](../zip-codec/APPNOTE.md#member-extra-fields).
 
 ## Writing
 
-`write::PendingMember` gives the local header size before the payload is
-written. Pass the CRC-32, sizes, and local header offset to `finish`, then
-serialize the local and central headers from the resulting `CompletedMember`.
-`write::end_records` serializes the ZIP64 and classic end records.
+The `write` module serializes ZIP64 records into byte buffers.
+`PendingMember::local_header_size` gives the space to reserve for a member's
+header. Once the CRC-32, sizes, and local header offset are known, call
+`finish` to get a `CompletedMember` that serializes both headers.
+`write::end_records` produces the ZIP64 and classic end records.
+
+## Benchmarking
+
+Run the framing benchmarks with Cargo.
+
+```shell
+cargo bench -p zip-framing --bench framing --locked
+```
+
+The suite measures header serialization, central-directory indexing, and
+uncached local-record validation on in-memory ZIP64 archives.
+See [CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for CodSpeed and smoke-test commands.
