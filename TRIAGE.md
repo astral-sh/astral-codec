@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2 and 5–9 are open. The first three items affect which members a reader
+Items 2 and 6–9 are open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -77,8 +77,8 @@ Our encoder accepts `config` containing `FIRST` and `config;1` containing
 Info-ZIP `unzip -o` writes only `config`, containing `LAST`. It also strips
 a trailing bare `;` and preserves `;1x`.
 
-**Open question.** Should ZIP reading and writing reject a final filename
-component ending in a semicolon followed by zero or more ASCII digits?
+**Decision.** Won't fix. `zip-codec` preserves these names literally. Stripping
+VMS version suffixes is an Info-ZIP extraction convention.
 
 ## 6. AppleDouble sidecars
 

@@ -5,6 +5,10 @@
 
 ## Writer conventions
 
+**VMS version suffixes.** `zip-codec` preserves filenames such as `config;1`.
+Info-ZIP's `unzip` strips the suffix by default, so `config;1` and `config`
+can extract to the same path. Use `unzip -V` to preserve both names.
+
 **Symlink targets.** Info-ZIP, libarchive, and our encoder put the target in
 the payload. APPNOTE puts it in the PKWARE UNIX extra field (`0x000d`, §4.5.7).
 We accept either form for members resolved as symlinks.
