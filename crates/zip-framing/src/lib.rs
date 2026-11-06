@@ -11,8 +11,8 @@
 //!   the central directory entry) to the most invariants preserved (a member whose
 //!   central and local states are fully reconciled).
 //!
-//! - zip-framing enforces that all parsed filenames, UNIX extra-field link targets,
-//!   and archive/per-member comments are UTF-8. This is an intentional limitation.
+//! - Filenames and UNIX extra-field link targets must be UTF-8. [`CommentPolicy`]
+//!   controls which member and archive comments the reader accepts.
 //!
 //! - zip-framing does not decode or validate member payloads. It exposes their
 //!   offsets and compressed sizes so consumers can read and decode them,
@@ -33,6 +33,7 @@
 #![forbid(unsafe_code)]
 
 mod budget;
+mod comment;
 pub mod constants;
 mod extra;
 mod host;
@@ -47,6 +48,7 @@ use std::io;
 use thiserror::Error;
 
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
+pub use comment::CommentPolicy;
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
 pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry, ReadOptions};

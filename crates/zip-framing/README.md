@@ -29,7 +29,7 @@ ahead. `IndexedEntry::record_range` exposes the declared member span for
 caller-controlled prefetching, before local validation. `IndexedEntry::directory`
 provides the metadata declared by the central directory.
 
-Targets PKWARE APPNOTE 6.3.3 with stored/DEFLATE entries and UTF-8 names/comments.
+Targets PKWARE APPNOTE 6.3.3 with stored/DEFLATE entries and UTF-8 names.
 Encryption, signatures, patched data, multi-volume archives, ZIP64 version-2
 directories, and bytes outside declared records are rejected when the affected
 records are checked. Listing alone does not validate unselected local records.

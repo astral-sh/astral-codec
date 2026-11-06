@@ -1,10 +1,10 @@
-use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem, str};
+use std::{borrow::Cow, cell::RefCell, collections::HashMap, mem};
 
 use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, Error, ExtraFieldPolicy, Limits, add,
+    Budget, CommentPolicy, Error, ExtraFieldPolicy, Limits, add,
     constants::{extra, signature, size, version},
     invalid,
     record::{RecordReader, array_at},
@@ -55,14 +55,30 @@ impl Drop for DirectoryWindow {
 }
 
 /// Which optional ZIP features the reader accepts.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 pub struct ReadOptions {
     /// Extra fields accepted in central and local headers.
     pub extra_fields: ExtraFieldPolicy,
+    /// Comments in central directory entries. Defaults to [`CommentPolicy::Reject`].
+    pub member_comments: CommentPolicy,
+    /// Comment in the end record. Defaults to [`CommentPolicy::AllowAll`].
+    pub archive_comment: CommentPolicy,
     /// Accept Stored members with data descriptors. Disabled by default.
     pub allow_stored_data_descriptors: bool,
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     pub allow_ambiguous_symlink_modes: bool,
+}
+
+impl Default for ReadOptions {
+    fn default() -> Self {
+        Self {
+            extra_fields: ExtraFieldPolicy::default(),
+            member_comments: CommentPolicy::Reject,
+            archive_comment: CommentPolicy::AllowAll,
+            allow_stored_data_descriptors: false,
+            allow_ambiguous_symlink_modes: false,
+        }
+    }
 }
 
 /// A ZIP member index.
@@ -144,7 +160,8 @@ impl Index {
         let mut budget = Budget::new(limits);
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
-        let end = CentralDirectory::read(&mut buffered, &mut budget).await?;
+        let end =
+            CentralDirectory::read(&mut buffered, &mut budget, options.archive_comment).await?;
         let mut entries = end
             .read_entries(&mut buffered, &mut budget, options)
             .await?;
@@ -293,6 +310,7 @@ impl CentralDirectory {
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
+        archive_comment: CommentPolicy,
     ) -> Result<Self, Error> {
         let length = reader.length().await?;
         budget.check_archive_size(length)?;
@@ -321,7 +339,7 @@ impl CentralDirectory {
                 "ambiguous end records",
             ));
         }
-        str::from_utf8(comment).map_err(|_| invalid(position, "non-UTF-8 archive comment"))?;
+        archive_comment.check(comment, position)?;
 
         let disk = u16::from_le_bytes(array_at::<4, 2, _>(&end));
         let directory_disk = u16::from_le_bytes(array_at::<6, 2, _>(&end));

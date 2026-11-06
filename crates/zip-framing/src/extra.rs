@@ -245,11 +245,8 @@ impl<'a> Extras<'a> {
     }
 
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
-        let comment =
-            str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 member comment"))?;
-
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodeComment)
-            && unicode_field(field, bytes, position)? != comment
+            && unicode_field(field, bytes, position)?.as_bytes() != bytes
         {
             return Err(invalid(
                 position,

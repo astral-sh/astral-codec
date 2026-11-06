@@ -5,7 +5,9 @@ use std::{error::Error, io::Cursor};
 use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
+    CentralDirectoryEntry,
+    CommentPolicy::{AllowAll, AllowAscii, AllowUtf8, Reject},
+    CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
     HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
@@ -25,6 +27,8 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 // Exercise the format checks for features that require an opt-in.
 const ALL_FEATURES: ReadOptions = ReadOptions {
     extra_fields: AllowListed,
+    member_comments: AllowAll,
+    archive_comment: AllowAll,
     allow_stored_data_descriptors: true,
     allow_ambiguous_symlink_modes: true,
 };
@@ -1003,51 +1007,54 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
 }
 
 #[tokio::test]
-async fn requires_utf8_archive_and_member_comments() -> TestResult {
-    for (comment, valid) in [
-        (b"zip".as_slice(), true),
-        ("café".as_bytes(), true),
-        (b"\xff".as_slice(), false),
-        (b"\xe2\x82".as_slice(), false),
+async fn checks_comment_policies_when_opening_the_directory() -> TestResult {
+    let empty = b"".as_slice();
+    let ascii = b"zip-rs".as_slice();
+    let utf8 = "café".as_bytes();
+    let raw = b"\xff".as_slice();
+    let policies = &[Reject, AllowAscii, AllowUtf8, AllowAll];
+
+    for (member, archive, flags, accepted) in [
+        (empty, empty, 0, policies.as_slice()),
+        (ascii, empty, 0, &[AllowAscii, AllowUtf8, AllowAll]),
+        (empty, ascii, 0, &[AllowAscii, AllowUtf8, AllowAll]),
+        (utf8, empty, 0, &[AllowAll]),
+        (utf8, empty, 0x0800, &[AllowUtf8, AllowAll]),
+        (empty, utf8, 0, &[AllowUtf8, AllowAll]),
+        (raw, empty, 0, &[AllowAll]),
+        (raw, empty, 0x0800, &[]),
+        (empty, raw, 0, &[AllowAll]),
     ] {
-        for zip64 in [false, true] {
-            for (member, flags) in [(false, 0x0800), (true, 0x0800), (true, 0)] {
-                let mut fixture = Fixture {
-                    zip64,
-                    flags: Some(flags),
-                    ..Fixture::default()
-                };
-                if member {
-                    fixture.member_comment = comment.to_vec();
-                } else {
-                    fixture.archive_comment = comment.to_vec();
-                }
-
-                let archive = fixture.build();
-
-                let (offset, expected) = if member {
-                    (archive.central as u64, "non-UTF-8 member comment")
-                } else {
-                    (archive.end as u64, "non-UTF-8 archive comment")
-                };
-                let result = read_validated(&archive.bytes).await;
-
-                if valid {
-                    assert!(
-                        result.is_ok(),
-                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}: {result:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(result, Err(FrameError::Invalid { position, reason })
-                            if position == offset && reason == expected),
-                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}"
-                    );
-                }
-            }
+        let zip = Fixture {
+            member_comment: member.to_vec(),
+            archive_comment: archive.to_vec(),
+            flags: Some(flags),
+            ..Fixture::default()
+        }
+        .build();
+        for &policy in policies {
+            let result = Index::read_with_options(
+                &mut Cursor::new(&zip.bytes),
+                Limits::default(),
+                ReadOptions {
+                    member_comments: policy,
+                    archive_comment: policy,
+                    ..ReadOptions::default()
+                },
+            )
+            .await;
+            assert_eq!(
+                result.is_ok(),
+                accepted.contains(&policy),
+                "{policy:?}, member={member:?}, archive={archive:?}, flags={flags:#x}: {result:?}"
+            );
         }
     }
+    Ok(())
+}
 
+#[tokio::test]
+async fn reconciles_unicode_comment_extra_fields() -> TestResult {
     // Incomplete Unicode comments remain invalid even when the ordinary comment
     // is usable; do not fall back to treating a recognized field as opaque data.
     let comment = b"comment";
@@ -1059,10 +1066,10 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = Index::read_with_policy(
+        let result = Index::read_with_options(
             &mut Cursor::new(archive.bytes),
             Limits::default(),
-            AllowListed,
+            ALL_FEATURES,
         )
         .await;
         if length == unicode.len() {
@@ -2016,7 +2023,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     ));
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
     assert_eq!(index.entries().len(), names.len());
     for (entry, name) in index.entries().iter().zip(&names) {
         assert_eq!(entry.directory().path(), name);

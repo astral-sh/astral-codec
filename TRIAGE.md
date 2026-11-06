@@ -1,6 +1,6 @@
 # ZIP differential triage
 
-Items 2 and 9 are open. The first three items affect which members a reader
+Only item 2 is open. The first three items affect which members a reader
 sees, which bytes it returns, or which filesystem object it creates. Results
 are from `ww/zip-codec` at `33a197b`. The format reference is
 [PKWARE APPNOTE 6.3.3][appnote].
@@ -116,13 +116,16 @@ timestamp. The filesystem supplies timestamps during extraction.
 
 ## 9. Member comments with the UTF-8 flag clear
 
-Framing accepts the member-comment bytes `c3 a9` with general purpose bit 11
-clear. Java reads them as `é` with its UTF-8 default and as `├⌐` with
+Framing at `33a197b` accepted the member-comment bytes `c3 a9` with general
+purpose bit 11 clear. Java reads them as `é` with its UTF-8 default and as `├⌐` with
 IBM437 selected. Setting bit 11 made both reads return `é`. APPNOTE
 Appendix D.2 applies the encoding flag to both names and member comments.
 
-**Open question.** Should member comments follow the filename rule that
-non-ASCII text requires bit 11? [Current comment policy](SECURITY.md#zip-archives).
+**Decision.** Reject nonempty member comments by default and allow arbitrary
+archive comment bytes. Callers can set the two policies independently. A
+survey of 4,619 PyPI ZIPs found no member comments and eight archive comments,
+all `zip-rs`. PyPI checks the member comment length and skips the declared
+archive comment. [Warehouse ZIP validator](https://github.com/pypi/warehouse/blob/c781d360f6a5435b54af7b6a242d0cbfc733b49a/warehouse/utils/zipfiles.py#L165-L204).
 
 ## Coverage
 

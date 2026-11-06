@@ -11,9 +11,11 @@ use std::{
 use crc32fast::hash as crc32;
 use flate2::{Compression, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
+use zip::{ZipWriter, write::FullFileOptions};
 use zip_codec::{
-    Archive, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy,
-    LimitExceeded, Limits, Member, MemberPayload, ZipArchive, extract::ExtractPolicy,
+    Archive, CommentPolicy, CompressionMethod, DecodeError, EntryKind as DecodedEntryKind,
+    ExtraFieldPolicy, LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
+    extract::ExtractPolicy,
 };
 use zip_framing::{
     Error as FrameError, HostSystem,
@@ -93,6 +95,30 @@ fn single_member_archive(
     bytes.extend(central);
     bytes.extend(end);
     Ok(bytes)
+}
+
+#[tokio::test]
+async fn configures_member_and_archive_comments_independently() -> TestResult {
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.set_raw_comment([0xff].into())?;
+    writer.start_file(
+        "file",
+        FullFileOptions::default().with_file_comment("member"),
+    )?;
+    let bytes = writer.finish()?.into_inner();
+    let builder = || ZipArchive::builder(Cursor::new(&bytes));
+    let allow_members = || builder().with_member_comment_policy(CommentPolicy::AllowAscii);
+
+    assert!(builder().open().await.is_err());
+    allow_members().open().await?;
+    assert!(
+        allow_members()
+            .with_archive_comment_policy(CommentPolicy::AllowUtf8)
+            .open()
+            .await
+            .is_err()
+    );
+    Ok(())
 }
 
 #[tokio::test]
