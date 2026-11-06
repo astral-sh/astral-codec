@@ -1,65 +1,63 @@
 # zip-codec
 
-`zip-codec` reads and writes ZIP archives using seekable Tokio I/O. It supports
-Stored and DEFLATE members and writes ZIP64 archives.
+zip-codec is a constrained, asynchronous ZIP encoder and decoder for Rust.
 
-## Reading
+This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
 
-`ZipArchive::open` reads the central directory. Use `entries()` to list its
-members, `member(index)` to open one, or `extract_in` to extract the archive.
+> [!IMPORTANT]
+>
+> This crate is in **very early development**. Expect bugs and sharp edges.
 
-```rust,no_run
-use zip_codec::{Archive, ZipArchive, extract::ExtractPolicy};
+**Goals**
 
-async fn extract() -> Result<(), Box<dyn std::error::Error>> {
-    let input = tokio::fs::File::open("input.zip").await?;
-    ZipArchive::open(input).await?
-        .extract_in("destination", ExtractPolicy::default())
-        .await?;
-    Ok(())
-}
+- Read classic ZIP and ZIP64 archives with indexed access to individual members
+- Write ZIP64 archives with Stored or DEFLATE members, streaming each payload
+
+**Anti-goals**
+
+- Reading or writing archives on non-seekable streams
+- Supporting encrypted or multi-volume archives
+
+See the [ZIP compatibility notes](APPNOTE.md) and the [security model](../../SECURITY.md#zip-codec).
+
+## Usage
+
+To write an archive, start with an empty, seekable writer positioned at byte zero.
+
+```rust
+use zip_codec::{ArchiveBuilder as _, EntryMetadata, FilePayload, ZipEncoder};
+
+let payload = FilePayload::from_path("README.md").await?;
+let mut encoder = ZipEncoder::new(&mut writer).builder();
+encoder
+    .add_file("README.md", payload, EntryMetadata::default())
+    .await?;
+encoder.finish().await?;
 ```
 
-Keep the source unchanged while the archive is open. Selecting a member checks
-its local records. `validate_all()` checks every member's metadata. Reading a
-payload to the end verifies its size and CRC-32. For DEFLATE, the compressed
-stream must also end at the declared boundary. Advancing to another member
-drains and checks the previous payload.
+Use `add_directory` to add a directory entry or `add_directory_all` to add a
+directory and its contents recursively. Nonempty regular files use DEFLATE by default.
+Use `ZipEncoder::with_compression` to set the default or
+`ZipFileOptions::with_compression` to override it for one file.
 
-Use `ZipArchive::builder` to set read limits and ZIP policies before opening.
-`ExtractPolicy` controls how members are written to disk.
+To extract an archive, pass a seekable reader. Its contents must stay unchanged
+while the archive is open.
 
-For an HTTP range source with its own `prefetch` method, the member's declared
-range can be fetched before opening it.
+```rust
+use zip_codec::{Archive as _, ZipArchive, extract::ExtractPolicy};
 
-```rust,ignore
-let range = archive.entries()[index].record_range();
-archive.reader_mut().await?.prefetch(range).await?;
-let member = archive.member(index).await?;
+ZipArchive::open(reader).await?
+    .extract_in("destination", ExtractPolicy::default())
+    .await?;
 ```
 
-## Writing
+- Use `ZipArchive::builder` to set resource limits and ZIP reader policies before opening.
+- Use `ExtractPolicy` to control how archive members are written to disk.
 
-`ZipEncoder` streams each payload, then seeks back to fill in its local header.
-Start with an empty output positioned at byte zero. Call `finish()` to write
-the central directory and end records.
+For random access, `ZipArchive::entries` lists central-directory entries and
+`ZipArchive::member(index)` selects one by index.
 
-```rust,no_run
-use zip_codec::{ArchiveBuilder, EntryMetadata, FilePayload, ZipEncoder};
+## Performance
 
-async fn create() -> Result<(), Box<dyn std::error::Error>> {
-    let output = tokio::fs::File::create("output.zip").await?;
-    let mut builder = ZipEncoder::new(output).builder();
-    let readme = FilePayload::from_path("README.md").await?;
-    builder.add_file("README.md", readme, EntryMetadata::default()).await?;
-    builder.finish().await?;
-    Ok(())
-}
-```
-
-Nonempty regular files use DEFLATE by default. Set the archive default with
-`ZipEncoder::with_compression` or override it for one file with
-`ZipFileOptions::with_compression`. Empty files are stored uncompressed.
-
-See the [ZIP compatibility notes](APPNOTE.md) and the
-[security model](../../SECURITY.md#zip-codec).
+The wheel corpus benchmark compares indexing, decoding, and extraction with
+`zip` and `astral_async_zip`. See the [benchmark instructions](../../CONTRIBUTING.md#zip-wheel-corpus).
