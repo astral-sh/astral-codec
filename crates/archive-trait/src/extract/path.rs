@@ -98,8 +98,8 @@ impl NormalizedPath {
 }
 
 /// Validates and normalizes the path-bearing fields of one member.
-pub(super) fn decode_member<E, P>(
-    member: &Member<P>,
+pub(super) fn decode_member<E, P, M>(
+    member: &Member<P, M>,
     policy: ExtractPolicy,
 ) -> Result<ExtractMember, ExtractError<E>> {
     let metadata = member.metadata();
