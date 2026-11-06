@@ -219,6 +219,70 @@ async fn all_nul_numeric_fields_are_policy_controlled() -> TestResult {
 }
 
 #[tokio::test]
+async fn base256_uid_and_gid_are_policy_controlled() -> TestResult {
+    let mut block = header(ArchiveFormat::Pax, "file", b'0', 0, "", 0o644);
+    block[UID_RANGE].copy_from_slice(&[0x80, 0, 0, 0, 0x0e, 0x62, 0x0a, 0xe8]);
+    block[GID_RANGE].copy_from_slice(&[0x80, 0, 0, 0, 0x74, 0x7a, 0xd5, 0xdf]);
+    set_checksum(&mut block);
+
+    let mut archive = ArchiveBuilder::new();
+    archive.block(&block);
+    let bytes = archive.finish();
+
+    let mut members = TarArchive::new(bytes.as_slice()).members();
+    assert!(matches!(
+        members.next().await,
+        Err(DecodeError::Framing(FrameError {
+            inner: FrameErrorInner::InvalidNumericField { field: "uid", .. },
+            ..
+        }))
+    ));
+
+    let mut members = TarArchive::new(bytes.as_slice())
+        .with_policy(
+            DecodePolicy::default()
+                .pax_policy(PaxDecodePolicy::default().allow_base256_uid_and_gid(true)),
+        )
+        .members();
+    assert!(matches!(members.next().await?, Some(Member::File { .. })));
+    assert!(members.next().await?.is_none());
+
+    let mut reader = TarReader::new(bytes.as_slice())
+        .with_policy(StreamPolicy::default().allow_pax_base256_uid_and_gid(true));
+    let member = reader.next_frame().await?.expect("expected file member");
+    assert_eq!(member.header.uid, Some(241_306_344));
+    assert_eq!(member.header.gid, Some(1_954_207_199));
+    assert!(reader.next_frame().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn base256_uid_and_gid_policy_keeps_other_pax_numeric_fields_octal() -> TestResult {
+    for (field, range) in [("mode", MODE_RANGE), ("mtime", MTIME_RANGE)] {
+        let mut block = header(ArchiveFormat::Pax, "file", b'0', 0, "", 0o644);
+        block[range.clone()].fill(0);
+        block[range.start] = 0x80;
+        set_checksum(&mut block);
+
+        let mut archive = ArchiveBuilder::new();
+        archive.block(&block);
+        let bytes = archive.finish();
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(
+                DecodePolicy::default()
+                    .pax_policy(PaxDecodePolicy::default().allow_base256_uid_and_gid(true)),
+            )
+            .members();
+        assert!(
+            matches!(members.next().await, Err(DecodeError::Framing(_))),
+            "base-256 {field} field should be rejected"
+        );
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn unterminated_owner_names_are_policy_controlled() -> TestResult {
     for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
         for (field, range) in [("uname", UNAME_RANGE), ("gname", GNAME_RANGE)] {
