@@ -59,3 +59,87 @@ within tar-codec:
   to refer to the same file.
 - Panics that are caused by platform limitations, e.g. Rust's allocator choosing to
   panic when failing to reserve adequate capacity on smaller address spaces.
+
+### ZIP archives
+
+ZIP framing targets [PKWARE APPNOTE 6.3.3](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT).
+The supported profile includes stored and DEFLATE members, classic and ZIP64
+version-1 directories, and signed or unsigned data descriptors. Encryption,
+digital signatures, patched data, and multi-volume archives are rejected.
+The reader also rejects archive extra data records, nonempty ZIP64 extensible
+data sectors, and ZIP64 version-2 directories. Self-extracting prefixes,
+padding outside records, trailing bytes, and ambiguous end records are also
+rejected.
+
+Opening an archive validates the end records and central directory, including
+bounds derivable from the declared local offsets and sizes. Local records are
+checked only when selected. Before exposing a member, its local header, central
+header, ZIP64 fields, extras, and descriptor must agree, and its physical extent
+must exactly fill its assigned span. Checked local metadata is cached.
+`ZipArchive::validate_all` checks every member's metadata and file type, including
+unselected members, establishing complete nonoverlapping record coverage. Without
+that call or traversal of every member, malformed unselected local records and
+some gaps or overlaps can remain undiscovered.
+
+Duplicated member paths are allowed when they appear in the same relative order
+in the central directory and the local headers. Path comparison is case-sensitive
+and ignores empty and `.` components, so `d/config` and `d/./config/` name the
+same destination.
+
+By default, member headers may contain only the ZIP64 extra field (`0x0001`),
+and only for values marked with ZIP64 sentinels. Readers can opt in to the seven
+other [supported fields](crates/zip-codec/APPNOTE.md#member-extra-fields).
+Both policies reject unknown IDs, duplicate fields, and conflicting metadata.
+
+Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
+accepted without it. Unicode path extra fields must have a valid CRC and agree
+with the raw filename. A symbolic link's UNIX extra-field target must agree
+with its payload when both are present. A regular file or an entry with no
+declared type may carry the fixed UNIX metadata, but a nonempty file-type
+field is ambiguous and causes rejection. ZIP extraction never creates hard links.
+Filesystem containment and configurable name/link policy remain in `archive-trait`.
+
+Archive and member comments must be UTF-8, even without the UTF-8 flag.
+A Unicode comment extra field must agree with the central directory's member
+comment. A local copy requires an identical central extra field. When an archive
+has a comment, no second end-of-central-directory signature may follow the real
+one: readers that search backward could otherwise select a different directory.
+
+File contents are checked during consumption. Successful completion requires the
+declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload
+is drained and checked before another member is returned. Seeking to an entry
+does not validate local metadata or payload contents of unselected entries.
+Dropping the entire archive or recovering its source likewise does not validate
+remaining contents.
+
+Default budgets cap the archive at 128 GiB, entries at 100,000, local and central
+metadata at 64 MiB, decoded members at 8 GiB each, and their sum at 64 GiB. End
+comments have their format-defined 65,535-byte bound.
+Payload processing uses chunks of at most 64 KiB and yields between bounded
+units of work. Symbolic-link targets are capped at 65,535 bytes. Raising
+limits permits additional resource use. Repeated explicit random-access reads
+repeat the associated work; the total-size budget describes the indexed archive,
+not a cumulative quota across caller-requested rereads.
+Local metadata is charged when first resolved; failed or cancelled resolutions
+do not retain a charge. Full metadata validation applies that budget to all members.
+
+Index memory is proportional to bounded metadata and entry count. Physical-order
+validation sorts member offsets in O(n log n) time. Payload work is bounded by
+encoded input and decoded output, including streams that produce no output.
+
+Metadata reads use a 64 KiB directory window and a 4 KiB selected-record window,
+clipped to their containing spans. Read-ahead can include payload bytes, but
+does not decode them. Explicit prefetch sizes and transport cache retention are
+controlled by the caller and are not bounded by ZIP metadata or payload buffers.
+Access through `reader_mut` permits cursor changes, not replacement or mutation
+of the underlying archive.
+
+Read errors or cancellation poison the archive cursor. Construction uses
+`archive-trait::Builder` poisoning. The encoder requires seekable output and
+fills in local headers after streaming each payload. Write, seek, or source
+failures after output begins poison the builder, as does cancellation during
+header replacement or cursor restoration. The ZIP crates forbid unsafe Rust.
+
+As with tar, concurrent mutation of the input, build sources, or extraction root
+is outside the threat model. Extraction may leave partial destination state after
+a late failure. CRC-32 detects corruption; it does not authenticate archives.
