@@ -338,6 +338,66 @@ async fn unterminated_owner_names_preserve_all_bytes() -> TestResult {
 }
 
 #[tokio::test]
+async fn unterminated_gnu_extensions_are_policy_controlled() -> TestResult {
+    for (typeflag, kind, expected_path, expected_target) in [
+        (b'L', GnuKind::LongName, "long/value", "raw-target"),
+        (b'K', GnuKind::LongLink, "raw", "long/value"),
+    ] {
+        let mut archive = ArchiveBuilder::new();
+        archive
+            .gnu("extension", typeflag, b"long/value", "", 0o644)
+            .gnu("raw", b'2', b"", "raw-target", 0o644);
+        let bytes = archive.finish();
+
+        let mut members = TarArchive::new(bytes.as_slice()).members();
+        assert!(matches!(
+            members.next().await,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidGnuMetadata { kind: found, .. },
+                ..
+            })) if found == kind
+        ));
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(DecodePolicy::default().allow_gnu_extensions_without_terminator(true))
+            .members();
+        let Some(Member::SymbolicLink { metadata, target }) = members.next().await? else {
+            return Err(io::Error::other("expected symbolic link member").into());
+        };
+        assert_eq!(metadata.path, expected_path);
+        assert_eq!(target, expected_target);
+        assert!(members.next().await?.is_none());
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn unterminated_gnu_extensions_preserve_all_bytes() -> TestResult {
+    let long_name = [b'n'; BLOCK_SIZE];
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .gnu("longname", b'L', &long_name, "", 0o644)
+        .gnu("longlink", b'K', b"link\0bad", "", 0o644)
+        .gnu("raw", b'2', b"", "", 0o644);
+    let bytes = archive.finish();
+    let mut reader = TarReader::new(bytes.as_slice())
+        .with_policy(StreamPolicy::default().allow_gnu_extensions_without_terminator(true));
+    let member = reader.next_frame().await?.expect("expected link member");
+    assert_eq!(member.effective_path()?.as_ref(), long_name);
+    assert!(matches!(
+        member.effective_link_path(),
+        Err(FrameError {
+            inner: FrameErrorInner::InvalidGnuMetadata {
+                kind: GnuKind::LongLink,
+                ..
+            },
+            ..
+        })
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolves_format_metadata_but_leaves_extraction_paths_raw() -> TestResult {
     let records = [
         pax_record(PaxKeyword::Path, "../effective"),

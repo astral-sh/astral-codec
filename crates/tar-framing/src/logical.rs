@@ -134,7 +134,12 @@ impl<R> MemberFrame<'_, R> {
     /// ordinary-header fallback required to identify this member. Empty paths
     /// and paths containing embedded NUL bytes are also rejected.
     pub fn effective_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
-        let path = effective_member_path(&self.header, &self.extensions)?;
+        let policy = &self.payload.reader.stream.policy;
+        let path = effective_member_path(
+            &self.header,
+            &self.extensions,
+            policy.allow_gnu_extensions_without_terminator,
+        )?;
         if path.is_empty() {
             return Err(FrameError::at(
                 self.header.position,
@@ -151,6 +156,7 @@ impl<R> MemberFrame<'_, R> {
     /// ordinary-header fallback required to identify a link target. Link
     /// targets containing embedded NUL bytes are also rejected.
     pub fn effective_link_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
+        let policy = &self.payload.reader.stream.policy;
         let path = match &self.extensions {
             MemberExtensions::Pax(state) => resolve_pax_text(
                 self.header.position,
@@ -167,6 +173,7 @@ impl<R> MemberFrame<'_, R> {
                 Some(metadata) => Ok(Cow::Borrowed(parse_gnu_metadata(
                     metadata,
                     GnuKind::LongLink,
+                    policy.allow_gnu_extensions_without_terminator,
                 )?)),
                 None => Ok(Cow::Borrowed(self.header.link_name)),
             },
@@ -449,6 +456,7 @@ impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
 fn effective_member_path<'a>(
     header: &Header<'a>,
     extensions: &'a MemberExtensions<'_>,
+    allow_unterminated_gnu_extensions: bool,
 ) -> Result<Cow<'a, [u8]>, FrameError> {
     match extensions {
         MemberExtensions::Pax(state) => resolve_pax_text(
@@ -466,6 +474,7 @@ fn effective_member_path<'a>(
             Some(metadata) => Ok(Cow::Borrowed(parse_gnu_metadata(
                 metadata,
                 GnuKind::LongName,
+                allow_unterminated_gnu_extensions,
             )?)),
             None => Ok(Cow::Borrowed(header.header_path)),
         },
@@ -519,11 +528,16 @@ fn pax_value<'a>(
     }
 }
 
-fn parse_gnu_metadata(metadata: &GnuMetadata, kind: GnuKind) -> Result<&[u8], FrameError> {
+fn parse_gnu_metadata(
+    metadata: &GnuMetadata,
+    kind: GnuKind,
+    allow_unterminated: bool,
+) -> Result<&[u8], FrameError> {
     let terminator = metadata
         .payload
         .iter()
         .position(|byte| *byte == 0)
+        .or(allow_unterminated.then_some(metadata.payload.len()))
         .ok_or_else(|| {
             FrameError::invalid_gnu_metadata(metadata.position, kind, "value is not NUL-terminated")
         })?;

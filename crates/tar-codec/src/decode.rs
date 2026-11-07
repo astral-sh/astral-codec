@@ -59,6 +59,7 @@ impl<R> TarArchive<R> {
             .allow_header_uname_and_gname_without_terminator(
                 policy.allow_header_uname_and_gname_without_terminator,
             )
+            .allow_gnu_extensions_without_terminator(policy.allow_gnu_extensions_without_terminator)
             .allow_pax_base256_uid_and_gid(policy.pax_policy.allow_base256_uid_and_gid)
             .max_gnu_extension_size(policy.max_gnu_extension_size);
         self.reader = self.reader.with_policy(stream_policy);
@@ -75,6 +76,7 @@ pub struct DecodePolicy {
     allow_gnu: bool,
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
+    allow_gnu_extensions_without_terminator: bool,
     max_gnu_extension_size: u64,
     pax_policy: PaxDecodePolicy,
 }
@@ -152,6 +154,7 @@ impl Default for DecodePolicy {
             allow_gnu: true,
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
+            allow_gnu_extensions_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
             pax_policy: PaxDecodePolicy::default(),
         }
@@ -189,6 +192,15 @@ impl DecodePolicy {
     /// occupy all 32 bytes of either field.
     pub fn allow_header_uname_and_gname_without_terminator(mut self, allow: bool) -> Self {
         self.allow_header_uname_and_gname_without_terminator = allow;
+        self
+    }
+
+    /// Configures whether GNU long-name and long-link payloads may omit their NUL terminators.
+    ///
+    /// This compatibility option is **disabled by default**. Enabling it
+    /// accepts the whole payload as the value when it contains no NUL byte.
+    pub fn allow_gnu_extensions_without_terminator(mut self, allow: bool) -> Self {
+        self.allow_gnu_extensions_without_terminator = allow;
         self
     }
 

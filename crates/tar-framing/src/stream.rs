@@ -427,6 +427,7 @@ pub struct StreamPolicy {
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
     allow_pax_base256_uid_and_gid: bool,
+    pub(super) allow_gnu_extensions_without_terminator: bool,
     max_gnu_extension_size: u64,
 }
 
@@ -439,6 +440,7 @@ impl Default for StreamPolicy {
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
             allow_pax_base256_uid_and_gid: false,
+            allow_gnu_extensions_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
         }
     }
@@ -509,6 +511,15 @@ impl StreamPolicy {
         self
     }
 
+    /// Configures whether GNU long-name and long-link payloads may omit their NUL terminators.
+    ///
+    /// This compatibility option is disabled by default. Enabling it accepts
+    /// the whole payload as the value when it contains no NUL byte.
+    pub fn allow_gnu_extensions_without_terminator(mut self, allow: bool) -> Self {
+        self.allow_gnu_extensions_without_terminator = allow;
+        self
+    }
+
     /// Configures the maximum size accepted for each GNU extension.
     ///
     /// A GNU extension member that declares a larger payload is rejected before
@@ -531,7 +542,7 @@ pub struct TarStream<R> {
     pub(super) format: Option<ArchiveFormat>,
     /// The currently effective global pax records, if any.
     pub(super) global_pax_records: Option<GlobalPaxRecords>,
-    policy: StreamPolicy,
+    pub(super) policy: StreamPolicy,
     global_pax_extensions_size: u64,
     member_chunk: MemberChunk,
     pub(super) state: State,

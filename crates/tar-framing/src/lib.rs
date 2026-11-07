@@ -118,6 +118,10 @@
 //! CPython's `tarfile` in particular does this.
 //! This can be disabled with [`StreamPolicy::allow_header_uname_and_gname_without_terminator`].
 //!
+//! tar-framing also requires GNU long-name and long-link payloads to be NUL terminated by default.
+//! The Rust `tar` crate from 0.3.3 to 0.4.3 wrote long-name payloads without the terminator.
+//! These payloads can be accepted with [`StreamPolicy::allow_gnu_extensions_without_terminator`].
+//!
 //! Separately, higher-level crates (like tar-codec) may choose to apply additional
 //! restrictions when processing logical archive members. For example, a consumer
 //! of tar-framing may choose to reject vendor-specific pax records, or member names
