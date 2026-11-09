@@ -5,9 +5,11 @@ use std::{error::Error, io::Cursor};
 use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
+    CentralDirectoryEntry,
+    CommentPolicy::{AllowAll, AllowUtf8},
+    CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexedEntry, LimitExceeded, Limits,
+    HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -22,8 +24,15 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
     data
 }
 
-// Format-validation tests opt in to all supported extra fields. Tests of the
-// default policy and lazy access open the index directly.
+// Exercise the format checks for features that require an opt-in.
+const ALL_FEATURES: ReadOptions = ReadOptions {
+    extra_fields: AllowListed,
+    member_comments: AllowAll,
+    archive_comment: AllowAll,
+    allow_stored_data_descriptors: true,
+    allow_ambiguous_symlink_modes: true,
+};
+
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
     read_validated_with(&mut Cursor::new(bytes), Limits::default()).await
 }
@@ -32,7 +41,7 @@ async fn read_validated_with<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     limits: Limits,
 ) -> Result<Index, FrameError> {
-    let mut index = Index::read_with_policy(reader, limits, AllowListed).await?;
+    let mut index = Index::read_with_options(reader, limits, ALL_FEATURES).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -276,7 +285,7 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
     for (name, host, attributes, expected, mode) in [
         ("file", 3, 0, EntryKind::File, 0),
         ("file", 3, 0o106755 << 16, EntryKind::File, 0o106755),
-        ("file", 0, 0o120777 << 16, EntryKind::File, 0),
+        ("file", 2, 0o100666 << 16, EntryKind::File, 0),
         ("file", 255, (0o040755 << 16) | 0x18, EntryKind::File, 0),
         ("directory/", 3, 0, EntryKind::Directory, 0),
         ("directory", 0, 0x10, EntryKind::Directory, 0),
@@ -951,7 +960,8 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                 let mut bytes = archive.bytes.clone();
                 bytes[offset] ^= 1;
                 let mut source = Cursor::new(bytes);
-                let mut index = Index::read(&mut source, Limits::default()).await?;
+                let mut index =
+                    Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
                 assert!(
                     matches!(
                         index.entry(&mut source, 0).await,
@@ -997,51 +1007,38 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
 }
 
 #[tokio::test]
-async fn requires_utf8_archive_and_member_comments() -> TestResult {
-    for (comment, valid) in [
-        (b"zip".as_slice(), true),
-        ("café".as_bytes(), true),
-        (b"\xff".as_slice(), false),
-        (b"\xe2\x82".as_slice(), false),
+async fn checks_the_member_comment_encoding_flag() -> TestResult {
+    let utf8 = "café".as_bytes();
+    for (comment, policy, flags, accepted) in [
+        (b"zip".as_slice(), AllowUtf8, 0, true),
+        (utf8, AllowUtf8, 0, false),
+        (utf8, AllowUtf8, 0x0800, true),
+        (b"\xff", AllowAll, 0, true),
+        (b"\xff", AllowAll, 0x0800, false),
     ] {
-        for zip64 in [false, true] {
-            for (member, flags) in [(false, 0x0800), (true, 0x0800), (true, 0)] {
-                let mut fixture = Fixture {
-                    zip64,
-                    flags: Some(flags),
-                    ..Fixture::default()
-                };
-                if member {
-                    fixture.member_comment = comment.to_vec();
-                } else {
-                    fixture.archive_comment = comment.to_vec();
-                }
-
-                let archive = fixture.build();
-
-                let (offset, expected) = if member {
-                    (archive.central as u64, "non-UTF-8 member comment")
-                } else {
-                    (archive.end as u64, "non-UTF-8 archive comment")
-                };
-                let result = read_validated(&archive.bytes).await;
-
-                if valid {
-                    assert!(
-                        result.is_ok(),
-                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}: {result:?}"
-                    );
-                } else {
-                    assert!(
-                        matches!(result, Err(FrameError::Invalid { position, reason })
-                            if position == offset && reason == expected),
-                        "{comment:?}, member={member}, flags={flags:#x}, zip64={zip64}"
-                    );
-                }
-            }
+        let archive = Fixture {
+            flags: Some(flags),
+            member_comment: comment.into(),
+            ..Fixture::default()
         }
+        .build();
+        let options = ReadOptions {
+            member_comments: policy,
+            ..ReadOptions::default()
+        };
+        let mut source = Cursor::new(archive.bytes);
+        let result = Index::read_with_options(&mut source, Limits::default(), options).await;
+        assert_eq!(
+            result.is_ok(),
+            accepted,
+            "{policy:?}, flags={flags:#x}: {result:?}"
+        );
     }
+    Ok(())
+}
 
+#[tokio::test]
+async fn reconciles_unicode_comment_extra_fields() -> TestResult {
     // Incomplete Unicode comments remain invalid even when the ordinary comment
     // is usable; do not fall back to treating a recognized field as opaque data.
     let comment = b"comment";
@@ -1053,12 +1050,8 @@ async fn requires_utf8_archive_and_member_comments() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let result = Index::read_with_policy(
-            &mut Cursor::new(archive.bytes),
-            Limits::default(),
-            AllowListed,
-        )
-        .await;
+        let mut source = Cursor::new(archive.bytes);
+        let result = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await;
         if length == unicode.len() {
             result?;
         } else {
@@ -1375,84 +1368,75 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
-async fn reconciles_shortened_info_zip_extras() -> TestResult {
+async fn reconciles_unix_extra_fields() -> TestResult {
+    // Four-byte tags distinguish the timestamps. PKWARE stores each ID in two bytes.
+    let prefix = b"atimmtimu\0g\0";
+    let unix = || field(0x000d, prefix);
+    let padded_owner = &[1, 1, b'u', 3, b'g', 0, 0];
     for (identifier, local, central) in [
-        (0x5855, vec![1; 12], vec![1; 8]),
-        (0x5855, vec![1; 8], vec![1; 8]),
-        (0x5455, vec![3; 9], vec![3; 5]),
-        (0x5455, vec![2; 5], vec![2]),
-        (0x5455, vec![7; 13], vec![7; 5]),
-        (0x7855, vec![1; 4], Vec::new()),
+        (0x5855, &prefix[..], &prefix[..8]),
+        (0x5855, &prefix[..8], &prefix[..8]),
+        (0x5455, b"\x03mtimatim", b"\x03mtim"),
+        (0x5455, b"\x02atim", b"\x02"),
+        (0x5455, b"\x07mtimatimctim", b"\x07mtim"),
+        (0x7855, &prefix[8..], &[]),
+        (0x7875, padded_owner, padded_owner),
     ] {
-        let fixture = Fixture {
-            local_extra: field(identifier, &local),
-            central_extra: field(identifier, &central),
+        let archive = Fixture {
+            local_extra: field(identifier, local),
+            central_extra: [unix(), field(identifier, central)].concat(),
             ..Fixture::default()
-        };
-        read_validated(&fixture.build().bytes).await?;
+        }
+        .build();
+        read_validated(&archive.bytes).await?;
     }
 
+    let bad_layout = "invalid Info-ZIP extra field layout";
+    let copy_mismatch = "local and central extra fields disagree";
+    let missing_local = "central Info-ZIP field has no local copy";
+    let conflict = "conflicting UNIX metadata in extra fields";
     for (local, central, expected) in [
-        (
-            field(0x5855, &[1; 12]),
-            field(0x5855, &[1; 7]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x5855, &[1; 10]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
+        (field(0x5855, &[1; 12]), field(0x5855, &[1; 7]), bad_layout),
+        (field(0x5855, &[1; 10]), vec![], bad_layout),
         (
             field(0x5855, &[1; 12]),
             field(0x5855, &[2; 8]),
-            "local and central extra fields disagree",
+            copy_mismatch,
         ),
-        (
-            field(0x5455, &[3; 9]),
-            field(0x5455, &[3]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x5455, &[8; 5]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
+        (field(0x5455, &[3; 9]), field(0x5455, &[3]), bad_layout),
+        (field(0x5455, &[8; 5]), vec![], bad_layout),
         (
             field(0x5455, &[]),
-            Vec::new(),
+            vec![],
             "missing Info-ZIP timestamp flags",
         ),
         (
             field(0x5455, &[3; 9]),
             field(0x5455, &[1; 5]),
-            "local and central extra fields disagree",
+            copy_mismatch,
         ),
-        (
-            field(0x7855, &[1; 4]),
-            field(0x7855, &[1; 4]),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            field(0x7855, &[1; 2]),
-            Vec::new(),
-            "invalid Info-ZIP extra field layout",
-        ),
-        (
-            Vec::new(),
-            field(0x7855, &[]),
-            "central Info-ZIP field has no local copy",
-        ),
-        (
-            Vec::new(),
-            field(0x5455, &[3; 5]),
-            "central Info-ZIP field has no local copy",
-        ),
+        (field(0x7855, &[1; 4]), field(0x7855, &[1; 4]), bad_layout),
+        (field(0x7855, &[1; 2]), vec![], bad_layout),
+        (vec![], field(0x7855, &[]), missing_local),
+        (vec![], field(0x5455, &[3; 5]), missing_local),
         (
             field(0x5855, &[0; 12]),
             field(0x5455, &[1; 5]),
             "mixed old and new Info-ZIP UNIX metadata",
         ),
+        (field(0x5855, b"atimmtimu\0x\0"), unix(), conflict),
+        (field(0x5455, b"\x02mtim"), unix(), conflict),
+        (
+            [unix(), field(0x7855, b"u\0x\0")].concat(),
+            vec![],
+            conflict,
+        ),
+        (
+            unix(),
+            field(0x7875, &[1, 3, b'u', 0, 1, 1, b'g']),
+            conflict,
+        ),
+        (unix(), field(0x7875, &[1, 1, b'u', 1, b'x']), conflict),
     ] {
         let archive = Fixture {
             local_extra: local,
@@ -1467,6 +1451,16 @@ async fn reconciles_shortened_info_zip_extras() -> TestResult {
             ),
             "{expected}"
         );
+    }
+
+    // Reject conflicting directory fields at open, before reading the local header.
+    for times in [unix(), field(0x5855, &prefix[..8])] {
+        let central = [times, field(0x5455, b"\x01oops")].concat();
+        let archive = Fixture::default().with_extra(false, central).build();
+        assert!(matches!(
+            Index::read_with_policy(&mut Cursor::new(archive.bytes), Limits::default(), AllowListed).await,
+            Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
+        ));
     }
     Ok(())
 }
@@ -1572,7 +1566,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
 
     let entries: &[IndexedEntry] = index.entries();
     let directory: &CentralDirectoryEntry = entries[0].directory();
@@ -1626,7 +1620,14 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     ordered.extend_from_slice(&second.bytes[second.central..second.end]);
     ordered.extend_from_slice(&bytes[end..]);
     let mut source = Cursor::new(ordered);
-    let mut ordered = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    // Even an unselected member with a Stored descriptor must fail at open.
+    assert!(matches!(
+        Index::read_with_policy(&mut source, Limits::default(), AllowListed).await,
+        Err(FrameError::Unsupported { position, feature: "data descriptor for Stored member" })
+            if position == (central + first.end - first.central) as u64
+    ));
+    let mut ordered =
+        Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
     assert_eq!(
         ordered.entries()[1].record_range(),
@@ -1643,7 +1644,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 
     // Repeated offsets must fail during indexing, before any local resolution.
     assert!(
-        Index::read(&mut Cursor::new(shared), Limits::default())
+        Index::read_with_options(&mut Cursor::new(shared), Limits::default(), ALL_FEATURES)
             .await
             .is_err()
     );
@@ -2002,7 +2003,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     ));
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read_with_policy(&mut source, Limits::default(), AllowListed).await?;
+    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
     assert_eq!(index.entries().len(), names.len());
     for (entry, name) in index.entries().iter().zip(&names) {
         assert_eq!(entry.directory().path(), name);

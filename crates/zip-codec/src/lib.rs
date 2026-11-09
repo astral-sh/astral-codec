@@ -1,10 +1,13 @@
-//! Asynchronous, seekable ZIP archives with bounded payload processing.
+//! High-level encoding and decoding for ZIP archives.
 //!
-//! [`ZipArchive::open`] checks the directory; member access reconciles local
-//! records. [`ZipArchive::validate_all`] checks metadata for unselected members.
-//! Payload integrity is checked during consumption, including skipped payloads.
-//! Filesystem containment and link policy belong to [`Archive::extract_in`].
-//! The source must remain unchanged until all archive operations finish.
+//! See [`decode`] for ZIP decoding, [`encode`] for ZIP64 encoding,
+//! [`Builder`] for format-neutral construction, and
+//! [`Archive::extract_in`] for format-neutral extraction.
+//!
+//! ## Security and correctness
+//!
+//! See the [repository's SECURITY.md](https://github.com/astral-sh/astral-codec/blob/main/SECURITY.md)
+//! for more information.
 
 #![forbid(unsafe_code)]
 
@@ -20,6 +23,6 @@ pub use archive_trait::{
 pub use decode::{DecodeError, ZipArchive, ZipArchiveBuilder, ZipMemberPayload};
 pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{
-    CentralDirectoryEntry, CompressionMethod, DeviceNumbers, Entry, EntryKind, ExtraFieldPolicy,
-    HostSystem, IndexedEntry, LimitExceeded, Limits,
+    CentralDirectoryEntry, CommentPolicy, CompressionMethod, DeviceNumbers, Entry, EntryKind,
+    ExtraFieldPolicy, HostSystem, IndexedEntry, LimitExceeded, Limits,
 };

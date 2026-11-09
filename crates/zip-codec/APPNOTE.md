@@ -1,16 +1,22 @@
 # ZIP compatibility
 
 `zip-codec` targets [PKWARE APPNOTE 6.3.3][appnote]. See the
-[security model](../../SECURITY.md#zip-archives) for validation and limits.
+[security model](../../SECURITY.md#zip-codec) for the reader's security guarantees.
 
 ## Writer conventions
 
+**Member names.** `zip-codec` preserves AppleDouble sidecars and VMS version
+suffixes. A macOS extractor may attach `__MACOSX/._name` to `name` as metadata.
+Info-ZIP's `unzip` extracts `config;1` as `config` unless given `-V`.
+
 **Symlink targets.** Info-ZIP, libarchive, and our encoder put the target in
 the payload. APPNOTE puts it in the PKWARE UNIX extra field (`0x000d`, §4.5.7).
-We accept either form for Unix and Darwin entries whose mode marks them as
-symlinks. If the UNIX field is present, it must contain a target. A target
-in the payload must agree with it. We reject UNIX targets on regular or
-untyped files because they can also denote hard links.
+We accept either location for a symlink target. If a symlink has a UNIX field,
+its target must be nonempty and match any payload target. We reject UNIX targets
+on regular or untyped files because they can also denote hard links. Our encoder
+stores the mode only in the central directory, so a streaming reader may create
+a regular file containing the target path.
+[Upstream example](https://github.com/libarchive/libarchive/issues/3688).
 
 **Empty files and directories.** Python can write a two-byte DEFLATE stream
 for either, though §4.3.8 calls for zero bytes of file data. We accept the
@@ -38,7 +44,7 @@ and mark the payload as MacBinary (§4.6.4).
 | ID | Field | What we check |
 | --- | --- | --- |
 | `0x0001` | ZIP64 | Sizes, offsets, and disk numbers correspond to sentinels in the header (§4.5.3). |
-| `0x000d` | PKWARE UNIX | The field has its fixed prefix, copies agree, and any file-type data matches the member kind (§4.5.7). |
+| `0x000d` | PKWARE UNIX | The field has its fixed prefix, copies agree, and any file-type data matches the member kind (§4.5.7). Timestamps, UID, and GID must agree with Info-ZIP fields in either header. |
 | `0x6375`, `0x7075` | Unicode comment and path | The CRC and UTF-8 text agree with the ordinary comment or filename (§§4.6.8–9). |
 | `0x5455` | Info-ZIP extended timestamps | Flags account for the timestamps; a central copy must agree with the local flags and modification time, if present. |
 | `0x5855` | Original Info-ZIP UNIX | Each copy carries two timestamps. They must agree across headers; the local field may also carry a 16-bit UID and GID. |

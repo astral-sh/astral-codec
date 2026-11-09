@@ -7,9 +7,33 @@ for how to report issues in astral-codec.
 
 ## Security model
 
-### Tar archives
+### General
 
-tar-codec is intended to be resilient to many common differentials when parsing tar streams.
+These are properties that apply to all crates within astral-codec, regardless of the format
+they target.
+
+- All components of astral-codec are intended to be resilient to differentials when
+  parsing their respective formats.
+- By default, an attacker should never be able to cause a hang during decoding, such as
+  via symlink loops. A user must explicitly opt into a non-default extraction policy
+  to allow this.
+- All asynchronous consumer-facing APIs should be cancellation safe. In other words,
+  dropping a future produced by a direct-use API should _never_ result in state corruption that
+  breaks our parsing or encoding properties.
+- All consumer-facing APIs should be deadlock safe.
+
+In addition, the following are **never** considered security vulnerabilities anywhere
+within astral-codec:
+
+- Differentials where the astral-codec implementation fails closed. Failing closed _may_
+  be a logical bug, but it is never a security-relevant differential.
+- Panics that are caused by platform limitations, e.g. Rust's allocator choosing to
+  panic when failing to reserve adequate capacity on smaller address spaces.
+
+### archive-trait
+
+archive-trait is intended to provide safe high-level APIs for inspecting
+and extracting arbitrary archive formats.
 
 General properties:
 
@@ -18,28 +42,11 @@ General properties:
   policy to allow this.
 - When extraction succeeds with the default policy, resolving the target of any extracted
   symbolic link must stay within the extraction root. The target may be missing.
-- By default, an attacker should never be able to cause a hang during decoding, such as
-  via symlink loops. A user must explicitly opt into a non-default extraction policy
-  to allow this.
-- If a tar stream is ambiguous (i.e. not well-formed under pax or GNU rules), tar-codec
-  should reject it rather than picking an arbitrary interpretation.
-- All asynchronous consumer-facing APIs should be cancellation safe. In other words,
-  dropping a future produced by a direct-use API should _never_ result in state corruption that
-  breaks our parsing or encoding properties.
-  If you drop an `Archive::extract_in` future, pending filesystem operations can still
+- If you drop an `Archive::extract_in` future, pending filesystem operations can still
   modify the extraction root. Retry a cancelled extraction in a fresh directory.
-- All consumer-facing APIs should be deadlock safe.
-- Encoding should always produce a valid, unambiguous, pax-only tar.
-- By default, both encoding and decoding should remain linear in time and memory with respect
-  to their input. Amplification caused solely by how the caller uses the API is out of scope.
-  Enabling non-default policies during encoding and decoding may change this property.
 
-The format-writing methods on `ArchiveBuilder` are implementation hooks, not
-direct-use APIs. Archive construction must go through `Builder` for policy,
-collision-tracking, poisoning, and cancellation-safety guarantees.
-
-In addition, the following are *never* considered security vulnerabilities
-within tar-codec:
+In addition, the following are **never** considered security vulnerabilities within
+archive-trait:
 
 - Race conditions during extraction that are caused by concurrent, external
   mutations of the extraction root. tar-codec assumes that it has unique write
@@ -47,99 +54,47 @@ within tar-codec:
 - Race conditions during archive construction that are caused by concurrent,
   external mutations of the file(s) being archived. tar-codec assumes that it has
   unique read access to any requested files at the time of archival.
-- Differentials where tar-codec fails closed. Failing closed _may_ be a logical
-  bug, but it is never a security-relevant differential.
-- Differentials where tar-codec picks a different interpretation of a tar stream,
-  _if_ that interpretation is substantiated by the pax or GNU specification. If the
-  other implementation fails to follow the relevant specification, the
-  security-relevant differential is there instead.
 - Differentials caused purely by OS- or filesystem-specific behaviors, provided
   extraction and symbolic-link resolution stay within the extraction root.
   For example, case folding or Unicode normalization may cause two member names
-  to refer to the same file.
-- Panics that are caused by platform limitations, e.g. Rust's allocator choosing to
-  panic when failing to reserve adequate capacity on smaller address spaces.
+  to refer to the same file on some filesystems.
 
-### ZIP archives
+### tar-codec
 
-ZIP framing targets [PKWARE APPNOTE 6.3.3](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT).
-The supported profile includes stored and DEFLATE members, classic and ZIP64
-version-1 directories, and signed or unsigned data descriptors. Encryption,
-digital signatures, patched data, and multi-volume archives are rejected.
-The reader also rejects archive extra data records, nonempty ZIP64 extensible
-data sectors, and ZIP64 version-2 directories. Self-extracting prefixes,
-padding outside records, trailing bytes, and ambiguous end records are also
-rejected.
+Here, tar-codec refers to both the tar-codec and tar-framing crates.
 
-Opening an archive validates the end records and central directory, including
-bounds derivable from the declared local offsets and sizes. Local records are
-checked only when selected. Before exposing a member, its local header, central
-header, ZIP64 fields, extras, and descriptor must agree, and its physical extent
-must exactly fill its assigned span. Checked local metadata is cached.
-`ZipArchive::validate_all` checks every member's metadata and file type, including
-unselected members, establishing complete nonoverlapping record coverage. Without
-that call or traversal of every member, malformed unselected local records and
-some gaps or overlaps can remain undiscovered.
+General properties:
 
-Duplicated member paths are allowed when they appear in the same relative order
-in the central directory and the local headers. Path comparison is case-sensitive
-and ignores empty and `.` components, so `d/config` and `d/./config/` name the
-same destination.
+- If a tar stream is ambiguous (i.e. not well-formed under pax or GNU rules), tar-codec
+  should reject it rather than picking an arbitrary interpretation.
+- Encoding should always produce a valid, unambiguous, pax-only tar.
+- By default, both encoding and decoding should remain linear in time and memory with respect
+  to their input. Amplification caused solely by how the caller uses the API is out of scope.
+  Enabling non-default policies during encoding and decoding may change this property.
 
-By default, member headers may contain only the ZIP64 extra field (`0x0001`),
-and only for values marked with ZIP64 sentinels. Readers can opt in to the seven
-other [supported fields](crates/zip-codec/APPNOTE.md#member-extra-fields).
-Both policies reject unknown IDs, duplicate fields, and conflicting metadata.
+In addition, the following are *never* considered security vulnerabilities
+within tar-codec:
 
-Names must be UTF-8. Non-ASCII names require the UTF-8 flag; ASCII names are
-accepted without it. Unicode path extra fields must have a valid CRC and agree
-with the raw filename. A symbolic link's UNIX extra-field target must agree
-with its payload when both are present. A regular file or an entry with no
-declared type may carry the fixed UNIX metadata, but a nonempty file-type
-field is ambiguous and causes rejection. ZIP extraction never creates hard links.
-Filesystem containment and configurable name/link policy remain in `archive-trait`.
+- Differentials where tar-codec picks a different interpretation of a tar stream,
+  _if_ that interpretation is substantiated by the pax or GNU specification.
 
-Archive and member comments must be UTF-8, even without the UTF-8 flag.
-A Unicode comment extra field must agree with the central directory's member
-comment. A local copy requires an identical central extra field. When an archive
-has a comment, no second end-of-central-directory signature may follow the real
-one: readers that search backward could otherwise select a different directory.
+### zip-codec
 
-File contents are checked during consumption. Successful completion requires the
-declared decoded size, CRC, and exact DEFLATE stream boundary. A dropped payload
-is drained and checked before another member is returned. Seeking to an entry
-does not validate local metadata or payload contents of unselected entries.
-Dropping the entire archive or recovering its source likewise does not validate
-remaining contents.
+Here, zip-codec refers to both the zip-codec and zip-framing crates.
 
-Default budgets cap the archive at 128 GiB, entries at 100,000, local and central
-metadata at 64 MiB, decoded members at 8 GiB each, and their sum at 64 GiB. End
-comments have their format-defined 65,535-byte bound.
-Payload processing uses chunks of at most 64 KiB and yields between bounded
-units of work. Symbolic-link targets are capped at 65,535 bytes. Raising
-limits permits additional resource use. Repeated explicit random-access reads
-repeat the associated work; the total-size budget describes the indexed archive,
-not a cumulative quota across caller-requested rereads.
-Local metadata is charged when first resolved; failed or cancelled resolutions
-do not retain a charge. Full metadata validation applies that budget to all members.
+General properties:
 
-Index memory is proportional to bounded metadata and entry count. Physical-order
-validation sorts member offsets in O(n log n) time. Payload work is bounded by
-encoded input and decoded output, including streams that produce no output.
+- zip-codec targets a subset of [PKWARE APPNOTE 6.3.3].
+- If a ZIP is ambiguous (i.e. not well-formed), zip-codec should reject it rather than
+  picking an arbitrary interpretation.
+- zip-codec should reject ZIPs that contain inconsistent states, e.g. where the local file headers
+  and central directory disagree.
+- Encoding should always produce a valid, unambiguous ZIP.
 
-Metadata reads use a 64 KiB directory window and a 4 KiB selected-record window,
-clipped to their containing spans. Read-ahead can include payload bytes, but
-does not decode them. Explicit prefetch sizes and transport cache retention are
-controlled by the caller and are not bounded by ZIP metadata or payload buffers.
-Access through `reader_mut` permits cursor changes, not replacement or mutation
-of the underlying archive.
+[PKWARE APPNOTE 6.3.3]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
 
-Read errors or cancellation poison the archive cursor. Construction uses
-`archive-trait::Builder` poisoning. The encoder requires seekable output and
-fills in local headers after streaming each payload. Write, seek, or source
-failures after output begins poison the builder, as does cancellation during
-header replacement or cursor restoration. The ZIP crates forbid unsafe Rust.
+In addition, the following are *never* considered security vulnerabilities
+within zip-codec:
 
-As with tar, concurrent mutation of the input, build sources, or extraction root
-is outside the threat model. Extraction may leave partial destination state after
-a late failure. CRC-32 detects corruption; it does not authenticate archives.
+- Differentials where zip-codec picks a different interpretation of a ZIP, _if_
+  that interpretation is substantiated by the APPNOTE specification.

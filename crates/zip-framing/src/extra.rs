@@ -77,6 +77,7 @@ pub(crate) struct Extras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
+    unix: UnixMetadata<'a>,
 }
 
 #[derive(Clone, Copy)]
@@ -92,8 +93,7 @@ impl<'a> Extras<'a> {
         position: u64,
         policy: ExtraFieldPolicy,
     ) -> Result<Self, Error> {
-        let mut zip64 = None;
-        let mut fields = BTreeMap::new();
+        let mut extras = Self::default();
 
         while !bytes.is_empty() {
             let Some((prefix, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
@@ -119,62 +119,27 @@ impl<'a> Extras<'a> {
                 })?;
 
             let previous = if identifier == ExtraHeaderId::Zip64 {
-                zip64.replace(data)
+                extras.zip64.replace(data)
             } else {
-                fields.insert(identifier, data)
+                extras.fields.insert(identifier, data)
             };
             if previous.is_some() {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
 
-            if identifier == ExtraHeaderId::Unix && data.len() < extra::UNIX_PREFIX_SIZE {
-                return Err(invalid(position, "truncated UNIX extra field"));
+            if identifier != ExtraHeaderId::Zip64 {
+                let field = identifier.unix_metadata(header, data, position)?;
+                extras.unix = extras.unix.merge(field, position)?;
             }
-            // Info-ZIP defines different layouts for the two member headers.
-            let valid = match (identifier, header) {
-                (ExtraHeaderId::ExtendedTimestamp, _) => {
-                    let Some((&flags, times)) = data.split_first() else {
-                        return Err(invalid(position, "missing Info-ZIP timestamp flags"));
-                    };
-                    let stored = match header {
-                        Header::Local => flags,
-                        Header::Central => flags & 1,
-                    };
-                    flags & !0b111 == 0 && times.len() == 4 * stored.count_ones() as usize
-                }
-                (ExtraHeaderId::InfoZipUnix, Header::Local) => matches!(data.len(), 8 | 12),
-                (ExtraHeaderId::InfoZipUnix, Header::Central) => data.len() == 8,
-                (ExtraHeaderId::InfoZipOwnership16, Header::Local) => data.len() == 4,
-                (ExtraHeaderId::InfoZipOwnership16, Header::Central) => data.is_empty(),
-                (ExtraHeaderId::InfoZipOwnership, _) => valid_ownership(data),
-                // ZIP64, UNIX and Unicode fields are checked against the member metadata.
-                (
-                    ExtraHeaderId::Zip64
-                    | ExtraHeaderId::Unix
-                    | ExtraHeaderId::UnicodePath
-                    | ExtraHeaderId::UnicodeComment,
-                    _,
-                ) => true,
-            };
-            if !valid {
-                return Err(invalid(position, "invalid Info-ZIP extra field layout"));
-            }
-
             bytes = remaining;
         }
 
-        Ok(Self { zip64, fields })
+        Ok(extras)
     }
 
     /// Whether any fields need comparison beyond the resolved ZIP64 sizes.
     pub(crate) fn needs_reconciliation(&self) -> bool {
         !self.fields.is_empty()
-    }
-
-    fn unix_data(&self) -> Option<&[u8]> {
-        self.fields
-            .get(&ExtraHeaderId::Unix)
-            .map(|data| &data[extra::UNIX_PREFIX_SIZE..])
     }
 
     pub(crate) fn local_sizes(&self, common: Common, position: u64) -> Result<Sizes, Error> {
@@ -280,11 +245,8 @@ impl<'a> Extras<'a> {
     }
 
     pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
-        let comment =
-            str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 member comment"))?;
-
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodeComment)
-            && unicode_field(field, bytes, position)? != comment
+            && unicode_field(field, bytes, position)?.as_bytes() != bytes
         {
             return Err(invalid(
                 position,
@@ -296,11 +258,10 @@ impl<'a> Extras<'a> {
     }
 
     /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
-    pub(crate) fn resolve(
-        self,
-        central: Extras<'_>,
-        position: u64,
-    ) -> Result<Option<Vec<u8>>, Error> {
+    pub(crate) fn resolve(self, central: Self, position: u64) -> Result<Option<Vec<u8>>, Error> {
+        if self.fields.is_empty() && central.fields.is_empty() {
+            return Ok(None);
+        }
         let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
         let ownership = has(ExtraHeaderId::InfoZipOwnership);
         let ownership16 = has(ExtraHeaderId::InfoZipOwnership16);
@@ -352,22 +313,113 @@ impl<'a> Extras<'a> {
             }
         }
 
+        self.unix.merge(central.unix, position)?;
         Ok(self
-            .unix_data()
-            .or_else(|| central.unix_data())
-            .map(<[u8]>::to_vec))
+            .fields
+            .get(&ExtraHeaderId::Unix)
+            .or_else(|| central.fields.get(&ExtraHeaderId::Unix))
+            .map(|unix| unix[extra::UNIX_PREFIX_SIZE..].to_vec()))
+    }
+}
+
+/// The values shared by PKWARE and Info-ZIP, independent of their wire layouts.
+#[derive(Default)]
+struct UnixMetadata<'a> {
+    atime: Option<&'a [u8; 4]>,
+    mtime: Option<&'a [u8; 4]>,
+    owner: Option<(&'a [u8], &'a [u8])>,
+}
+
+impl ExtraHeaderId {
+    fn unix_metadata(
+        self,
+        header: Header,
+        data: &[u8],
+        position: u64,
+    ) -> Result<UnixMetadata<'_>, Error> {
+        let invalid_layout = || invalid(position, "invalid Info-ZIP extra field layout");
+        let mut fields = UnixMetadata::default();
+        let owner = match (self, header, data.len()) {
+            (Self::Unix, _, 0..extra::UNIX_PREFIX_SIZE) => {
+                return Err(invalid(position, "truncated UNIX extra field"));
+            }
+            (Self::Unix, _, _)
+            | (Self::InfoZipUnix, _, 8)
+            | (Self::InfoZipUnix, Header::Local, 12) => {
+                fields.atime = data.first_chunk();
+                fields.mtime = data[4..].first_chunk();
+                data.get(8..12).map(|ids| ids.split_at(2))
+            }
+            (Self::ExtendedTimestamp, _, _) => {
+                let Some((&flags, times)) = data.split_first() else {
+                    return Err(invalid(position, "missing Info-ZIP timestamp flags"));
+                };
+                let stored = match header {
+                    Header::Local => flags,
+                    Header::Central => flags & 1,
+                };
+                if flags & !0b111 != 0 || times.len() != 4 * stored.count_ones() as usize {
+                    return Err(invalid_layout());
+                }
+                let mut times = times.as_chunks::<4>().0.iter();
+                if stored & 1 != 0 {
+                    fields.mtime = times.next();
+                }
+                if stored & 2 != 0 {
+                    fields.atime = times.next();
+                }
+                None
+            }
+            (Self::InfoZipOwnership16, Header::Local, 4) => Some(data.split_at(2)),
+            (Self::InfoZipOwnership16, Header::Central, 0) => None,
+            (Self::InfoZipOwnership, _, _) => Some(ownership_ids(data).ok_or_else(invalid_layout)?),
+            (Self::Zip64 | Self::UnicodePath | Self::UnicodeComment, _, _) => None,
+            (Self::InfoZipUnix | Self::InfoZipOwnership16, _, _) => {
+                return Err(invalid_layout());
+            }
+        };
+        fields.owner = owner.map(|(uid, gid)| (significant_bytes(uid), significant_bytes(gid)));
+        Ok(fields)
+    }
+}
+
+impl UnixMetadata<'_> {
+    fn merge(self, other: Self, position: u64) -> Result<Self, Error> {
+        Ok(Self {
+            atime: agree(self.atime, other.atime, position)?,
+            mtime: agree(self.mtime, other.mtime, position)?,
+            owner: agree(self.owner, other.owner, position)?,
+        })
+    }
+}
+
+fn agree<T: Eq>(left: Option<T>, right: Option<T>, position: u64) -> Result<Option<T>, Error> {
+    match (left, right) {
+        (Some(left), Some(right)) if left != right => Err(invalid(
+            position,
+            "conflicting UNIX metadata in extra fields",
+        )),
+        (left, right) => Ok(left.or(right)),
     }
 }
 
 /// Version 1 stores two length-prefixed integers: UID, then GID.
-fn valid_ownership(data: &[u8]) -> bool {
-    let [1, uid_size, rest @ ..] = data else {
-        return false;
+fn ownership_ids(data: &[u8]) -> Option<(&[u8], &[u8])> {
+    let mut data = data.strip_prefix(&[1])?;
+    let mut next_id = || {
+        let length = usize::from(*data.split_off_first()?);
+        data.split_off(..length).filter(|id| !id.is_empty())
     };
-    let Some([gid_size, gid @ ..]) = rest.get(usize::from(*uid_size)..) else {
-        return false;
-    };
-    *uid_size != 0 && *gid_size != 0 && gid.len() == usize::from(*gid_size)
+    let owner = (next_id()?, next_id()?);
+    data.is_empty().then_some(owner)
+}
+
+/// Ignore high zero bytes when comparing unsigned little-endian IDs of different widths.
+fn significant_bytes(mut bytes: &[u8]) -> &[u8] {
+    while let [rest @ .., 0] = bytes {
+        bytes = rest;
+    }
+    bytes
 }
 
 fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<&'a str, Error> {
