@@ -3,11 +3,11 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, add,
+    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, ReadOptions, add,
     constants::{signature, size},
     extra::{Extras, Header},
     invalid,
-    kind::ExternalAttributes,
+    kind::{ExternalAttributes, UnixFileType},
     record::{Common, GeneralPurposeFlags, RecordReader, array_at, bytes_at, parse_name},
 };
 
@@ -170,7 +170,7 @@ impl CentralDirectoryEntry {
         bytes: &[u8],
         position: u64,
         budget: &mut Budget,
-        extra_fields: ExtraFieldPolicy,
+        options: ReadOptions,
     ) -> Result<BufferedEntry, Error> {
         let Some((header, rest)) = bytes.split_first_chunk::<{ size::CENTRAL }>() else {
             return Ok(BufferedEntry::Incomplete(size::CENTRAL));
@@ -187,6 +187,15 @@ impl CentralDirectoryEntry {
         };
 
         let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(header), position)?;
+        if common.method == CompressionMethod::Stored
+            && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
+            && !options.allow_stored_data_descriptors
+        {
+            return Err(Error::Unsupported {
+                position,
+                feature: "data descriptor for Stored member",
+            });
+        }
         let offset = u32::from_le_bytes(array_at::<42, 4, _>(header));
         let disk = u16::from_le_bytes(array_at::<34, 2, _>(header));
         let (name, rest) = variable.split_at(name_length);
@@ -195,10 +204,13 @@ impl CentralDirectoryEntry {
         let extras = if raw_extra.is_empty() {
             Extras::default()
         } else {
-            Extras::parse(raw_extra, Header::Central, position, extra_fields)?
+            Extras::parse(raw_extra, Header::Central, position, options.extra_fields)?
         };
         let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
-        if extras.needs_reconciliation() || !comment.is_empty() {
+        options
+            .member_comments
+            .check(comment, Some(common.flags), position)?;
+        if extras.needs_reconciliation() {
             extras.check_name(path, position)?;
             extras.comment(comment, position)?;
         }
@@ -227,6 +239,17 @@ impl CentralDirectoryEntry {
             },
             has_zip64_extra: sizes.zip64,
         };
+
+        let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
+        if UnixFileType::from_mode(mode) == UnixFileType::SymbolicLink
+            && entry.host_system() != HostSystem::Unix
+            && !options.allow_ambiguous_symlink_modes
+        {
+            return Err(Error::Unsupported {
+                position,
+                feature: "symlink mode from a non-Unix creator system",
+            });
+        }
 
         Ok(BufferedEntry::Complete(entry, size::CENTRAL + length))
     }

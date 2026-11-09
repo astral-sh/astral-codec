@@ -174,7 +174,7 @@ wire_enum! {
 }
 
 impl UnixFileType {
-    fn from_mode(mode: u16) -> Self {
+    pub(crate) fn from_mode(mode: u16) -> Self {
         // S_IFMT selects the file type, excluding permissions.
         Self::from(mode & 0o170000)
     }

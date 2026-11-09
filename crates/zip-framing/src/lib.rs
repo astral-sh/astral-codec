@@ -11,14 +11,23 @@
 //!   the central directory entry) to the most invariants preserved (a member whose
 //!   central and local states are fully reconciled).
 //!
-//! - zip-framing enforces that all parsed filenames, UNIX extra-field link targets,
-//!   and archive/per-member comments are UTF-8. This is an intentional limitation.
+//! - Filenames and UNIX extra-field link targets must be UTF-8.
 //!
 //! - zip-framing does not decode or validate member payloads. It exposes their
 //!   offsets and compressed sizes so consumers can read and decode them,
 //!   then verify their decoded sizes and CRC32s.
 //!
 //! - zip-framing assumes that the ZIP source does not change.
+//!
+//! ## ZIP compatibility
+//!
+//! - By default, zip-framing rejects stored members that use a data descriptor,
+//!   since other streaming ZIP parsers frequently misinterpret them.
+//!   See [`ReadOptions::allow_stored_data_descriptors`].
+//!
+//! - By default, zip-framing does not honor symlink mode bits unless the host
+//!   system indicated by the "version made by" field indicates a UNIX host (3).
+//!   See [`ReadOptions::allow_ambiguous_symlink_modes`].
 
 #![forbid(unsafe_code)]
 
@@ -39,7 +48,7 @@ use thiserror::Error;
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
-pub use index::{CentralDirectoryEntry, Entry, Index, IndexedEntry};
+pub use index::{CentralDirectoryEntry, CommentPolicy, Entry, Index, IndexedEntry, ReadOptions};
 pub use kind::{DeviceNumbers, EntryKind};
 
 /// A supported ZIP compression method.
