@@ -191,18 +191,10 @@ pub struct PaxExtension {
     pub position: u64,
     /// Whether this extension has local or global scope.
     pub kind: PaxKind,
-    records: SharedPaxRecords,
+    pub(super) records: SharedPaxRecords,
 }
 
 impl PaxExtension {
-    pub(crate) fn new(position: u64, kind: PaxKind, records: SharedPaxRecords) -> Self {
-        Self {
-            position,
-            kind,
-            records,
-        }
-    }
-
     /// Returns the parsed pax records in archive order.
     pub fn records(&self) -> &[PaxRecord] {
         self.records.as_slice()
@@ -765,7 +757,11 @@ mod tests {
     }
 
     fn extension(position: u64, kind: PaxKind, records: Vec<PaxRecord>) -> PaxExtension {
-        PaxExtension::new(position, kind, Arc::new(PaxRecords(records)))
+        PaxExtension {
+            position,
+            kind,
+            records: Arc::new(PaxRecords(records)),
+        }
     }
 
     #[test]
