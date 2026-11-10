@@ -99,7 +99,7 @@ async fn encoded_paths(bytes: &[u8]) -> Vec<String> {
                 member
                     .effective_path()
                     .expect("encoded path should be valid")
-                    .into_owned(),
+                    .to_vec(),
             )
             .expect("encoded path should be UTF-8"),
         );
@@ -215,8 +215,7 @@ async fn manual_directory_encodes_only_the_named_member() {
     assert_eq!(
         member
             .effective_path()
-            .expect("directory path should be valid")
-            .as_ref(),
+            .expect("directory path should be valid"),
         b"virtual/tree"
     );
     member
@@ -468,7 +467,7 @@ async fn recursive_encoding_frames_preserved_symlinks() {
                 member
                     .effective_link_path()
                     .expect("link target should be valid")
-                    .into_owned(),
+                    .to_vec(),
             );
         }
         member

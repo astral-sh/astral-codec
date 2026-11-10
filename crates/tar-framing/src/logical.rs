@@ -4,13 +4,13 @@
 //! they describe. Each member carries a compact borrowed [`Header`], and each
 //! PAX member carries one unified [`PaxState`].
 
-use std::{borrow::Cow, mem, ops::Range};
+use std::{mem, ops::Range};
 
 use tokio::io::AsyncRead;
 
 use crate::{
-    ArchiveFormat, Block, FrameError, FrameErrorInner, GnuKind, PaxKeyword, PaxKind, PaxRecord,
-    PaxString, PaxValue, StreamPolicy, UstarKind,
+    ArchiveFormat, Block, FrameError, FrameErrorInner, GnuKind, PaxKind, PaxValue, StreamPolicy,
+    UstarKind,
     header::{GNAME_RANGE, LINK_NAME_RANGE, UNAME_RANGE},
     pax::GlobalPaxRecords,
     stream::{DataFrame, DataOwner, Frame, HeaderFrame, State, TarStream},
@@ -21,7 +21,7 @@ pub use crate::{PaxExtension, PaxState};
 const PAYLOAD_DRAIN_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// A GNU long-name or long-link extension value needed to interpret a member.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GnuExtension {
     /// The absolute byte position of the GNU extension header block.
     pub position: u64,
@@ -29,8 +29,43 @@ pub struct GnuExtension {
     pub payload: Vec<u8>,
 }
 
+impl GnuExtension {
+    /// Returns the name or link target, excluding its NUL terminator and trailing NULs.
+    ///
+    /// If the policy permits unterminated GNU extensions, a payload with no NUL
+    /// is returned in full. Non-NUL bytes following a terminator are an error.
+    pub fn value(&self, kind: GnuKind, policy: &StreamPolicy) -> Result<&[u8], FrameError> {
+        let terminator = self
+            .payload
+            .iter()
+            .position(|byte| *byte == 0)
+            .or(policy
+                .allow_gnu_extensions_without_terminator
+                .then_some(self.payload.len()))
+            .ok_or_else(|| {
+                FrameError::invalid_gnu_extension(
+                    self.position,
+                    kind,
+                    "value is not NUL-terminated",
+                )
+            })?;
+
+        let (value, padding) = self.payload.split_at(terminator);
+        // TODO: Make this configurable through some kind of policy?
+        // Might be overly strict in practice.
+        if padding.iter().any(|byte| *byte != 0) {
+            return Err(FrameError::invalid_gnu_extension(
+                self.position,
+                kind,
+                "non-NUL bytes follow the terminator",
+            ));
+        }
+        Ok(value)
+    }
+}
+
 /// Extension state attached to one ordinary archive member.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum MemberExtensions<'a> {
     /// Unified pax extension state applicable to an ordinary ustar member, borrowing
     /// effective global values from the logical reader.
@@ -133,20 +168,29 @@ impl<R> MemberFrame<'_, R> {
     /// An explicit pax deletion is an error because it also removes the
     /// ordinary-header fallback required to identify this member. Empty paths
     /// and paths containing embedded NUL bytes are also rejected.
-    pub fn effective_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
-        let policy = &self.payload.reader.stream.policy;
-        let path = effective_member_path(
-            &self.header,
-            &self.extensions,
-            policy.allow_gnu_extensions_without_terminator,
-        )?;
+    pub fn effective_path(&self) -> Result<&[u8], FrameError> {
+        let path = match &self.extensions {
+            MemberExtensions::Pax(state) => match state.path() {
+                Some(PaxValue::Value(path)) => path.as_bytes(),
+                Some(PaxValue::Deleted) => {
+                    return Err(FrameError::deleted_pax_record(self.header.position, "path"));
+                }
+                None => self.header.header_path,
+            },
+            MemberExtensions::Gnu { long_name, .. } => match long_name {
+                Some(extension) => {
+                    extension.value(GnuKind::LongName, &self.payload.reader.stream.policy)?
+                }
+                None => self.header.header_path,
+            },
+        };
         if path.is_empty() {
             return Err(FrameError::at(
                 self.header.position,
                 FrameErrorInner::EmptyMemberPath,
             ));
         }
-        reject_nul(self.header.position, "path", path.as_ref())?;
+        reject_nul(self.header.position, "path", path)?;
         Ok(path)
     }
 
@@ -155,30 +199,26 @@ impl<R> MemberFrame<'_, R> {
     /// An explicit pax deletion is an error because it also removes the
     /// ordinary-header fallback required to identify a link target. Link
     /// targets containing embedded NUL bytes are also rejected.
-    pub fn effective_link_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
-        let policy = &self.payload.reader.stream.policy;
+    pub fn effective_link_path(&self) -> Result<&[u8], FrameError> {
         let path = match &self.extensions {
-            MemberExtensions::Pax(state) => resolve_pax_text(
-                self.header.position,
-                state,
-                &PaxKeyword::LinkPath,
-                "linkpath",
-                Cow::Borrowed(self.header.link_name),
-                |record| match record {
-                    PaxRecord::LinkPath(value) => Some(value),
-                    _ => None,
-                },
-            ),
-            MemberExtensions::Gnu { long_link, .. } => match long_link {
-                Some(metadata) => Ok(Cow::Borrowed(parse_gnu_extension(
-                    metadata,
-                    GnuKind::LongLink,
-                    policy.allow_gnu_extensions_without_terminator,
-                )?)),
-                None => Ok(Cow::Borrowed(self.header.link_name)),
+            MemberExtensions::Pax(state) => match state.link_path() {
+                Some(PaxValue::Value(path)) => path.as_bytes(),
+                Some(PaxValue::Deleted) => {
+                    return Err(FrameError::deleted_pax_record(
+                        self.header.position,
+                        "linkpath",
+                    ));
+                }
+                None => self.header.link_name,
             },
-        }?;
-        reject_nul(self.header.position, "link path", path.as_ref())?;
+            MemberExtensions::Gnu { long_link, .. } => match long_link {
+                Some(extension) => {
+                    extension.value(GnuKind::LongLink, &self.payload.reader.stream.policy)?
+                }
+                None => self.header.link_name,
+            },
+        };
+        reject_nul(self.header.position, "link path", path)?;
         Ok(path)
     }
 }
@@ -453,34 +493,6 @@ impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
     }
 }
 
-fn effective_member_path<'a>(
-    header: &Header<'a>,
-    extensions: &'a MemberExtensions<'_>,
-    allow_unterminated_gnu_extensions: bool,
-) -> Result<Cow<'a, [u8]>, FrameError> {
-    match extensions {
-        MemberExtensions::Pax(state) => resolve_pax_text(
-            header.position,
-            state,
-            &PaxKeyword::Path,
-            "path",
-            Cow::Borrowed(header.header_path),
-            |record| match record {
-                PaxRecord::Path(value) => Some(value),
-                _ => None,
-            },
-        ),
-        MemberExtensions::Gnu { long_name, .. } => match long_name {
-            Some(extension) => Ok(Cow::Borrowed(parse_gnu_extension(
-                extension,
-                GnuKind::LongName,
-                allow_unterminated_gnu_extensions,
-            )?)),
-            None => Ok(Cow::Borrowed(header.header_path)),
-        },
-    }
-}
-
 fn reject_nul(position: u64, field: &'static str, value: &[u8]) -> Result<(), FrameError> {
     if value.contains(&0) {
         return Err(FrameError::at(
@@ -491,84 +503,14 @@ fn reject_nul(position: u64, field: &'static str, value: &[u8]) -> Result<(), Fr
     Ok(())
 }
 
-fn resolve_pax_text<'a>(
-    position: u64,
-    state: &'a PaxState<'_>,
-    keyword: &PaxKeyword,
-    field: &'static str,
-    header_value: Cow<'a, [u8]>,
-    select: fn(&PaxRecord) -> Option<&PaxValue<PaxString>>,
-) -> Result<Cow<'a, [u8]>, FrameError> {
-    if let Some(value) = state.effective_record(keyword).and_then(select) {
-        return pax_value(position, field, value);
-    }
-    Ok(header_value)
-}
-
-/// Return the raw bytes of a pax record, erroring if the record is a tombstone
-/// (i.e.) explicitly deleted.
-fn pax_value<'a>(
-    position: u64,
-    keyword: &'static str,
-    value: &'a PaxValue<PaxString>,
-) -> Result<Cow<'a, [u8]>, FrameError> {
-    match value {
-        PaxValue::Value(PaxString::Utf8(value)) => Ok(Cow::Borrowed(value.as_bytes())),
-        PaxValue::Value(PaxString::Binary(value)) => Ok(Cow::Borrowed(value.as_ref())),
-        // A pax value that has been explicitly deleted does *not*
-        // result in a fallthrough to the corresponding ustar header value:
-        //
-        // "If a keyword in an extended header record (or in a -o option-
-        // argument) overrides or deletes a corresponding field in the ustar
-        // header block, pax shall ignore the contents of that header block
-        // field."
-        //
-        // See: pax spec, "pax Extended Header"
-        PaxValue::Deleted => Err(FrameError::deleted_pax_record(position, keyword)),
-    }
-}
-
-fn parse_gnu_extension(
-    extension: &GnuExtension,
-    kind: GnuKind,
-    allow_unterminated: bool,
-) -> Result<&[u8], FrameError> {
-    let terminator = extension
-        .payload
-        .iter()
-        .position(|byte| *byte == 0)
-        .or(allow_unterminated.then_some(extension.payload.len()))
-        .ok_or_else(|| {
-            FrameError::invalid_gnu_extension(
-                extension.position,
-                kind,
-                "value is not NUL-terminated",
-            )
-        })?;
-
-    // TODO: Make this configurable through some kind of policy?
-    // Might be overly strict in practice.
-    if extension.payload[terminator..]
-        .iter()
-        .any(|byte| *byte != 0)
-    {
-        return Err(FrameError::invalid_gnu_extension(
-            extension.position,
-            kind,
-            "non-NUL bytes follow the terminator",
-        ));
-    }
-    Ok(&extension.payload[..terminator])
-}
-
 #[cfg(test)]
 mod tests {
     use tokio::io::{AsyncRead, AsyncWriteExt as _, duplex};
 
     use super::*;
     use crate::{
-        BLOCK_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE, FrameError, FrameErrorInner, PaxRecord,
-        PaxValue,
+        BLOCK_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE, FrameError, FrameErrorInner, PaxKeyword,
+        PaxRecord, PaxValue,
         header::{
             GID_RANGE, GNAME_RANGE, LINK_NAME_RANGE, MODE_RANGE, MTIME_RANGE, NAME_RANGE,
             PREFIX_RANGE, UID_RANGE, UNAME_RANGE,
@@ -656,8 +598,8 @@ mod tests {
                 assert_eq!(member.header.mtime, Some(3));
                 assert_eq!(member.header.uname, b"user");
                 assert_eq!(member.header.gname, b"group");
-                assert_eq!(member.effective_path()?.as_ref(), b"dir/file");
-                assert_eq!(member.effective_link_path()?.as_ref(), b"target");
+                assert_eq!(member.effective_path()?, b"dir/file");
+                assert_eq!(member.effective_link_path()?, b"target");
             }
             let member = next_member(&mut reader).await?;
             assert_eq!(member.header.mode, None);
@@ -721,7 +663,7 @@ mod tests {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
             let member = next_member(&mut reader).await?;
             assert_eq!(member.header.header_path, b"victim/");
-            assert_eq!(member.effective_path()?.as_ref(), b"victim/");
+            assert_eq!(member.effective_path()?, b"victim/");
             Ok(())
         });
     }
@@ -748,8 +690,8 @@ mod tests {
             assert_eq!(member.header.header_path, b"dir/file");
             assert_eq!(member.header.link_name, b"target");
             assert_eq!(member.header.mode, Some(0o755));
-            assert_eq!(member.effective_path()?.as_ref(), b"dir/file");
-            assert_eq!(member.effective_link_path()?.as_ref(), b"target");
+            assert_eq!(member.effective_path()?, b"dir/file");
+            assert_eq!(member.effective_link_path()?, b"target");
             Ok(())
         });
     }
@@ -771,7 +713,7 @@ mod tests {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
             {
                 let member = next_member(&mut reader).await?;
-                assert_eq!(member.effective_path()?.as_ref(), b"local");
+                assert_eq!(member.effective_path()?, b"local");
                 assert!(matches!(
                     member.effective_link_path(),
                     Err(FrameError {
@@ -783,8 +725,8 @@ mod tests {
                 ));
             }
             let member = next_member(&mut reader).await?;
-            assert_eq!(member.effective_path()?.as_ref(), b"global");
-            assert_eq!(member.effective_link_path()?.as_ref(), b"global-link");
+            assert_eq!(member.effective_path()?, b"global");
+            assert_eq!(member.effective_link_path()?, b"global-link");
             Ok(())
         });
     }
@@ -892,8 +834,8 @@ mod tests {
         ready_ok(async {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
             let member = next_member(&mut reader).await?;
-            assert_eq!(member.effective_path()?.as_ref(), b"good-name");
-            assert_eq!(member.effective_link_path()?.as_ref(), b"good-target");
+            assert_eq!(member.effective_path()?, b"good-name");
+            assert_eq!(member.effective_link_path()?, b"good-target");
             Ok(())
         });
     }
@@ -933,7 +875,7 @@ mod tests {
             ready_ok(async {
                 let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
                 let member = next_member(&mut reader).await?;
-                assert_eq!(member.effective_path()?.as_ref(), expected, "{case}");
+                assert_eq!(member.effective_path()?, expected, "{case}");
                 Ok(())
             });
         }
@@ -956,7 +898,7 @@ mod tests {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
             {
                 let member = next_member(&mut reader).await?;
-                assert_eq!(member.effective_path()?.as_ref(), b"global");
+                assert_eq!(member.effective_path()?, b"global");
             }
 
             let member = next_member(&mut reader).await?;
@@ -968,10 +910,7 @@ mod tests {
                 })
             ));
             let state = pax_state(&member).expect("expected pax member metadata");
-            assert_eq!(
-                state.effective_record(&PaxKeyword::Path),
-                Some(&PaxRecord::Path(PaxValue::Deleted))
-            );
+            assert_eq!(state.path(), Some(&PaxValue::Deleted));
             let extensions = state.extensions().collect::<Vec<_>>();
             assert_eq!(extensions.len(), 1);
             assert!(matches!(
@@ -995,8 +934,8 @@ mod tests {
         ready_ok(async {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
             let member = next_member(&mut reader).await?;
-            assert_eq!(member.effective_path()?.as_ref(), b"name");
-            assert_eq!(member.effective_link_path()?.as_ref(), b"link");
+            assert_eq!(member.effective_path()?, b"name");
+            assert_eq!(member.effective_link_path()?, b"link");
             Ok(())
         });
 
@@ -1171,10 +1110,7 @@ mod tests {
 
     #[test]
     fn retains_gnu_metadata_across_cancelled_reads() {
-        let expected_name = vec![b'n'; BLOCK_SIZE + 10];
-        let mut long_name = expected_name.clone();
-        long_name.push(0);
-
+        let long_name = vec![b'n'; BLOCK_SIZE + 10];
         let mut bytes = Vec::new();
         append_gnu(&mut bytes, b'L', &long_name);
         let after_first_payload_block = BLOCK_SIZE * 2;
@@ -1183,12 +1119,13 @@ mod tests {
         append_terminator(&mut bytes);
 
         for position in [BLOCK_SIZE, after_first_payload_block, after_extension] {
-            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position));
+            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position))
+                .with_policy(StreamPolicy::default().allow_gnu_extensions_without_terminator(true));
             cancel_pending(reader.next_frame());
 
             ready_ok(async {
                 let member = next_member(&mut reader).await?;
-                assert_eq!(member.effective_path()?.as_ref(), expected_name);
+                assert_eq!(member.effective_path()?, long_name);
                 Ok(())
             });
         }

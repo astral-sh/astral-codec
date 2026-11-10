@@ -18,7 +18,7 @@ use tar_codec::{
 use tar_framing::{
     BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
-    logical::TarReader,
+    logical::{MemberExtensions, TarReader},
 };
 use tokio::io::{AsyncWriteExt as _, duplex};
 
@@ -455,7 +455,7 @@ async fn unterminated_gnu_extensions_are_policy_controlled() -> TestResult {
 }
 
 #[tokio::test]
-async fn unterminated_gnu_extensions_preserve_all_bytes() -> TestResult {
+async fn validates_detached_gnu_extensions_with_the_selected_policy() -> TestResult {
     let long_name = [b'n'; BLOCK_SIZE];
     let mut archive = ArchiveBuilder::new();
     archive
@@ -463,19 +463,27 @@ async fn unterminated_gnu_extensions_preserve_all_bytes() -> TestResult {
         .gnu("longlink", b'K', b"link\0bad", "", 0o644)
         .gnu("raw", b'2', b"", "", 0o644);
     let bytes = archive.finish();
-    let mut reader = TarReader::new(bytes.as_slice())
-        .with_policy(StreamPolicy::default().allow_gnu_extensions_without_terminator(true));
+    let mut reader = TarReader::new(bytes.as_slice());
     let member = reader.next_frame().await?.expect("expected link member");
-    assert_eq!(member.effective_path()?.as_ref(), long_name);
+    let MemberExtensions::Gnu {
+        long_name: Some(name),
+        long_link: Some(link),
+    } = member.extensions
+    else {
+        return Err(io::Error::other("expected both GNU extensions").into());
+    };
+    assert!(reader.next_frame().await?.is_none());
+    let policy = StreamPolicy::default().allow_gnu_extensions_without_terminator(true);
+    assert_eq!(name.value(GnuKind::LongName, &policy)?, long_name);
     assert!(matches!(
-        member.effective_link_path(),
+        link.value(GnuKind::LongLink, &policy),
         Err(FrameError {
+            position,
             inner: FrameErrorInner::InvalidGnuExtension {
                 kind: GnuKind::LongLink,
                 ..
             },
-            ..
-        })
+        }) if position == (2 * BLOCK_SIZE) as u64
     ));
     Ok(())
 }

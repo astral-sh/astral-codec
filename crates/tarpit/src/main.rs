@@ -221,9 +221,7 @@ async fn dump_logical<R: AsyncRead + Unpin, W: Write>(
         } else {
             None
         };
-        render_member(output, index, &member, path.as_ref(), link_path.as_deref())?;
-        drop(path);
-        drop(link_path);
+        render_member(output, index, &member, path, link_path)?;
 
         loop {
             match member.payload.next_block().await {

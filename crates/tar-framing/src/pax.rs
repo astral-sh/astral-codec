@@ -256,6 +256,22 @@ impl<'global> PaxState<'global> {
         Self::effective_record_from(local_records, self.global_records, keyword)
     }
 
+    /// Returns the effective pax `path` value, including an explicit deletion.
+    pub fn path(&self) -> Option<&PaxValue<PaxString>> {
+        match self.effective_record(&PaxKeyword::Path)? {
+            PaxRecord::Path(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    /// Returns the effective pax `linkpath` value, including an explicit deletion.
+    pub fn link_path(&self) -> Option<&PaxValue<PaxString>> {
+        match self.effective_record(&PaxKeyword::LinkPath)? {
+            PaxRecord::LinkPath(value) => Some(value),
+            _ => None,
+        }
+    }
+
     pub(super) fn effective_size<'records>(
         local_records: Option<&'records PaxRecords>,
         global_records: Option<&'records GlobalPaxRecords>,
@@ -309,12 +325,22 @@ pub enum PaxString {
     Binary(Arc<[u8]>),
 }
 
+impl PaxString {
+    /// Returns the original bytes in either encoding.
+    pub fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Utf8(value) => value.as_bytes(),
+            Self::Binary(value) => value,
+        }
+    }
+}
+
 /// A parsed pax value, including an explicit deletion tombstone.
 ///
 /// Deletion tombstones are needed because pax has special semantics for
 /// empty (i.e. deleted) pax records: they're considered to delete
 /// "any header block field, previously entered extended header value, or global
-/// extended header value of the same name."
+/// extended header value of the same name." (pax specification, "pax Extended Header")
 ///
 /// This is a distinct state from "missing," which allows for fallbacks to
 /// e.g. global pax headers or the equivalent ustar field.

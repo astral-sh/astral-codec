@@ -631,14 +631,14 @@ fn decode_member<'a, R>(
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
     let executable = frame.header.mode.unwrap_or_default() & 0o111 != 0;
-    let path = std::str::from_utf8(frame.effective_path()?.as_ref())
+    let path = std::str::from_utf8(frame.effective_path()?)
         .map(str::to_owned)
         .map_err(|_| DecodeError::InvalidUtf8 {
             position,
             field: "path",
         })?;
     let target = if matches!(kind, UstarKind::HardLink | UstarKind::SymbolicLink) {
-        std::str::from_utf8(frame.effective_link_path()?.as_ref())
+        std::str::from_utf8(frame.effective_link_path()?)
             .map(str::to_owned)
             .map_err(|_| DecodeError::InvalidUtf8 {
                 position,
