@@ -1,4 +1,4 @@
-//! PAX record parsing, active-global updates, and per-member metadata state.
+//! PAX record parsing, active-global updates, and per-member extension state.
 
 use std::{
     collections::{HashMap, hash_map::Entry},
@@ -209,7 +209,7 @@ impl PaxExtension {
     }
 }
 
-/// Unified pax metadata state applicable to one ordinary member.
+/// Unified pax extension state applicable to one ordinary member.
 ///
 /// Effective values apply local records over the active global state using
 /// standard last-record-wins and deletion semantics. [`Self::extensions`]

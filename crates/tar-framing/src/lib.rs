@@ -125,6 +125,10 @@
 //! CPython's `tarfile` in particular does this.
 //! This can be disabled with [`StreamPolicy::allow_header_uname_and_gname_without_terminator`].
 //!
+//! tar-framing also requires GNU long-name and long-link payloads to be NUL terminated by default.
+//! The Rust `tar` crate from 0.3.3 to 0.4.3 wrote long-name payloads without the terminator.
+//! These payloads can be accepted with [`StreamPolicy::allow_gnu_extensions_without_terminator`].
+//!
 //! Separately, higher-level crates (like tar-codec) may choose to apply additional
 //! restrictions when processing logical archive members. For example, a consumer
 //! of tar-framing may choose to reject vendor-specific pax records, or member names
@@ -168,7 +172,7 @@ pub const DEFAULT_MAX_PAX_EXTENSION_SIZE: u64 = 256 * 1024;
 /// This is 1 MiB.
 pub const DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE: u64 = 4 * DEFAULT_MAX_PAX_EXTENSION_SIZE;
 
-/// The default maximum size in bytes of one GNU metadata extension.
+/// The default maximum size in bytes of one GNU extension.
 ///
 /// This is 128 KiB.
 pub const DEFAULT_MAX_GNU_EXTENSION_SIZE: u64 = 128 * 1024;
@@ -229,7 +233,7 @@ pub enum PaxKind {
     Global,
 }
 
-/// The supported GNU metadata extension kinds.
+/// The supported GNU extension kinds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GnuKind {
     /// A typeflag `L` extension giving a long name for the next member.

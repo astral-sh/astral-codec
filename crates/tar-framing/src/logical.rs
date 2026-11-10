@@ -20,27 +20,27 @@ pub use crate::{PaxExtension, PaxState};
 
 const PAYLOAD_DRAIN_CHUNK_BYTES: usize = 1024 * 1024;
 
-/// A GNU long-name or long-link value needed to interpret a member.
+/// A GNU long-name or long-link extension value needed to interpret a member.
 #[derive(Clone, Debug, Eq, PartialEq)]
-pub struct GnuMetadata {
+pub struct GnuExtension {
     /// The absolute byte position of the GNU extension header block.
     pub position: u64,
-    /// The meaningful metadata payload bytes, excluding tar padding.
+    /// The meaningful extension payload bytes, excluding tar padding.
     pub payload: Vec<u8>,
 }
 
-/// Extension metadata attached to one ordinary archive member.
+/// Extension state attached to one ordinary archive member.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum MemberExtensions<'a> {
-    /// Unified pax metadata applicable to an ordinary ustar member, borrowing
+    /// Unified pax extension state applicable to an ordinary ustar member, borrowing
     /// effective global values from the logical reader.
     Pax(PaxState<'a>),
-    /// GNU metadata applying to an ordinary GNU member.
+    /// GNU extension state applying to an ordinary GNU member.
     Gnu {
-        /// Optional GNU long-name metadata.
-        long_name: Option<GnuMetadata>,
-        /// Optional GNU long-link metadata.
-        long_link: Option<GnuMetadata>,
+        /// An optional GNU long-name extension.
+        long_name: Option<GnuExtension>,
+        /// An optional GNU long-link extension.
+        long_link: Option<GnuExtension>,
     },
 }
 
@@ -92,15 +92,15 @@ pub struct Header<'a> {
     /// This is [`None`] only when the field is wholly NUL and the framing policy
     /// permits missing numeric metadata.
     ///
-    /// Applicable pax metadata may override or delete this fallback.
+    /// Applicable pax records may override or delete this fallback.
     pub mtime: Option<u64>,
     /// User name bytes from the ordinary header, empty if absent or unusable.
     ///
-    /// Applicable pax metadata may override or delete this fallback.
+    /// Applicable pax records may override or delete this fallback.
     pub uname: &'a [u8],
     /// Group name bytes from the ordinary header, empty if absent or unusable.
     ///
-    /// Applicable pax metadata may override or delete this fallback.
+    /// Applicable pax records may override or delete this fallback.
     pub gname: &'a [u8],
     header_path: &'a [u8],
     link_name: &'a [u8],
@@ -121,20 +121,25 @@ pub struct PayloadBlock {
 pub struct MemberFrame<'a, R> {
     /// The ordinary member header.
     pub header: Header<'a>,
-    /// Extension metadata applying to this member.
+    /// Extensions (pax or GNU) applying to this member.
     pub extensions: MemberExtensions<'a>,
     /// A cursor over the member payload bytes.
     pub payload: MemberPayload<'a, R>,
 }
 
 impl<R> MemberFrame<'_, R> {
-    /// Returns the effective member path after applying pax or GNU metadata.
+    /// Returns the effective member path after applying pax or GNU extension state.
     ///
     /// An explicit pax deletion is an error because it also removes the
     /// ordinary-header fallback required to identify this member. Empty paths
     /// and paths containing embedded NUL bytes are also rejected.
     pub fn effective_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
-        let path = effective_member_path(&self.header, &self.extensions)?;
+        let policy = &self.payload.reader.stream.policy;
+        let path = effective_member_path(
+            &self.header,
+            &self.extensions,
+            policy.allow_gnu_extensions_without_terminator,
+        )?;
         if path.is_empty() {
             return Err(FrameError::at(
                 self.header.position,
@@ -145,12 +150,13 @@ impl<R> MemberFrame<'_, R> {
         Ok(path)
     }
 
-    /// Returns the effective member link target after applying pax or GNU metadata.
+    /// Returns the effective member link target after applying pax or GNU extension state.
     ///
     /// An explicit pax deletion is an error because it also removes the
     /// ordinary-header fallback required to identify a link target. Link
     /// targets containing embedded NUL bytes are also rejected.
     pub fn effective_link_path(&self) -> Result<Cow<'_, [u8]>, FrameError> {
+        let policy = &self.payload.reader.stream.policy;
         let path = match &self.extensions {
             MemberExtensions::Pax(state) => resolve_pax_text(
                 self.header.position,
@@ -164,9 +170,10 @@ impl<R> MemberFrame<'_, R> {
                 },
             ),
             MemberExtensions::Gnu { long_link, .. } => match long_link {
-                Some(metadata) => Ok(Cow::Borrowed(parse_gnu_metadata(
+                Some(metadata) => Ok(Cow::Borrowed(parse_gnu_extension(
                     metadata,
                     GnuKind::LongLink,
+                    policy.allow_gnu_extensions_without_terminator,
                 )?)),
                 None => Ok(Cow::Borrowed(self.header.link_name)),
             },
@@ -183,8 +190,8 @@ pub struct MemberPayload<'a, R> {
 
 /// A logical reader that assembles physical frames into archive-level items.
 ///
-/// Unlike [`TarStream`], this API attaches PAX or GNU extension metadata to the
-/// ordinary member it describes. Each PAX member carries one [`PaxState`] with
+/// Unlike [`TarStream`], this API attaches pax or GNU extension state to the
+/// ordinary member it describes. Each pax member carries one [`PaxState`] with
 /// effective metadata and newly encountered positioned extensions. Ordinary
 /// header path and link-path fallbacks are copied into reusable storage and
 /// borrowed by the returned [`Header`].
@@ -206,18 +213,18 @@ struct PayloadReader<R> {
     drain_buffer: Vec<u8>,
 }
 
-/// Logical member metadata retained across cancellation of [`TarReader::next_frame`].
+/// Logical member extension state retained across cancellation of [`TarReader::next_frame`].
 #[derive(Default)]
 struct PendingExtensions {
     pax_header_position: Option<u64>,
     global_pax: Vec<PaxExtension>,
     local_pax: Option<PaxExtension>,
-    gnu_long_name: Option<GnuMetadata>,
-    gnu_long_link: Option<GnuMetadata>,
+    gnu_long_name: Option<GnuExtension>,
+    gnu_long_link: Option<GnuExtension>,
 }
 
 impl PendingExtensions {
-    fn gnu_metadata_mut(&mut self, kind: GnuKind) -> &mut Option<GnuMetadata> {
+    fn gnu_extension_mut(&mut self, kind: GnuKind) -> &mut Option<GnuExtension> {
         match kind {
             GnuKind::LongName => &mut self.gnu_long_name,
             GnuKind::LongLink => &mut self.gnu_long_link,
@@ -294,7 +301,7 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
     /// Returns the next ordinary archive member.
     ///
     /// If the preceding member payload was not fully consumed, it is first
-    /// drained and validated. Extension metadata is then consumed and attached
+    /// drained and validated. Extension state is then consumed and attached
     /// before the next member is returned. Global pax updates not followed by
     /// an ordinary member are consumed and ignored. A returned pax state is a
     /// view borrowing this reader; it must be dropped before requesting another
@@ -336,7 +343,7 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
                     self.pending_extensions.pax_header_position = Some(frame.position);
                 }
                 Frame::Gnu(frame) => {
-                    *self.pending_extensions.gnu_metadata_mut(frame.kind) = Some(GnuMetadata {
+                    *self.pending_extensions.gnu_extension_mut(frame.kind) = Some(GnuExtension {
                         position: frame.position,
                         payload: Vec::new(),
                     });
@@ -379,12 +386,12 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
                 }
             }
             DataOwner::Gnu(kind) => {
-                let metadata = self
+                let extension = self
                     .pending_extensions
-                    .gnu_metadata_mut(kind)
+                    .gnu_extension_mut(kind)
                     .as_mut()
                     .ok_or_else(unattached)?;
-                metadata
+                extension
                     .payload
                     .extend_from_slice(&frame.block[..frame.len]);
             }
@@ -449,6 +456,7 @@ impl<R: AsyncRead + Unpin> MemberPayload<'_, R> {
 fn effective_member_path<'a>(
     header: &Header<'a>,
     extensions: &'a MemberExtensions<'_>,
+    allow_unterminated_gnu_extensions: bool,
 ) -> Result<Cow<'a, [u8]>, FrameError> {
     match extensions {
         MemberExtensions::Pax(state) => resolve_pax_text(
@@ -463,9 +471,10 @@ fn effective_member_path<'a>(
             },
         ),
         MemberExtensions::Gnu { long_name, .. } => match long_name {
-            Some(metadata) => Ok(Cow::Borrowed(parse_gnu_metadata(
-                metadata,
+            Some(extension) => Ok(Cow::Borrowed(parse_gnu_extension(
+                extension,
                 GnuKind::LongName,
+                allow_unterminated_gnu_extensions,
             )?)),
             None => Ok(Cow::Borrowed(header.header_path)),
         },
@@ -515,29 +524,41 @@ fn pax_value<'a>(
         // field."
         //
         // See: pax spec, "pax Extended Header"
-        PaxValue::Deleted => Err(FrameError::deleted_pax_metadata(position, keyword)),
+        PaxValue::Deleted => Err(FrameError::deleted_pax_record(position, keyword)),
     }
 }
 
-fn parse_gnu_metadata(metadata: &GnuMetadata, kind: GnuKind) -> Result<&[u8], FrameError> {
-    let terminator = metadata
+fn parse_gnu_extension(
+    extension: &GnuExtension,
+    kind: GnuKind,
+    allow_unterminated: bool,
+) -> Result<&[u8], FrameError> {
+    let terminator = extension
         .payload
         .iter()
         .position(|byte| *byte == 0)
+        .or(allow_unterminated.then_some(extension.payload.len()))
         .ok_or_else(|| {
-            FrameError::invalid_gnu_metadata(metadata.position, kind, "value is not NUL-terminated")
+            FrameError::invalid_gnu_extension(
+                extension.position,
+                kind,
+                "value is not NUL-terminated",
+            )
         })?;
 
     // TODO: Make this configurable through some kind of policy?
     // Might be overly strict in practice.
-    if metadata.payload[terminator..].iter().any(|byte| *byte != 0) {
-        return Err(FrameError::invalid_gnu_metadata(
-            metadata.position,
+    if extension.payload[terminator..]
+        .iter()
+        .any(|byte| *byte != 0)
+    {
+        return Err(FrameError::invalid_gnu_extension(
+            extension.position,
             kind,
             "non-NUL bytes follow the terminator",
         ));
     }
-    Ok(&metadata.payload[..terminator])
+    Ok(&extension.payload[..terminator])
 }
 
 #[cfg(test)]
@@ -755,7 +776,7 @@ mod tests {
                     member.effective_link_path(),
                     Err(FrameError {
                         position: 2048,
-                        inner: FrameErrorInner::DeletedPaxMetadata {
+                        inner: FrameErrorInner::DeletedPaxRecord {
                             keyword: "linkpath"
                         },
                     })
@@ -942,7 +963,7 @@ mod tests {
             assert!(matches!(
                 member.effective_path(),
                 Err(FrameError {
-                    inner: FrameErrorInner::DeletedPaxMetadata { keyword: "path" },
+                    inner: FrameErrorInner::DeletedPaxRecord { keyword: "path" },
                     ..
                 })
             ));
@@ -999,7 +1020,7 @@ mod tests {
                 result,
                 Err(FrameError {
                     position: 0,
-                    inner: FrameErrorInner::InvalidGnuMetadata { kind: found, .. },
+                    inner: FrameErrorInner::InvalidGnuExtension { kind: found, .. },
                 }) if found == kind
             ));
         }

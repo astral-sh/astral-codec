@@ -49,7 +49,7 @@
 //!     GnuHeader --> ReadingGnu: nonempty L or K
 //!     GnuHeader --> GnuMemberData: member data
 //!     GnuHeader --> GnuBoundary: empty member
-//!     ReadingGnu --> AwaitingGnuMember: metadata payload complete
+//!     ReadingGnu --> AwaitingGnuMember: extension payload complete
 //!     AwaitingGnuMember --> ReadingGnu: nonempty extension of the other kind
 //!     AwaitingGnuMember --> GnuMemberData: member data
 //!     AwaitingGnuMember --> GnuBoundary: empty member
@@ -124,7 +124,7 @@ pub struct PaxFrame {
     pub payload_size: u64,
 }
 
-/// A GNU metadata extension header block.
+/// A GNU extension header block.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct GnuFrame {
     /// The absolute byte position of this block in the source stream.
@@ -133,7 +133,7 @@ pub struct GnuFrame {
     pub block: Block,
     /// The GNU extension kind.
     pub kind: GnuKind,
-    /// The number of metadata payload bytes following the header. Always greater than zero.
+    /// The number of payload bytes following the header. Always greater than zero.
     pub payload_size: u64,
 }
 
@@ -215,7 +215,7 @@ impl HeaderFrame {
             Ok(declared_size),
             |size| match size {
                 PaxValue::Value(size) => Ok(*size),
-                PaxValue::Deleted => Err(FrameError::deleted_pax_metadata(position, "size")),
+                PaxValue::Deleted => Err(FrameError::deleted_pax_record(position, "size")),
             },
         )?;
         validate_pax_member_size(position, kind, declared_size, effective_size, policy)?;
@@ -333,7 +333,7 @@ impl HeaderFrame {
 pub enum DataOwner {
     /// Payload bytes belonging to a pax extended header.
     Pax(PaxKind),
-    /// Payload bytes belonging to a GNU metadata extension.
+    /// Payload bytes belonging to a GNU extension.
     Gnu(GnuKind),
     /// Payload bytes belonging to an ordinary archive member.
     Member,
@@ -351,7 +351,7 @@ pub struct DataFrame {
     pub block: Block,
     /// The number of meaningful payload bytes in this block.
     pub len: usize,
-    /// Whether this block carries metadata-extension or member data.
+    /// Whether this block carries extension or member data.
     pub owner: DataOwner,
     /// Parsed records completed by this final pax payload block.
     ///
@@ -396,7 +396,7 @@ pub(super) enum State {
         remaining: u64,
         pending: PendingGnu,
     },
-    /// GNU metadata is pending; accept another distinct extension or its member.
+    /// GNU extension is pending; accept another distinct extension or its member.
     AwaitingGnuMember { pending: PendingGnu },
     /// Consume the payload blocks declared for an ordinary member.
     ReadingMember { remaining: u64 },
@@ -434,6 +434,7 @@ pub struct StreamPolicy {
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
     allow_pax_base256_uid_and_gid: bool,
+    pub(super) allow_gnu_extensions_without_terminator: bool,
     max_gnu_extension_size: u64,
 }
 
@@ -447,6 +448,7 @@ impl Default for StreamPolicy {
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
             allow_pax_base256_uid_and_gid: false,
+            allow_gnu_extensions_without_terminator: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
         }
     }
@@ -523,6 +525,15 @@ impl StreamPolicy {
         self
     }
 
+    /// Configures whether GNU long-name and long-link payloads may omit their NUL terminators.
+    ///
+    /// This compatibility option is disabled by default. Enabling it accepts
+    /// the whole payload as the value when it contains no NUL byte.
+    pub fn allow_gnu_extensions_without_terminator(mut self, allow: bool) -> Self {
+        self.allow_gnu_extensions_without_terminator = allow;
+        self
+    }
+
     /// Configures the maximum size accepted for each GNU extension.
     ///
     /// A GNU extension member that declares a larger payload is rejected before
@@ -542,7 +553,7 @@ pub struct TarStream<R> {
     pub(super) format: Option<ArchiveFormat>,
     /// The currently effective global pax records, if any.
     pub(super) global_pax_records: Option<GlobalPaxRecords>,
-    policy: StreamPolicy,
+    pub(super) policy: StreamPolicy,
     global_pax_extensions_size: u64,
     member_chunk: MemberChunk,
     pub(super) state: State,
@@ -784,7 +795,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 remaining: *remaining,
             },
             State::AwaitingGnuMember { .. } => FrameErrorInner::UnexpectedEof {
-                expected: "ordinary GNU member header after a GNU metadata extension",
+                expected: "ordinary GNU member header after a GNU extension",
             },
             State::ReadingMember { remaining } => FrameErrorInner::TruncatedPayload {
                 owner: DataOwner::Member,
@@ -907,7 +918,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 if is_zero_block(&block) {
                     return Err(FrameError::unexpected_order(
                         position,
-                        "ordinary GNU member header after a GNU metadata extension",
+                        "ordinary GNU member header after a GNU extension",
                         "end-of-archive marker",
                     ));
                 }
@@ -1103,7 +1114,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         };
         if let Some(kind) = extension {
             if parsed.size == 0 {
-                return Err(FrameError::invalid_gnu_metadata(
+                return Err(FrameError::invalid_gnu_extension(
                     position,
                     kind,
                     "declared payload size is zero",
@@ -1116,8 +1127,8 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             if *already_seen {
                 return Err(FrameError::unexpected_order(
                     position,
-                    "ordinary GNU member header or the other GNU metadata extension",
-                    "duplicate GNU metadata extension",
+                    "ordinary GNU member header or the other GNU extension",
+                    "duplicate GNU extension",
                 ));
             }
             if parsed.size > self.policy.max_gnu_extension_size {
@@ -1855,7 +1866,7 @@ mod tests {
         }));
         assert!(matches!(
             last_error_inner(&frames),
-            FrameErrorInner::DeletedPaxMetadata { keyword: "size" }
+            FrameErrorInner::DeletedPaxRecord { keyword: "size" }
         ));
     }
 
@@ -1969,7 +1980,7 @@ mod tests {
 
         assert!(matches!(
             last_error_inner(&collect(bytes, BLOCK_SIZE)),
-            FrameErrorInner::DeletedPaxMetadata { keyword: "size" }
+            FrameErrorInner::DeletedPaxRecord { keyword: "size" }
         ));
     }
 
@@ -1984,7 +1995,7 @@ mod tests {
             assert!(
                 matches!(
                     last_error_inner(&collect(bytes, BLOCK_SIZE)),
-                    FrameErrorInner::DeletedPaxMetadata { keyword: "size" }
+                    FrameErrorInner::DeletedPaxRecord { keyword: "size" }
                 ),
                 "{typeflag:?}"
             );

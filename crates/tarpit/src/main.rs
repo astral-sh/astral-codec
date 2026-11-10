@@ -10,7 +10,7 @@ use tar_codec::{Archive as _, DecodeError, ExtractError, TarArchive, extract::Ex
 use tar_framing::{
     ArchiveFormat, FrameError, GnuKind, HdrCharset, PaxKind, PaxRecord, PaxString, PaxValue,
     UstarKind,
-    logical::{GnuMetadata, MemberExtensions, MemberFrame, TarReader},
+    logical::{GnuExtension, MemberExtensions, MemberFrame, TarReader},
     stream::{DataOwner, Frame, TarStream},
 };
 use thiserror::Error;
@@ -401,7 +401,7 @@ fn render_optional_bytes(output: &mut impl Write, value: &[u8]) -> io::Result<()
 fn render_gnu_metadata(
     output: &mut impl Write,
     kind: GnuKind,
-    metadata: &GnuMetadata,
+    metadata: &GnuExtension,
 ) -> io::Result<()> {
     write!(
         output,
