@@ -97,6 +97,13 @@
 //!
 //! tar-framing does not support tar families other than pax and GNU. That includes the "legacy" (V7) and star families.
 //!
+//! POSIX ustar permits the blocks after the two-block end-of-archive marker
+//! in the final physical record to contain undefined data. GNU tar and Python's
+//! `tarfile` normally pad the final record with zeros to a 20-block boundary.
+//! By default, tar-framing accepts whole zero blocks after the marker up to
+//! that boundary. EOF may follow the marker or any accepted padding block.
+//! [`StreamPolicy::trailing_data_policy`] configures this behavior.
+//!
 //! Only hard links and symbolic links may carry a link target in the ordinary
 //! `linkname` field, a pax `linkpath` record, or a GNU long-link extension.
 //! A pax deletion cannot hide a populated `linkname` on a non-link member.
@@ -168,6 +175,32 @@ pub const DEFAULT_MAX_GNU_EXTENSION_SIZE: u64 = 128 * 1024;
 
 /// A single tar block.
 pub type Block = [u8; BLOCK_SIZE];
+
+/// Controls what the reader accepts after the two-block end-of-archive marker.
+///
+/// The default is [`BlockingFactor(20)`](Self::BlockingFactor), a 10,240-byte record.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum TrailingDataPolicy {
+    /// Require EOF immediately after the marker.
+    Strict,
+    /// Permit whole 512-byte zero blocks up to the end of the current record.
+    ///
+    /// The blocking factor is the number of blocks per record, measured from
+    /// the start of the archive. EOF may occur immediately after the marker or
+    /// after any allowed padding block. If the marker ends on a record boundary,
+    /// or the factor is 0 or 1, EOF must immediately follow the marker.
+    BlockingFactor(u8),
+    /// Stop at the marker and leave all following bytes unread.
+    Ignore,
+}
+
+impl Default for TrailingDataPolicy {
+    fn default() -> Self {
+        // NOTE: a blocking factor of 20 matches the default in GNU tar
+        // and Python's `tarfile`.
+        Self::BlockingFactor(20)
+    }
+}
 
 /// An automatically detected, mutually exclusive tar archive family.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]

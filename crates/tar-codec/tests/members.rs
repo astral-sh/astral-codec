@@ -4,13 +4,16 @@ use std::{
     error::Error,
     io,
     pin::pin,
-    task::{Context, Waker},
+    task::{Context, Poll, Waker},
 };
 
-use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum};
+use support::{
+    ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum,
+    single_pax_member,
+};
 use tar_codec::{
     Archive as _, DecodeError, DecodePolicy, DecodePolicyViolation, Member, MemberPayload,
-    PaxDecodePolicy, SpecialKind, TarArchive,
+    PaxDecodePolicy, SpecialKind, TarArchive, TrailingDataPolicy,
 };
 use tar_framing::{
     BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
@@ -30,6 +33,86 @@ async fn read_payload<P: MemberPayload<Error = DecodeError>>(
         data.extend_from_slice(&chunk);
     }
     Ok(data)
+}
+
+#[tokio::test]
+async fn trailing_zero_padding_stops_at_the_record_boundary() -> TestResult {
+    // An empty archive ends at block two. A third zero block is optional padding.
+    let bytes = [0; 20 * BLOCK_SIZE + 1];
+    let mut short_record = TarArchive::new(&bytes[..3 * BLOCK_SIZE]);
+    assert!(short_record.next_member().await?.is_none());
+    let with_trailing = |policy| DecodePolicy::default().trailing_data_policy(policy);
+    for (policy, blocks) in [
+        (DecodePolicy::default(), 20),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(0)), 2),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(2)), 2),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(3)), 3),
+        (with_trailing(TrailingDataPolicy::Strict), 2),
+    ] {
+        let boundary = blocks * BLOCK_SIZE;
+        let mut valid = TarArchive::new(&bytes[..boundary]).with_policy(policy.clone());
+        assert!(valid.next_member().await?.is_none(), "{policy:?}");
+        let mut excess = TarArchive::new(&bytes[..=boundary]).with_policy(policy);
+        assert!(matches!(
+            excess.next_member().await,
+            Err(DecodeError::Framing(FrameError {
+                position,
+                inner: FrameErrorInner::TrailingData,
+            })) if position == boundary as u64
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn cancelled_trailing_padding_read_preserves_the_partial_block() -> TestResult {
+    let bytes = [0; 3 * BLOCK_SIZE + 1];
+    let (reader, mut writer) = duplex(bytes.len());
+    writer.write_all(&bytes).await?;
+    let mut members = TarArchive::new(reader).members();
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(pin!(members.next()).poll(&mut context).is_pending());
+    // A retry must account for the first byte of the unfinished padding block.
+    drop(writer);
+    assert!(matches!(
+        members.next().await,
+        Err(DecodeError::Framing(FrameError {
+            position,
+            inner: FrameErrorInner::IncompleteBlock { read: 1 },
+        })) if position == (3 * BLOCK_SIZE) as u64
+    ));
+    Ok(())
+}
+
+#[tokio::test]
+async fn trailing_nonzero_byte_fails_before_eof() -> TestResult {
+    let mut bytes = [0; 3 * BLOCK_SIZE + 8];
+    bytes[3 * BLOCK_SIZE + 7] = 1;
+    let (reader, mut writer) = duplex(bytes.len());
+    writer.write_all(&bytes).await?;
+    let mut archive = TarArchive::new(reader);
+    assert!(matches!(
+        pin!(archive.next_member()).poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(DecodeError::Framing(FrameError {
+            position,
+            inner: FrameErrorInner::TrailingData,
+        }))) if position == (3 * BLOCK_SIZE + 7) as u64
+    ));
+    assert!(archive.next_member().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignoring_trailing_data_leaves_the_reader_at_the_marker() -> TestResult {
+    let next_archive = single_pax_member("next", b'0', b"", "", 0o644);
+    let mut bytes = ArchiveBuilder::new().finish();
+    bytes.extend_from_slice(&next_archive);
+    let mut unread = bytes.as_slice();
+    let mut archive = TarArchive::new(&mut unread)
+        .with_policy(DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Ignore));
+    assert!(archive.next_member().await?.is_none());
+    assert_eq!(unread, next_archive);
+    Ok(())
 }
 
 #[tokio::test]
