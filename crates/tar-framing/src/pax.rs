@@ -152,7 +152,7 @@ pub(crate) struct GlobalPaxRecords {
 }
 
 impl GlobalPaxRecords {
-    fn apply(&mut self, updates: &PaxRecords) {
+    pub(super) fn apply(&mut self, updates: &PaxRecords) {
         for update in updates.as_slice() {
             match self.indices.entry(update.keyword()) {
                 Entry::Occupied(entry) => self.records.0[*entry.get()] = update.clone(),
@@ -211,14 +211,14 @@ impl PaxExtension {
 /// member whose global state could differ.
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct PaxState<'global> {
-    global_records: Option<&'global GlobalPaxRecords>,
+    global_records: &'global GlobalPaxRecords,
     global_extensions: Vec<PaxExtension>,
     local_extension: Option<PaxExtension>,
 }
 
 impl<'global> PaxState<'global> {
     pub(crate) fn new(
-        global_records: Option<&'global GlobalPaxRecords>,
+        global_records: &'global GlobalPaxRecords,
         global_extensions: Vec<PaxExtension>,
         local_extension: Option<PaxExtension>,
     ) -> Self {
@@ -266,7 +266,7 @@ impl<'global> PaxState<'global> {
 
     pub(super) fn effective_size<'records>(
         local_records: Option<&'records PaxRecords>,
-        global_records: Option<&'records GlobalPaxRecords>,
+        global_records: &'records GlobalPaxRecords,
     ) -> Option<&'records PaxValue<u64>> {
         Self::effective_record_from(local_records, global_records, &PaxKeyword::Size).and_then(
             |record| match record {
@@ -278,12 +278,12 @@ impl<'global> PaxState<'global> {
 
     pub(super) fn effective_record_from<'records>(
         local_records: Option<&'records PaxRecords>,
-        global_records: Option<&'records GlobalPaxRecords>,
+        global_records: &'records GlobalPaxRecords,
         keyword: &PaxKeyword,
     ) -> Option<&'records PaxRecord> {
         local_records
             .and_then(|records| records.get(keyword))
-            .or_else(|| global_records.and_then(|records| records.get(keyword)))
+            .or_else(|| global_records.get(keyword))
     }
 }
 
@@ -610,10 +610,6 @@ impl PaxRecords {
             .rev()
             .find(|record| record.keyword() == *keyword)
     }
-
-    pub(super) fn apply_global(&self, active: &mut Option<GlobalPaxRecords>) {
-        active.get_or_insert_default().apply(self);
-    }
 }
 
 impl PaxValue<Arc<str>> {
@@ -750,9 +746,9 @@ mod tests {
         }
     }
 
-    fn global_state(records: Vec<PaxRecord>) -> Option<GlobalPaxRecords> {
-        let mut active = None;
-        PaxRecords(records).apply_global(&mut active);
+    fn global_state(records: Vec<PaxRecord>) -> GlobalPaxRecords {
+        let mut active = GlobalPaxRecords::default();
+        active.apply(&PaxRecords(records));
         active
     }
 
@@ -807,7 +803,7 @@ mod tests {
         ] {
             let global = global_state(case.global);
             let state = PaxState::new(
-                global.as_ref(),
+                &global,
                 Vec::new(),
                 case.local
                     .map(|records| extension(0, PaxKind::Local, records)),
@@ -820,8 +816,9 @@ mod tests {
             );
         }
 
+        let global = GlobalPaxRecords::default();
         let state = PaxState::new(
-            None,
+            &global,
             vec![
                 extension(3, PaxKind::Global, vec![vendor("first", "value")]),
                 extension(7, PaxKind::Global, vec![vendor("second", "value")]),
@@ -847,18 +844,14 @@ mod tests {
 
     #[test]
     fn global_deletions_remain_effective_tombstones() {
-        let initial = Arc::new(PaxRecords(vec![
+        let mut active = global_state(vec![
             PaxRecord::Path(PaxValue::Value(utf8("global"))),
             vendor("kept", "value"),
-        ]));
-        let deletion = Arc::new(PaxRecords(vec![PaxRecord::Path(PaxValue::Deleted)]));
-        let mut active = None;
-        initial.apply_global(&mut active);
-        deletion.apply_global(&mut active);
+        ]);
+        active.apply(&PaxRecords(vec![PaxRecord::Path(PaxValue::Deleted)]));
 
-        let active_records = active.as_ref().expect("global state should exist");
-        assert_eq!(active_records.records.as_slice().len(), 2);
-        let state = PaxState::new(active.as_ref(), Vec::new(), None);
+        assert_eq!(active.records.as_slice().len(), 2);
+        let state = PaxState::new(&active, Vec::new(), None);
         assert_eq!(
             state.effective_record(&PaxKeyword::Path),
             Some(&PaxRecord::Path(PaxValue::Deleted))
@@ -1047,9 +1040,7 @@ mod tests {
             vendor("second", "kept"),
             security("old"),
         ]);
-        let update = Arc::new(PaxRecords(vec![vendor("first", "new"), security("new")]));
-        update.apply_global(&mut active);
-        let active = active.as_ref().expect("global state should exist");
+        active.apply(&PaxRecords(vec![vendor("first", "new"), security("new")]));
         assert_eq!(active.records.as_slice().len(), 3);
         assert_eq!(
             active.get(&PaxKeyword::Vendor {

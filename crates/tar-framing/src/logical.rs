@@ -240,7 +240,7 @@ pub struct TarReader<R> {
     // `PaxState` can borrow it while `MemberPayload` mutably borrows only the
     // independent payload machinery. `TarStream` maintains its own physical
     // copy for framing decisions.
-    global_pax_records: Option<GlobalPaxRecords>,
+    global_pax_records: GlobalPaxRecords,
     payload: PayloadReader<R>,
     header_storage: HeaderStorage,
     pending_extensions: PendingExtensions,
@@ -273,7 +273,7 @@ impl PendingExtensions {
     fn push_data(
         &mut self,
         frame: DataFrame,
-        global_pax_records: &mut Option<GlobalPaxRecords>,
+        global_pax_records: &mut GlobalPaxRecords,
     ) -> Result<(), FrameError> {
         let unattached = || {
             FrameError::unexpected_order(
@@ -289,7 +289,7 @@ impl PendingExtensions {
                 };
                 match extension.kind {
                     PaxKind::Global => {
-                        extension.records.apply_global(global_pax_records);
+                        global_pax_records.apply(&extension.records);
                         self.global_pax.push(extension);
                     }
                     PaxKind::Local => self.local_pax = Some(extension),
@@ -312,7 +312,7 @@ impl PendingExtensions {
     fn into_member_extensions(
         self,
         format: ArchiveFormat,
-        global_pax_records: Option<&GlobalPaxRecords>,
+        global_pax_records: &GlobalPaxRecords,
     ) -> MemberExtensions<'_> {
         match format {
             ArchiveFormat::Pax => MemberExtensions::Pax(PaxState::new(
@@ -366,7 +366,7 @@ impl<R> TarReader<R> {
     /// Creates a new logical reader from an uncompressed tar reader.
     pub fn new(reader: R) -> Self {
         Self {
-            global_pax_records: None,
+            global_pax_records: GlobalPaxRecords::default(),
             payload: PayloadReader {
                 stream: TarStream::new(reader),
                 drain_buffer: Vec::new(),
@@ -403,8 +403,7 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
         };
         Ok(Some(MemberFrame {
             header: self.header_storage.update(&header),
-            extensions: pending
-                .into_member_extensions(header.format, self.global_pax_records.as_ref()),
+            extensions: pending.into_member_extensions(header.format, &self.global_pax_records),
             payload: MemberPayload {
                 reader: &mut self.payload,
             },
