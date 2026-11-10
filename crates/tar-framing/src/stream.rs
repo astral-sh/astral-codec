@@ -87,8 +87,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::{
     ArchiveFormat, BLOCK_SIZE, Block, DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
     DEFAULT_MAX_GNU_EXTENSION_SIZE, DEFAULT_MAX_PAX_EXTENSION_SIZE, FrameError, FrameErrorInner,
-    GnuKind, HdrCharset, PaxError, PaxExtension, PaxKeyword, PaxKind, PaxRecord, PaxState,
-    PaxValue, TrailingDataPolicy, UstarKind,
+    GnuKind, PaxError, PaxExtension, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue,
+    TrailingDataPolicy, UstarKind,
     header::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
         MODE_RANGE, MTIME_RANGE, NAME_RANGE, NumericFormat, PREFIX_RANGE, SIZE_RANGE,
@@ -171,7 +171,7 @@ impl HeaderFrame {
         block: Block,
         declared_size: u64,
         local_records: Option<&PaxRecords>,
-        global_records: Option<&GlobalPaxRecords>,
+        global_records: &GlobalPaxRecords,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         // A local `linkpath` can supply a target or, if empty, suppress the global
@@ -567,8 +567,8 @@ pub struct TarStream<R> {
     pub(super) block: Block,
     pub(super) block_len: usize,
     pub(super) format: Option<ArchiveFormat>,
-    /// The currently effective global pax records, if any.
-    pub(super) global_pax_records: Option<GlobalPaxRecords>,
+    /// The currently effective global pax records.
+    global_pax_records: GlobalPaxRecords,
     pub(super) policy: StreamPolicy,
     global_pax_extensions_size: u64,
     member_chunk: MemberChunk,
@@ -586,7 +586,7 @@ impl<R> TarStream<R> {
             block: [0; BLOCK_SIZE],
             block_len: 0,
             format: None,
-            global_pax_records: None,
+            global_pax_records: GlobalPaxRecords::default(),
             policy: StreamPolicy::default(),
             global_pax_extensions_size: 0,
             member_chunk: MemberChunk::default(),
@@ -848,15 +848,9 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 remaining -= len as u64;
                 let completed_pax_extension = if remaining == 0 {
                     let records = Arc::new(
-                        PaxRecords::parse(
-                            &payload,
-                            self.global_pax_records
-                                .as_ref()
-                                .map_or(HdrCharset::Utf8, GlobalPaxRecords::hdrcharset),
-                        )
-                        .map_err(|source| {
-                            FrameError::invalid_pax_record(header_position, source)
-                        })?,
+                        PaxRecords::parse(&payload, self.global_pax_records.hdrcharset()).map_err(
+                            |source| FrameError::invalid_pax_record(header_position, source),
+                        )?,
                     );
                     match kind {
                         PaxKind::Local => {
@@ -865,7 +859,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                             };
                         }
                         PaxKind::Global => {
-                            records.apply_global(&mut self.global_pax_records);
+                            self.global_pax_records.apply(&records);
                             self.state = State::AwaitingHeader;
                         }
                     }
@@ -1113,7 +1107,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             block,
             parsed.size,
             local_pax_records.as_deref(),
-            self.global_pax_records.as_ref(),
+            &self.global_pax_records,
             &self.policy,
         )?;
         self.state = State::for_member_payload(frame.effective_size);
