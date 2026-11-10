@@ -4,7 +4,7 @@
 //! they describe. Each member carries a compact borrowed [`Header`], and each
 //! PAX member carries one unified [`PaxState`].
 
-use std::{mem, ops::Range};
+use std::mem;
 
 use tokio::io::AsyncRead;
 
@@ -344,9 +344,11 @@ struct HeaderStorage {
 impl HeaderStorage {
     fn update<'a>(&'a mut self, frame: &HeaderFrame) -> Header<'a> {
         frame.copy_header_path_into(&mut self.path);
-        copy_string_field_into(&frame.block, LINK_NAME_RANGE, &mut self.link_name);
-        copy_string_field_into(&frame.block, UNAME_RANGE, &mut self.uname);
-        copy_string_field_into(&frame.block, GNAME_RANGE, &mut self.gname);
+        frame
+            .string_field(LINK_NAME_RANGE)
+            .clone_into(&mut self.link_name);
+        frame.string_field(UNAME_RANGE).clone_into(&mut self.uname);
+        frame.string_field(GNAME_RANGE).clone_into(&mut self.gname);
         Header {
             position: frame.position,
             format: frame.format,
@@ -363,16 +365,6 @@ impl HeaderStorage {
             link_name: &self.link_name,
         }
     }
-}
-
-fn copy_string_field_into(block: &Block, range: Range<usize>, destination: &mut Vec<u8>) {
-    let field = &block[range];
-    let len = field
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(field.len());
-    destination.clear();
-    destination.extend_from_slice(&field[..len]);
 }
 
 impl<R> TarReader<R> {

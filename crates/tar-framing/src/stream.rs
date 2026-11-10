@@ -93,7 +93,7 @@ use crate::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
         MODE_RANGE, MTIME_RANGE, NAME_RANGE, NumericFormat, PREFIX_RANGE, SIZE_RANGE,
         TYPEFLAG_OFFSET, UID_RANGE, UNAME_RANGE, USTAR_IDENTITY, XSTAR_MAGIC, checksum, is_all_nul,
-        parse_number, parse_octal,
+        parse_octal,
     },
     pax::{GlobalPaxRecords, PaxRecords, SharedPaxRecords},
 };
@@ -301,7 +301,7 @@ impl HeaderFrame {
         if allow_all_nul_numeric_fields && is_all_nul(bytes) {
             return Ok(None);
         }
-        parse_number(format, bytes).map(Some).ok_or_else(|| {
+        format.parse(bytes).map(Some).ok_or_else(|| {
             FrameError::at(
                 position,
                 FrameErrorInner::InvalidNumericField {
@@ -312,14 +312,24 @@ impl HeaderFrame {
         })
     }
 
+    /// Returns the bytes before the first NUL, or the whole field if it has none.
+    pub(crate) fn string_field(&self, range: Range<usize>) -> &[u8] {
+        let field = &self.block[range];
+        let end = field
+            .iter()
+            .position(|byte| *byte == 0)
+            .unwrap_or(field.len());
+        &field[..end]
+    }
+
     pub(crate) fn copy_header_path_into(&self, path: &mut Vec<u8>) {
         path.clear();
-        let name = trim_nul(&self.block[NAME_RANGE]);
+        let name = self.string_field(NAME_RANGE);
         if self.format == ArchiveFormat::Gnu {
             path.extend_from_slice(name);
             return;
         }
-        let prefix = trim_nul(&self.block[PREFIX_RANGE]);
+        let prefix = self.string_field(PREFIX_RANGE);
         if !prefix.is_empty() {
             path.extend_from_slice(prefix);
             path.push(b'/');
@@ -408,6 +418,16 @@ pub(super) enum State {
     Complete,
     /// An error has been emitted; subsequent polls return end-of-stream.
     Failed,
+}
+
+impl State {
+    fn for_member_payload(remaining: u64) -> Self {
+        if remaining == 0 {
+            Self::AwaitingHeader
+        } else {
+            Self::ReadingMember { remaining }
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -656,7 +676,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         }
         let position = poll_fn(|context| self.poll_fill_block(context)).await?;
         let meaningful_len = remaining.min(BLOCK_SIZE as u64) as usize;
-        self.state = member_payload_state(remaining - meaningful_len as u64);
+        self.state = State::for_member_payload(remaining - meaningful_len as u64);
         Ok(Some((position, meaningful_len)))
     }
 
@@ -738,7 +758,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         chunk.buffer.truncate(meaningful_len);
         std::mem::swap(buffer, &mut chunk.buffer);
         chunk.buffer.clear();
-        self.state = member_payload_state(remaining);
+        self.state = State::for_member_payload(remaining);
         Ok(true)
     }
 
@@ -929,7 +949,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             State::ReadingMember { mut remaining } => {
                 let len = remaining.min(BLOCK_SIZE as u64) as usize;
                 remaining -= len as u64;
-                self.state = member_payload_state(remaining);
+                self.state = State::for_member_payload(remaining);
                 Ok(Some(Frame::Data(DataFrame {
                     position,
                     block,
@@ -1096,7 +1116,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             self.global_pax_records.as_ref(),
             &self.policy,
         )?;
-        self.state = member_payload_state(frame.effective_size);
+        self.state = State::for_member_payload(frame.effective_size);
         Ok(Frame::Header(frame))
     }
 
@@ -1162,7 +1182,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             pending.long_link,
             &self.policy,
         )?;
-        self.state = member_payload_state(frame.effective_size);
+        self.state = State::for_member_payload(frame.effective_size);
         Ok(Frame::Header(frame))
     }
 }
@@ -1275,22 +1295,6 @@ fn is_zero_block(block: &Block) -> bool {
     block.iter().all(|byte| *byte == 0)
 }
 
-fn trim_nul(bytes: &[u8]) -> &[u8] {
-    let end = bytes
-        .iter()
-        .position(|byte| *byte == 0)
-        .unwrap_or(bytes.len());
-    &bytes[..end]
-}
-
-fn member_payload_state(remaining: u64) -> State {
-    if remaining == 0 {
-        State::AwaitingHeader
-    } else {
-        State::ReadingMember { remaining }
-    }
-}
-
 impl TryFromFramed<&Block> for ParsedHeader {
     fn try_from_framed(position: u64, block: &Block) -> Result<Self, FrameError> {
         // xstar shares the ustar identity but uses part of the path prefix for timestamps.
@@ -1327,9 +1331,11 @@ impl TryFromFramed<&Block> for ParsedHeader {
         }
 
         let size_bytes: [u8; 12] = block[SIZE_RANGE].try_into().expect("fixed header range");
-        let size = parse_number(format.into(), &size_bytes).ok_or_else(|| {
-            FrameError::at(position, FrameErrorInner::InvalidSize { found: size_bytes })
-        })?;
+        let size = NumericFormat::from(format)
+            .parse(&size_bytes)
+            .ok_or_else(|| {
+                FrameError::at(position, FrameErrorInner::InvalidSize { found: size_bytes })
+            })?;
 
         Ok(Self {
             format,
