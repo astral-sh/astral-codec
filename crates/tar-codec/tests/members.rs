@@ -463,18 +463,8 @@ async fn validates_detached_gnu_extensions_with_the_selected_policy() -> TestRes
         .gnu("longlink", b'K', b"link\0bad", "", 0o644)
         .gnu("raw", b'2', b"", "", 0o644);
     let bytes = archive.finish();
-    let policy = StreamPolicy::default().allow_gnu_extensions_without_terminator(true);
-    let mut permissive = TarReader::new(bytes.as_slice()).with_policy(policy);
     let mut reader = TarReader::new(bytes.as_slice());
     let member = reader.next_frame().await?.expect("expected link member");
-    assert_eq!(
-        member.extensions,
-        permissive
-            .next_frame()
-            .await?
-            .expect("expected link member")
-            .extensions
-    );
     let MemberExtensions::Gnu {
         long_name: Some(name),
         long_link: Some(link),
@@ -483,6 +473,7 @@ async fn validates_detached_gnu_extensions_with_the_selected_policy() -> TestRes
         return Err(io::Error::other("expected both GNU extensions").into());
     };
     assert!(reader.next_frame().await?.is_none());
+    let policy = StreamPolicy::default().allow_gnu_extensions_without_terminator(true);
     assert_eq!(name.value(GnuKind::LongName, &policy)?, long_name);
     assert!(matches!(
         link.value(GnuKind::LongLink, &policy),

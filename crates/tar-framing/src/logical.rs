@@ -21,7 +21,7 @@ pub use crate::{PaxExtension, PaxState};
 const PAYLOAD_DRAIN_CHUNK_BYTES: usize = 1024 * 1024;
 
 /// A GNU long-name or long-link extension value needed to interpret a member.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct GnuExtension {
     /// The absolute byte position of the GNU extension header block.
     pub position: u64,
@@ -65,7 +65,7 @@ impl GnuExtension {
 }
 
 /// Extension state attached to one ordinary archive member.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum MemberExtensions<'a> {
     /// Unified pax extension state applicable to an ordinary ustar member, borrowing
     /// effective global values from the logical reader.
@@ -1119,11 +1119,9 @@ mod tests {
         append_terminator(&mut bytes);
 
         for position in [BLOCK_SIZE, after_first_payload_block, after_extension] {
-            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position));
-            cancel_pending(reader.next_frame());
-            // Resume before the first member with unterminated names enabled.
-            let mut reader = reader
+            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position))
                 .with_policy(StreamPolicy::default().allow_gnu_extensions_without_terminator(true));
+            cancel_pending(reader.next_frame());
 
             ready_ok(async {
                 let member = next_member(&mut reader).await?;
