@@ -99,7 +99,7 @@ use crate::{
 };
 
 /// Represents a single non-terminator physical block in a tar stream.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Frame {
     /// A local or global pax extended header block.
     Pax(PaxFrame),
@@ -353,7 +353,7 @@ pub enum DataOwner {
 ///
 /// This can be "real" data for e.g. a file member, or it can be the payload of a pax
 /// or GNU header.
-#[derive(Clone, Debug, Eq)]
+#[derive(Clone, Debug)]
 pub struct DataFrame {
     /// The absolute byte position of this block in the source stream.
     pub position: u64,
@@ -379,17 +379,6 @@ impl DataFrame {
         self.completed_pax_extension
             .as_ref()
             .map(PaxExtension::records)
-    }
-}
-
-impl PartialEq for DataFrame {
-    fn eq(&self, other: &Self) -> bool {
-        // The extension header position belongs to an earlier frame.
-        self.position == other.position
-            && self.len == other.len
-            && self.owner == other.owner
-            && self.block == other.block
-            && self.completed_pax_records() == other.completed_pax_records()
     }
 }
 
@@ -1715,25 +1704,6 @@ mod tests {
         assert_eq!(header.effective_size, 513);
         let last = data_frame(&frames, 5);
         assert_eq!(last.len, 1);
-    }
-
-    #[test]
-    fn compares_final_pax_data_by_block_and_completed_records() {
-        // Pad the numeric value with leading zeros so the same final data block
-        // can come from extension headers at different archive positions.
-        let final_data = |prefix: &[u8], keyword, zero_blocks| {
-            let mut bytes = prefix.to_vec();
-            append_pax(
-                &mut bytes,
-                b'g',
-                &record(keyword, &"0".repeat(zero_blocks * BLOCK_SIZE)),
-            );
-            append_terminator(&mut bytes);
-            data_frame(&collect(bytes, BLOCK_SIZE), 4).clone()
-        };
-        let uid = final_data(&[], "uid", 3);
-        assert_eq!(uid, final_data(&header(b'0', 0), "uid", 2));
-        assert_ne!(uid, final_data(&[], "gid", 3));
     }
 
     #[test]
