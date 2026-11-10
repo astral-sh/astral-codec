@@ -720,8 +720,6 @@ fn decimal_u64(value: &str) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use std::ptr;
-
     use super::*;
     use crate::test_support::{raw_record, record};
 
@@ -849,22 +847,6 @@ mod tests {
                 (11, PaxKind::Local),
             ]
         );
-    }
-
-    #[test]
-    fn updates_effective_global_state_in_place() {
-        let physical_records = Arc::new(PaxRecords(vec![comment("initial")]));
-        let mut active = None;
-        physical_records.apply_global(&mut active);
-        let initial_state = ptr::from_ref(active.as_ref().expect("global state should exist"));
-
-        PaxRecords(vec![vendor("attribute", "value")]).apply_global(&mut active);
-
-        assert_eq!(
-            ptr::from_ref(active.as_ref().expect("global state should exist")),
-            initial_state
-        );
-        assert_eq!(physical_records.as_slice(), [comment("initial")]);
     }
 
     #[test]

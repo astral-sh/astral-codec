@@ -1134,7 +1134,7 @@ mod tests {
 
         ready_ok(async {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
-            {
+            let original_extension = {
                 let member = next_member(&mut reader).await?;
                 let state = pax_state(&member).expect("expected pax member metadata");
                 let extensions = state.extensions().collect::<Vec<_>>();
@@ -1145,7 +1145,8 @@ mod tests {
                     state.effective_record(&PaxKeyword::Comment),
                     Some(&PaxRecord::Comment(PaxValue::Value("first".into())))
                 );
-            }
+                extensions[0].clone()
+            };
             {
                 let member = next_member(&mut reader).await?;
                 let state = pax_state(&member).expect("expected pax member metadata");
@@ -1164,6 +1165,10 @@ mod tests {
             assert_eq!(
                 state.effective_record(&PaxKeyword::Comment),
                 Some(&PaxRecord::Comment(PaxValue::Value("replacement".into())))
+            );
+            assert_eq!(
+                original_extension.records(),
+                [PaxRecord::Comment(PaxValue::Value("first".into()))]
             );
             Ok(())
         });
