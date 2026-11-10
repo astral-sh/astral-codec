@@ -74,7 +74,13 @@
 //! end note
 //! ```
 
-use std::{future::poll_fn, ops::Range, pin::Pin, sync::Arc};
+use std::{
+    future::poll_fn,
+    ops::Range,
+    pin::Pin,
+    sync::Arc,
+    task::{Context, Poll, ready},
+};
 
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -600,7 +606,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 }
                 _ => {}
             }
-            let position = self.fill_block().await?;
+            let position = poll_fn(|context| self.poll_fill_block(context)).await?;
             if let Some(frame) = self.process_block(position, self.block)? {
                 return Ok(Some(frame));
             }
@@ -637,7 +643,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 chunk.buffer.clear();
             }
         }
-        let position = self.fill_block().await?;
+        let position = poll_fn(|context| self.poll_fill_block(context)).await?;
         let meaningful_len = remaining.min(BLOCK_SIZE as u64) as usize;
         self.state = member_payload_state(remaining - meaningful_len as u64);
         Ok(Some((position, meaningful_len)))
@@ -693,10 +699,14 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             chunk.buffer[..len].copy_from_slice(&self.block[..len]);
             chunk.unread.end = len;
         }
-        let physical_len = self
-            .input
-            .read_blocks(&mut chunk.buffer[..read_len], &mut chunk.unread.end)
-            .await?;
+        let physical_len = poll_fn(|context| {
+            self.input.poll_read_blocks(
+                context,
+                &mut chunk.buffer[..read_len],
+                &mut chunk.unread.end,
+            )
+        })
+        .await?;
         let meaningful_len = remaining.min(physical_len as u64) as usize;
         let remaining = remaining - meaningful_len as u64;
         if physical_len < read_len {
@@ -741,17 +751,18 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
     }
 
     /// Fills `self.block` and returns its starting position.
-    async fn fill_block(&mut self) -> Result<u64, FrameError> {
+    fn poll_fill_block(&mut self, context: &mut Context<'_>) -> Poll<Result<u64, FrameError>> {
         let position = self.input.position;
-        let read = self
-            .input
-            .read_blocks(&mut self.block, &mut self.block_len)
-            .await?;
+        let read = ready!(self.input.poll_read_blocks(
+            context,
+            &mut self.block,
+            &mut self.block_len
+        ))?;
         if read == 0 {
-            return Err(self.handle_eof());
+            return Poll::Ready(Err(self.handle_eof()));
         }
         self.block_len = 0;
-        Ok(position)
+        Poll::Ready(Ok(position))
     }
 
     fn handle_eof(&mut self) -> FrameError {
@@ -1155,13 +1166,20 @@ struct BlockReader<R> {
 impl<R: AsyncRead + Unpin> BlockReader<R> {
     /// Fills a block-aligned buffer or stops at EOF. Returns the length in bytes
     /// of all complete blocks, including any retained from a wider read.
-    async fn read_blocks(
+    /// Polls the reader directly to avoid a nested future per 512-byte block
+    /// when streaming a member with `next_block`.
+    fn poll_read_blocks(
         &mut self,
+        context: &mut Context<'_>,
         buffer: &mut [u8],
         filled: &mut usize,
-    ) -> Result<usize, FrameError> {
+    ) -> Poll<Result<usize, FrameError>> {
         while *filled < buffer.len() {
-            let read = self.read_more(buffer, *filled).await?;
+            let position = self.position_after(*filled)?;
+            let mut buffer = ReadBuf::new(&mut buffer[*filled..]);
+            ready!(Pin::new(&mut self.reader).poll_read(context, &mut buffer))
+                .map_err(|source| FrameError::at(position, FrameErrorInner::Io { source }))?;
+            let read = buffer.filled().len();
             if read == 0 {
                 break;
             }
@@ -1171,12 +1189,12 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
         let complete_len = *filled - partial_len;
         self.position = self.position_after(complete_len)?;
         if complete_len < buffer.len() && partial_len != 0 {
-            return Err(FrameError::at(
+            return Poll::Ready(Err(FrameError::at(
                 self.position,
                 FrameErrorInner::IncompleteBlock { read: partial_len },
-            ));
+            )));
         }
-        Ok(complete_len)
+        Poll::Ready(Ok(complete_len))
     }
 
     async fn read_padding(
@@ -1188,7 +1206,7 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
         while !self.position.is_multiple_of(record_size) {
             let partial = (self.position % BLOCK_SIZE as u64) as usize;
             let buffer = &mut block[..BLOCK_SIZE - partial];
-            let read = self.read_more(buffer, 0).await?;
+            let read = self.read_once(buffer).await?;
             if read == 0 {
                 if partial != 0 {
                     return Err(FrameError::at(
@@ -1207,19 +1225,17 @@ impl<R: AsyncRead + Unpin> BlockReader<R> {
             self.position = self.position_after(read)?;
         }
         // At the record boundary even one more byte exceeds the padding limit.
-        if self.read_more(&mut block[..1], 0).await? != 0 {
+        if self.read_once(&mut block[..1]).await? != 0 {
             return Err(FrameError::at(self.position, FrameErrorInner::TrailingData));
         }
         Ok(())
     }
 
-    /// Reads once after the `filled` bytes already buffered at `self.position`.
-    async fn read_more(&mut self, buffer: &mut [u8], filled: usize) -> Result<usize, FrameError> {
-        let position = self.position_after(filled)?;
-        let mut buffer = ReadBuf::new(&mut buffer[filled..]);
+    async fn read_once(&mut self, buffer: &mut [u8]) -> Result<usize, FrameError> {
+        let mut buffer = ReadBuf::new(buffer);
         poll_fn(|cx| Pin::new(&mut self.reader).poll_read(cx, &mut buffer))
             .await
-            .map_err(|source| FrameError::at(position, FrameErrorInner::Io { source }))?;
+            .map_err(|source| FrameError::at(self.position, FrameErrorInner::Io { source }))?;
         Ok(buffer.filled().len())
     }
 
