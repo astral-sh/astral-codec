@@ -74,13 +74,7 @@
 //! end note
 //! ```
 
-use std::{
-    future::poll_fn,
-    ops::Range,
-    pin::Pin,
-    sync::Arc,
-    task::{Context, Poll, ready},
-};
+use std::{future::poll_fn, ops::Range, pin::Pin, sync::Arc};
 
 use tokio::io::{AsyncRead, ReadBuf};
 
@@ -590,8 +584,26 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
     /// this reader, so every subsequent call also returns [`None`]. Cancelling
     /// this operation retains any partial block for the next call.
     pub async fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
-        let result = poll_fn(|context| self.poll_next_frame(context)).await;
+        let result = self.next_frame_inner().await;
         self.fail_on_error(result)
+    }
+
+    async fn next_frame_inner(&mut self) -> Result<Option<Frame>, FrameError> {
+        loop {
+            match self.state {
+                State::Complete | State::Failed => return Ok(None),
+                State::ReadingPadding { blocking_factor } => {
+                    self.read_padding(blocking_factor).await?;
+                    self.state = State::Complete;
+                    return Ok(None);
+                }
+                _ => {}
+            }
+            let position = self.fill_block().await?;
+            if let Some(frame) = self.process_block(position, self.block)? {
+                return Ok(Some(frame));
+            }
+        }
     }
 
     /// Reads one ordinary-member payload block without constructing a [`Frame`].
@@ -624,7 +636,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 chunk.buffer.clear();
             }
         }
-        let position = poll_fn(|context| self.poll_fill_block(context)).await?;
+        let position = self.fill_block().await?;
         let meaningful_len = remaining.min(BLOCK_SIZE as u64) as usize;
         self.state = member_payload_state(remaining - meaningful_len as u64);
         Ok(Some((position, meaningful_len)))
@@ -680,15 +692,12 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             chunk.buffer[..len].copy_from_slice(&self.block[..len]);
             chunk.unread.end = len;
         }
-        let physical_len = poll_fn(|context| {
-            poll_read_blocks(
-                context,
-                &mut self.inner,
-                &mut self.position,
-                &mut chunk.buffer[..read_len],
-                &mut chunk.unread.end,
-            )
-        })
+        let physical_len = read_blocks(
+            &mut self.inner,
+            &mut self.position,
+            &mut chunk.buffer[..read_len],
+            &mut chunk.unread.end,
+        )
         .await?;
         let meaningful_len = remaining.min(physical_len as u64) as usize;
         let remaining = remaining - meaningful_len as u64;
@@ -734,20 +743,20 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
     }
 
     /// Fills `self.block` and returns its starting position.
-    fn poll_fill_block(&mut self, cx: &mut Context<'_>) -> Poll<Result<u64, FrameError>> {
+    async fn fill_block(&mut self) -> Result<u64, FrameError> {
         let position = self.position;
-        let read = ready!(poll_read_blocks(
-            cx,
+        let read = read_blocks(
             &mut self.inner,
             &mut self.position,
             &mut self.block,
             &mut self.block_len,
-        ))?;
+        )
+        .await?;
         if read == 0 {
-            return Poll::Ready(Err(self.handle_eof()));
+            return Err(self.handle_eof());
         }
         self.block_len = 0;
-        Poll::Ready(Ok(position))
+        Ok(position)
     }
 
     fn handle_eof(&mut self) -> FrameError {
@@ -1140,67 +1149,34 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         Ok(Frame::Header(frame))
     }
 
-    fn poll_padding(
-        &mut self,
-        context: &mut Context<'_>,
-        blocking_factor: u8,
-    ) -> Poll<Result<(), FrameError>> {
+    async fn read_padding(&mut self, blocking_factor: u8) -> Result<(), FrameError> {
         let record_size = u64::from(blocking_factor) * BLOCK_SIZE as u64;
-        loop {
+        while !self.position.is_multiple_of(record_size) {
             let partial = (self.position % BLOCK_SIZE as u64) as usize;
-            let at_record_end = self.position.is_multiple_of(record_size);
-            // At the record boundary a single byte is enough to rule out EOF.
-            let len = if at_record_end {
-                1
-            } else {
-                BLOCK_SIZE - partial
-            };
-            let mut buffer = ReadBuf::new(&mut self.block[..len]);
-            ready!(Pin::new(&mut self.inner).poll_read(context, &mut buffer))
-                .map_err(|source| FrameError::at(self.position, FrameErrorInner::Io { source }))?;
-            let bytes = buffer.filled();
-            if bytes.is_empty() {
+            let buffer = &mut self.block[..BLOCK_SIZE - partial];
+            let read = read_once(&mut self.inner, buffer, self.position).await?;
+            if read == 0 {
                 if partial != 0 {
-                    return Poll::Ready(Err(FrameError::at(
+                    return Err(FrameError::at(
                         self.position - partial as u64,
                         FrameErrorInner::IncompleteBlock { read: partial },
-                    )));
+                    ));
                 }
-                return Poll::Ready(Ok(()));
+                return Ok(());
             }
-            if let Some(offset) = bytes.iter().position(|byte| at_record_end || *byte != 0) {
-                return Poll::Ready(Err(FrameError::at(
+            if let Some(offset) = buffer[..read].iter().position(|byte| *byte != 0) {
+                return Err(FrameError::at(
                     checked_position(self.position, offset)?,
                     FrameErrorInner::TrailingData,
-                )));
+                ));
             }
-            self.position = checked_position(self.position, bytes.len())?;
+            self.position = checked_position(self.position, read)?;
         }
-    }
-
-    fn poll_next_frame(
-        &mut self,
-        context: &mut Context<'_>,
-    ) -> Poll<Result<Option<Frame>, FrameError>> {
-        loop {
-            match self.state {
-                State::Complete | State::Failed => return Poll::Ready(Ok(None)),
-                State::ReadingPadding { blocking_factor } => {
-                    ready!(self.poll_padding(context, blocking_factor))?;
-                    self.state = State::Complete;
-                    return Poll::Ready(Ok(None));
-                }
-                _ => {}
-            }
-
-            let position = ready!(self.poll_fill_block(context))?;
-
-            match self.process_block(position, self.block) {
-                Ok(Some(frame)) => return Poll::Ready(Ok(Some(frame))),
-                Ok(None) => continue,
-                Err(error) => return Poll::Ready(Err(error)),
-            }
+        // At the record boundary even one more byte exceeds the padding limit.
+        if read_once(&mut self.inner, &mut self.block[..1], self.position).await? != 0 {
+            return Err(FrameError::at(self.position, FrameErrorInner::TrailingData));
         }
+        Ok(())
     }
 }
 
@@ -1228,43 +1204,48 @@ fn trim_nul(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
+async fn read_once<R: AsyncRead + Unpin>(
+    reader: &mut R,
+    buffer: &mut [u8],
+    position: u64,
+) -> Result<usize, FrameError> {
+    let mut buffer = ReadBuf::new(buffer);
+    poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, &mut buffer))
+        .await
+        .map_err(|source| FrameError::at(position, FrameErrorInner::Io { source }))?;
+    Ok(buffer.filled().len())
+}
+
 /// Fills a block-aligned buffer or stops at EOF. Returns the length in bytes
 /// of all complete blocks, including any retained from a wider read.
-fn poll_read_blocks<R: AsyncRead + Unpin>(
-    context: &mut Context<'_>,
+async fn read_blocks<R: AsyncRead + Unpin>(
     reader: &mut R,
     position: &mut u64,
     buffer: &mut [u8],
     filled: &mut usize,
-) -> Poll<Result<usize, FrameError>> {
-    let result = loop {
-        if *filled >= buffer.len() {
-            break Ok(());
+) -> Result<usize, FrameError> {
+    while *filled < buffer.len() {
+        let read = read_once(
+            reader,
+            &mut buffer[*filled..],
+            checked_position(*position, *filled)?,
+        )
+        .await?;
+        if read == 0 {
+            break;
         }
-        let mut buffer = ReadBuf::new(&mut buffer[*filled..]);
-        match ready!(Pin::new(&mut *reader).poll_read(context, &mut buffer)) {
-            Err(source) => break Err(source),
-            Ok(()) if buffer.filled().is_empty() => break Ok(()),
-            Ok(()) => *filled += buffer.filled().len(),
-        }
-    };
+        *filled += read;
+    }
     let partial_len = *filled % BLOCK_SIZE;
     let complete_len = *filled - partial_len;
-    let start = *position;
-    *position = checked_position(start, complete_len)?;
-    if let Err(source) = result {
-        return Poll::Ready(Err(FrameError::at(
-            checked_position(start, *filled)?,
-            FrameErrorInner::Io { source },
-        )));
-    }
+    *position = checked_position(*position, complete_len)?;
     if complete_len < buffer.len() && partial_len != 0 {
-        return Poll::Ready(Err(FrameError::at(
+        return Err(FrameError::at(
             *position,
             FrameErrorInner::IncompleteBlock { read: partial_len },
-        )));
+        ));
     }
-    Poll::Ready(Ok(complete_len))
+    Ok(complete_len)
 }
 
 fn member_payload_state(remaining: u64) -> State {

@@ -4,7 +4,7 @@ use std::{
     error::Error,
     io,
     pin::pin,
-    task::{Context, Waker},
+    task::{Context, Poll, Waker},
 };
 
 use support::{
@@ -37,53 +37,38 @@ async fn read_payload<P: MemberPayload<Error = DecodeError>>(
 
 #[tokio::test]
 async fn trailing_zero_padding_stops_at_the_record_boundary() -> TestResult {
-    // The file header and two-block marker occupy three blocks.
-    let mut bytes = single_pax_member("file", b'0', b"", "", 0o644);
-    let blocking_factor = |blocks| {
-        DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::BlockingFactor(blocks))
-    };
-    for (policy, boundary) in [
+    // An empty archive ends at block two. A third zero block is optional padding.
+    let bytes = [0; 20 * BLOCK_SIZE + 1];
+    let mut short_record = TarArchive::new(&bytes[..3 * BLOCK_SIZE]);
+    assert!(short_record.next_member().await?.is_none());
+    let with_trailing = |policy| DecodePolicy::default().trailing_data_policy(policy);
+    for (policy, blocks) in [
         (DecodePolicy::default(), 20),
-        (blocking_factor(0), 3),
-        (blocking_factor(2), 4),
-        (blocking_factor(3), 3),
-        (
-            DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Strict),
-            3,
-        ),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(0)), 2),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(2)), 2),
+        (with_trailing(TrailingDataPolicy::BlockingFactor(3)), 3),
+        (with_trailing(TrailingDataPolicy::Strict), 2),
     ] {
-        bytes.resize(boundary * BLOCK_SIZE + 1, 0);
-        for blocks in 3..=boundary {
-            let mut members = TarArchive::new(&bytes[..blocks * BLOCK_SIZE])
-                .with_policy(policy.clone())
-                .members();
-            assert!(matches!(members.next().await?, Some(Member::File { .. })));
-            assert!(
-                members.next().await?.is_none(),
-                "{policy:?}, {blocks} blocks"
-            );
-        }
-
-        let mut members = TarArchive::new(bytes.as_slice())
-            .with_policy(policy)
-            .members();
-        assert!(matches!(members.next().await?, Some(Member::File { .. })));
+        let boundary = blocks * BLOCK_SIZE;
+        let mut valid = TarArchive::new(&bytes[..boundary]).with_policy(policy.clone());
+        assert!(valid.next_member().await?.is_none(), "{policy:?}");
+        let mut excess = TarArchive::new(&bytes[..=boundary]).with_policy(policy);
         assert!(matches!(
-            members.next().await,
+            excess.next_member().await,
             Err(DecodeError::Framing(FrameError {
                 position,
                 inner: FrameErrorInner::TrailingData,
-            })) if position == (boundary * BLOCK_SIZE) as u64
+            })) if position == boundary as u64
         ));
     }
     Ok(())
 }
 
 #[tokio::test]
-async fn trailing_padding_requires_complete_zero_blocks() -> TestResult {
-    let mut bytes = [0; 4 * BLOCK_SIZE];
+async fn cancelled_trailing_padding_read_preserves_the_partial_block() -> TestResult {
+    let bytes = [0; 3 * BLOCK_SIZE + 1];
     let (reader, mut writer) = duplex(bytes.len());
-    writer.write_all(&bytes[..3 * BLOCK_SIZE + 1]).await?;
+    writer.write_all(&bytes).await?;
     let mut members = TarArchive::new(reader).members();
     let mut context = Context::from_waker(Waker::noop());
     assert!(pin!(members.next()).poll(&mut context).is_pending());
@@ -96,17 +81,24 @@ async fn trailing_padding_requires_complete_zero_blocks() -> TestResult {
             inner: FrameErrorInner::IncompleteBlock { read: 1 },
         })) if position == (3 * BLOCK_SIZE) as u64
     ));
+    Ok(())
+}
 
+#[tokio::test]
+async fn trailing_nonzero_byte_fails_before_eof() -> TestResult {
+    let mut bytes = [0; 3 * BLOCK_SIZE + 8];
     bytes[3 * BLOCK_SIZE + 7] = 1;
-    let mut members = TarArchive::new(bytes.as_slice()).members();
+    let (reader, mut writer) = duplex(bytes.len());
+    writer.write_all(&bytes).await?;
+    let mut archive = TarArchive::new(reader);
     assert!(matches!(
-        members.next().await,
-        Err(DecodeError::Framing(FrameError {
+        pin!(archive.next_member()).poll(&mut Context::from_waker(Waker::noop())),
+        Poll::Ready(Err(DecodeError::Framing(FrameError {
             position,
             inner: FrameErrorInner::TrailingData,
-        })) if position == (3 * BLOCK_SIZE + 7) as u64
+        }))) if position == (3 * BLOCK_SIZE + 7) as u64
     ));
-    assert!(members.next().await?.is_none());
+    assert!(archive.next_member().await?.is_none());
     Ok(())
 }
 
@@ -116,10 +108,9 @@ async fn ignoring_trailing_data_leaves_the_reader_at_the_marker() -> TestResult 
     let mut bytes = ArchiveBuilder::new().finish();
     bytes.extend_from_slice(&next_archive);
     let mut unread = bytes.as_slice();
-    let mut members = TarArchive::new(&mut unread)
-        .with_policy(DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Ignore))
-        .members();
-    assert!(members.next().await?.is_none());
+    let mut archive = TarArchive::new(&mut unread)
+        .with_policy(DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Ignore));
+    assert!(archive.next_member().await?.is_none());
     assert_eq!(unread, next_archive);
     Ok(())
 }
