@@ -221,9 +221,7 @@ async fn dump_logical<R: AsyncRead + Unpin, W: Write>(
         } else {
             None
         };
-        render_member(output, index, &member, path.as_ref(), link_path.as_deref())?;
-        drop(path);
-        drop(link_path);
+        render_member(output, index, &member, path, link_path)?;
 
         loop {
             match member.payload.next_block().await {
@@ -365,11 +363,8 @@ fn render_member<R>(
             long_name,
             long_link,
         } => {
-            if let Some(metadata) = long_name {
-                render_gnu_metadata(output, GnuKind::LongName, metadata)?;
-            }
-            if let Some(metadata) = long_link {
-                render_gnu_metadata(output, GnuKind::LongLink, metadata)?;
+            for metadata in long_name.iter().chain(long_link) {
+                render_gnu_metadata(output, metadata)?;
             }
         }
     }
@@ -398,15 +393,11 @@ fn render_optional_bytes(output: &mut impl Write, value: &[u8]) -> io::Result<()
     }
 }
 
-fn render_gnu_metadata(
-    output: &mut impl Write,
-    kind: GnuKind,
-    metadata: &GnuExtension,
-) -> io::Result<()> {
+fn render_gnu_metadata(output: &mut impl Write, metadata: &GnuExtension) -> io::Result<()> {
     write!(
         output,
         "        gnu {} @{} payload=",
-        gnu_kind_name(kind),
+        gnu_kind_name(metadata.kind),
         metadata.position
     )?;
     render_bytes(output, &metadata.payload)?;
