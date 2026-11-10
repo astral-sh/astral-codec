@@ -178,11 +178,13 @@ impl From<ArchiveFormat> for NumericFormat {
     }
 }
 
-/// Parse a number from the given bytes in the given numeric encoding.
-pub(crate) fn parse_number(format: NumericFormat, bytes: &[u8]) -> Option<u64> {
-    match format {
-        NumericFormat::Octal => parse_octal(bytes),
-        NumericFormat::Gnu => parse_gnu_number(bytes),
+impl NumericFormat {
+    /// Parses a numeric header field in this encoding.
+    pub(crate) fn parse(self, bytes: &[u8]) -> Option<u64> {
+        match self {
+            Self::Octal => parse_octal(bytes),
+            Self::Gnu => parse_gnu_number(bytes),
+        }
     }
 }
 
