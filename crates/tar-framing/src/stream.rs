@@ -87,8 +87,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::{
     ArchiveFormat, BLOCK_SIZE, Block, DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
     DEFAULT_MAX_GNU_EXTENSION_SIZE, DEFAULT_MAX_PAX_EXTENSION_SIZE, FrameError, FrameErrorInner,
-    GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue,
-    TrailingDataPolicy, UstarKind,
+    GnuKind, HdrCharset, PaxError, PaxExtension, PaxKeyword, PaxKind, PaxRecord, PaxState,
+    PaxValue, TrailingDataPolicy, UstarKind,
     header::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
         MODE_RANGE, MTIME_RANGE, NAME_RANGE, NumericFormat, PREFIX_RANGE, SIZE_RANGE,
@@ -99,7 +99,7 @@ use crate::{
 };
 
 /// Represents a single non-terminator physical block in a tar stream.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub enum Frame {
     /// A local or global pax extended header block.
     Pax(PaxFrame),
@@ -353,7 +353,7 @@ pub enum DataOwner {
 ///
 /// This can be "real" data for e.g. a file member, or it can be the payload of a pax
 /// or GNU header.
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug)]
 pub struct DataFrame {
     /// The absolute byte position of this block in the source stream.
     pub position: u64,
@@ -363,11 +363,11 @@ pub struct DataFrame {
     pub len: usize,
     /// Whether this block carries extension or member data.
     pub owner: DataOwner,
-    /// Parsed records completed by this final pax payload block.
+    /// Positioned extension completed by this final pax payload block.
     ///
     /// This is `Some` only for the last data block belonging to a local or
     /// global pax header; other payload data carries `None`.
-    completed_pax_records: Option<SharedPaxRecords>,
+    pub(super) completed_pax_extension: Option<PaxExtension>,
 }
 
 impl DataFrame {
@@ -376,13 +376,9 @@ impl DataFrame {
     /// This returns `Some` only for the last data block belonging to a local
     /// or global pax header.
     pub fn completed_pax_records(&self) -> Option<&[PaxRecord]> {
-        self.completed_pax_records
-            .as_deref()
-            .map(PaxRecords::as_slice)
-    }
-
-    pub(crate) fn into_completed_pax_records(self) -> Option<SharedPaxRecords> {
-        self.completed_pax_records
+        self.completed_pax_extension
+            .as_ref()
+            .map(PaxExtension::records)
     }
 }
 
@@ -850,7 +846,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 let len = remaining.min(BLOCK_SIZE as u64) as usize;
                 payload.extend_from_slice(&block[..len]);
                 remaining -= len as u64;
-                let completed_pax_records = if remaining == 0 {
+                let completed_pax_extension = if remaining == 0 {
                     let records = Arc::new(
                         PaxRecords::parse(
                             &payload,
@@ -873,7 +869,11 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                             self.state = State::AwaitingHeader;
                         }
                     }
-                    Some(records)
+                    Some(PaxExtension {
+                        position: header_position,
+                        kind,
+                        records,
+                    })
                 } else {
                     self.state = State::ReadingPax {
                         kind,
@@ -888,7 +888,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                     block,
                     len,
                     owner: DataOwner::Pax(kind),
-                    completed_pax_records,
+                    completed_pax_extension,
                 })))
             }
             State::AwaitingUstarHeader { records } => {
@@ -931,7 +931,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                     block,
                     len,
                     owner: DataOwner::Gnu(kind),
-                    completed_pax_records: None,
+                    completed_pax_extension: None,
                 })))
             }
             State::AwaitingGnuMember { pending } => {
@@ -955,7 +955,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                     block,
                     len,
                     owner: DataOwner::Member,
-                    completed_pax_records: None,
+                    completed_pax_extension: None,
                 })))
             }
             State::AwaitingSecondZero => {

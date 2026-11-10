@@ -256,7 +256,6 @@ struct PayloadReader<R> {
 /// Logical member extension state retained across cancellation of [`TarReader::next_frame`].
 #[derive(Default)]
 struct PendingExtensions {
-    pax_header_position: Option<u64>,
     global_pax: Vec<PaxExtension>,
     local_pax: Option<PaxExtension>,
     gnu_long_name: Option<GnuExtension>,
@@ -284,20 +283,16 @@ impl PendingExtensions {
             )
         };
         match frame.owner {
-            DataOwner::Pax(kind) => {
-                let position = self.pax_header_position.ok_or_else(unattached)?;
-                if let Some(records) = frame.into_completed_pax_records() {
-                    self.pax_header_position = None;
-                    match kind {
-                        PaxKind::Global => {
-                            records.apply_global(global_pax_records);
-                            self.global_pax
-                                .push(PaxExtension::new(position, kind, records));
-                        }
-                        PaxKind::Local => {
-                            self.local_pax = Some(PaxExtension::new(position, kind, records));
-                        }
+            DataOwner::Pax(_) => {
+                let Some(extension) = frame.completed_pax_extension else {
+                    return Ok(());
+                };
+                match extension.kind {
+                    PaxKind::Global => {
+                        extension.records.apply_global(global_pax_records);
+                        self.global_pax.push(extension);
                     }
+                    PaxKind::Local => self.local_pax = Some(extension),
                 }
             }
             DataOwner::Gnu(kind) => {
@@ -423,9 +418,8 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
         let pending = &mut self.pending_extensions;
         while let Some(frame) = self.payload.stream.next_frame().await? {
             match frame {
-                Frame::Pax(frame) => {
-                    pending.pax_header_position = Some(frame.position);
-                }
+                // The final PAX data frame carries the completed extension.
+                Frame::Pax(_) => {}
                 Frame::Gnu(frame) => {
                     *pending.gnu_extension_mut(frame.kind) = Some(GnuExtension {
                         position: frame.position,
