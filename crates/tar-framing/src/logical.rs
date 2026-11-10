@@ -270,6 +270,67 @@ impl PendingExtensions {
             GnuKind::LongLink => &mut self.gnu_long_link,
         }
     }
+
+    fn push_data(
+        &mut self,
+        frame: DataFrame,
+        global_pax_records: &mut Option<GlobalPaxRecords>,
+    ) -> Result<(), FrameError> {
+        let unattached = || {
+            FrameError::unexpected_order(
+                frame.position,
+                "extension header",
+                "unattached payload data",
+            )
+        };
+        match frame.owner {
+            DataOwner::Pax(kind) => {
+                let position = self.pax_header_position.ok_or_else(unattached)?;
+                if let Some(records) = frame.into_completed_pax_records() {
+                    self.pax_header_position = None;
+                    match kind {
+                        PaxKind::Global => {
+                            records.apply_global(global_pax_records);
+                            self.global_pax
+                                .push(PaxExtension::new(position, kind, records));
+                        }
+                        PaxKind::Local => {
+                            self.local_pax = Some(PaxExtension::new(position, kind, records));
+                        }
+                    }
+                }
+            }
+            DataOwner::Gnu(kind) => {
+                let extension = self
+                    .gnu_extension_mut(kind)
+                    .as_mut()
+                    .ok_or_else(unattached)?;
+                extension
+                    .payload
+                    .extend_from_slice(&frame.block[..frame.len]);
+            }
+            DataOwner::Member => return Err(unattached()),
+        }
+        Ok(())
+    }
+
+    fn into_member_extensions(
+        self,
+        format: ArchiveFormat,
+        global_pax_records: Option<&GlobalPaxRecords>,
+    ) -> MemberExtensions<'_> {
+        match format {
+            ArchiveFormat::Pax => MemberExtensions::Pax(PaxState::new(
+                global_pax_records,
+                self.global_pax,
+                self.local_pax,
+            )),
+            ArchiveFormat::Gnu => MemberExtensions::Gnu {
+                long_name: self.gnu_long_name,
+                long_link: self.gnu_long_link,
+            },
+        }
+    }
 }
 
 #[derive(Default)]
@@ -353,20 +414,10 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
         let Some(header) = header? else {
             return Ok(None);
         };
-        let extensions = match header.format {
-            ArchiveFormat::Pax => MemberExtensions::Pax(PaxState::new(
-                self.global_pax_records.as_ref(),
-                pending.global_pax,
-                pending.local_pax,
-            )),
-            ArchiveFormat::Gnu => MemberExtensions::Gnu {
-                long_name: pending.gnu_long_name,
-                long_link: pending.gnu_long_link,
-            },
-        };
         Ok(Some(MemberFrame {
             header: self.header_storage.update(&header),
-            extensions,
+            extensions: pending
+                .into_member_extensions(header.format, self.global_pax_records.as_ref()),
             payload: MemberPayload {
                 reader: &mut self.payload,
             },
@@ -377,67 +428,23 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
         if matches!(self.payload.stream.state, State::ReadingMember { .. }) {
             self.payload.drain_payload().await?;
         }
+        let pending = &mut self.pending_extensions;
         while let Some(frame) = self.payload.stream.next_frame().await? {
             match frame {
                 Frame::Pax(frame) => {
-                    self.pending_extensions.pax_header_position = Some(frame.position);
+                    pending.pax_header_position = Some(frame.position);
                 }
                 Frame::Gnu(frame) => {
-                    *self.pending_extensions.gnu_extension_mut(frame.kind) = Some(GnuExtension {
+                    *pending.gnu_extension_mut(frame.kind) = Some(GnuExtension {
                         position: frame.position,
                         payload: Vec::new(),
                     });
                 }
-                Frame::Data(frame) => self.process_extension_data(frame)?,
+                Frame::Data(frame) => pending.push_data(frame, &mut self.global_pax_records)?,
                 Frame::Header(header) => return Ok(Some(header)),
             }
         }
         Ok(None)
-    }
-
-    fn process_extension_data(&mut self, frame: DataFrame) -> Result<(), FrameError> {
-        let unattached = || {
-            FrameError::unexpected_order(
-                frame.position,
-                "extension header",
-                "unattached payload data",
-            )
-        };
-        match frame.owner {
-            DataOwner::Pax(kind) => {
-                let position = self
-                    .pending_extensions
-                    .pax_header_position
-                    .ok_or_else(unattached)?;
-                if let Some(records) = frame.into_completed_pax_records() {
-                    self.pending_extensions.pax_header_position = None;
-                    match kind {
-                        PaxKind::Global => {
-                            records.apply_global(&mut self.global_pax_records);
-                            self.pending_extensions
-                                .global_pax
-                                .push(PaxExtension::new(position, kind, records));
-                        }
-                        PaxKind::Local => {
-                            self.pending_extensions.local_pax =
-                                Some(PaxExtension::new(position, kind, records));
-                        }
-                    }
-                }
-            }
-            DataOwner::Gnu(kind) => {
-                let extension = self
-                    .pending_extensions
-                    .gnu_extension_mut(kind)
-                    .as_mut()
-                    .ok_or_else(unattached)?;
-                extension
-                    .payload
-                    .extend_from_slice(&frame.block[..frame.len]);
-            }
-            DataOwner::Member => return Err(unattached()),
-        }
-        Ok(())
     }
 }
 
@@ -1080,29 +1087,34 @@ mod tests {
     }
 
     #[test]
-    fn retains_global_pax_extension_across_cancelled_reads() {
+    fn retains_global_and_local_pax_extensions_across_cancelled_reads() {
         let mut bytes = Vec::new();
         let comment = "x".repeat(BLOCK_SIZE);
         append_pax(&mut bytes, b'g', &record("comment", &comment));
-        let after_extension_payload = bytes.len();
+        let local_position = bytes.len();
+        append_pax(&mut bytes, b'x', &record("path", "renamed"));
+        let member_position = bytes.len();
         append_block(&mut bytes, &header(b'0', 0));
         append_terminator(&mut bytes);
 
-        for pending_at in [BLOCK_SIZE, BLOCK_SIZE * 2, after_extension_payload] {
+        for pending_at in (BLOCK_SIZE..=member_position).step_by(BLOCK_SIZE) {
             let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), pending_at));
             cancel_pending(reader.next_frame());
 
             ready_ok(async {
                 let member = next_member(&mut reader).await?;
+                assert_eq!(member.effective_path()?, b"renamed");
                 let state = pax_state(&member).expect("expected pax member metadata");
                 let extensions = state.extensions().collect::<Vec<_>>();
-                assert_eq!(extensions.len(), 1);
+                assert_eq!(extensions.len(), 2);
                 assert_eq!(extensions[0].position, 0);
                 assert_eq!(extensions[0].kind, PaxKind::Global);
                 assert_eq!(
                     extensions[0].records(),
                     &[PaxRecord::Comment(PaxValue::Value(comment.as_str().into()))]
                 );
+                assert_eq!(extensions[1].position, local_position as u64);
+                assert_eq!(extensions[1].kind, PaxKind::Local);
                 Ok(())
             });
         }
