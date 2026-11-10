@@ -221,4 +221,7 @@ pub enum FrameErrorInner {
     /// The first zero terminator block was not followed by a second zero block.
     #[error("invalid end-of-archive marker: expected a second zero block")]
     InvalidEndMarker,
+    /// A byte after the end marker was nonzero or exceeded the permitted record padding.
+    #[error("unexpected data after the end-of-archive marker")]
+    TrailingData,
 }

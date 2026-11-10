@@ -1,7 +1,7 @@
 //! Lossless, block-oriented tar streaming.
 //!
-//! This API emits one frame for each accepted non-terminator physical
-//! tar block and preserves each source block verbatim.
+//! This API emits one frame for each physical tar block before the end marker
+//! and preserves each emitted block verbatim.
 //!
 //! The following Mermaid diagram describes the state machine:
 //!
@@ -60,8 +60,11 @@
 //! GnuBoundary --> AwaitingSecondZero: first zero block
 //! GnuHeader --> Failed: zero-length L or K
 //! AwaitingGnuMember --> Failed: zero-length or duplicate L or K
-//! AwaitingSecondZero --> Complete: second zero block
+//! AwaitingSecondZero --> Complete: second zero block, ignore trailing data
+//! AwaitingSecondZero --> ReadingPadding: second zero block, validate trailing data
 //! AwaitingSecondZero --> Failed: nonzero block or EOF
+//! ReadingPadding --> Complete: EOF at a block boundary
+//! ReadingPadding --> Failed: invalid or excess padding
 //! Complete --> [*]
 //! Failed --> [*]
 //!
@@ -84,7 +87,8 @@ use tokio::io::{AsyncRead, ReadBuf};
 use crate::{
     ArchiveFormat, BLOCK_SIZE, Block, DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
     DEFAULT_MAX_GNU_EXTENSION_SIZE, DEFAULT_MAX_PAX_EXTENSION_SIZE, FrameError, FrameErrorInner,
-    GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue, UstarKind,
+    GnuKind, HdrCharset, PaxError, PaxKeyword, PaxKind, PaxRecord, PaxState, PaxValue,
+    TrailingDataPolicy, UstarKind,
     header::{
         CHECKSUM_RANGE, GID_RANGE, GNAME_RANGE, GNU_IDENTITY, IDENTITY_RANGE, LINK_NAME_RANGE,
         MODE_RANGE, MTIME_RANGE, NAME_RANGE, NumericFormat, PREFIX_RANGE, SIZE_RANGE,
@@ -398,7 +402,9 @@ pub(super) enum State {
     ReadingMember { remaining: u64 },
     /// The first zero end marker was read; require the second zero block.
     AwaitingSecondZero,
-    /// A valid two-block end marker was consumed; no further input is examined.
+    /// Check for zero padding through the end of the final record and require EOF.
+    ReadingPadding { blocking_factor: u8 },
+    /// The end marker and any required trailing data checks are complete.
     Complete,
     /// An error has been emitted; subsequent polls return end-of-stream.
     Failed,
@@ -421,6 +427,7 @@ struct MemberChunk {
 /// Controls limits and compatibility accepted by a tar frame stream.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct StreamPolicy {
+    trailing_data_policy: TrailingDataPolicy,
     max_pax_extension_size: u64,
     max_global_pax_extensions_size: u64,
     allow_pax_hardlink_linkdata: bool,
@@ -433,6 +440,7 @@ pub struct StreamPolicy {
 impl Default for StreamPolicy {
     fn default() -> Self {
         Self {
+            trailing_data_policy: TrailingDataPolicy::default(),
             max_pax_extension_size: DEFAULT_MAX_PAX_EXTENSION_SIZE,
             max_global_pax_extensions_size: DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE,
             allow_pax_hardlink_linkdata: false,
@@ -445,6 +453,12 @@ impl Default for StreamPolicy {
 }
 
 impl StreamPolicy {
+    /// Sets the policy for data following the two-block end-of-archive marker.
+    pub fn trailing_data_policy(mut self, policy: TrailingDataPolicy) -> Self {
+        self.trailing_data_policy = policy;
+        self
+    }
+
     /// Sets the maximum size for each pax extension.
     ///
     /// A local or global header that declares a larger payload is rejected
@@ -571,7 +585,8 @@ impl<R> TarStream<R> {
 impl<R: AsyncRead + Unpin> TarStream<R> {
     /// Returns the next non-terminator physical archive frame.
     ///
-    /// Reaching the end of the archive returns [`None`]. A framing error fuses
+    /// Reaching the end of the archive returns [`None`] after applying the
+    /// configured [`TrailingDataPolicy`]. A framing error fuses
     /// this reader, so every subsequent call also returns [`None`]. Cancelling
     /// this operation retains any partial block for the next call.
     pub async fn next_frame(&mut self) -> Result<Option<Frame>, FrameError> {
@@ -760,9 +775,11 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 owner: DataOwner::Member,
                 remaining: *remaining,
             },
-            State::Complete | State::Failed => FrameErrorInner::UnexpectedEof {
-                expected: "no further input",
-            },
+            State::ReadingPadding { .. } | State::Complete | State::Failed => {
+                FrameErrorInner::UnexpectedEof {
+                    expected: "no further input",
+                }
+            }
         };
         FrameError::at(self.position, inner)
     }
@@ -899,14 +916,19 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 if !is_zero_block(&block) {
                     return Err(FrameError::at(position, FrameErrorInner::InvalidEndMarker));
                 }
-                self.state = State::Complete;
+                self.state = match self.policy.trailing_data_policy {
+                    TrailingDataPolicy::Strict => State::ReadingPadding { blocking_factor: 1 },
+                    TrailingDataPolicy::BlockingFactor(blocking_factor) => State::ReadingPadding {
+                        blocking_factor: blocking_factor.max(1),
+                    },
+                    TrailingDataPolicy::Ignore => State::Complete,
+                };
                 Ok(None)
             }
-            State::Complete => {
-                self.state = State::Complete;
+            state @ (State::ReadingPadding { .. } | State::Complete | State::Failed) => {
+                self.state = state;
                 Ok(None)
             }
-            State::Failed => Ok(None),
         }
     }
 
@@ -1118,13 +1140,57 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         Ok(Frame::Header(frame))
     }
 
+    fn poll_padding(
+        &mut self,
+        context: &mut Context<'_>,
+        blocking_factor: u8,
+    ) -> Poll<Result<(), FrameError>> {
+        let record_size = u64::from(blocking_factor) * BLOCK_SIZE as u64;
+        loop {
+            let partial = (self.position % BLOCK_SIZE as u64) as usize;
+            let at_record_end = self.position.is_multiple_of(record_size);
+            // At the record boundary a single byte is enough to rule out EOF.
+            let len = if at_record_end {
+                1
+            } else {
+                BLOCK_SIZE - partial
+            };
+            let mut buffer = ReadBuf::new(&mut self.block[..len]);
+            ready!(Pin::new(&mut self.inner).poll_read(context, &mut buffer))
+                .map_err(|source| FrameError::at(self.position, FrameErrorInner::Io { source }))?;
+            let bytes = buffer.filled();
+            if bytes.is_empty() {
+                if partial != 0 {
+                    return Poll::Ready(Err(FrameError::at(
+                        self.position - partial as u64,
+                        FrameErrorInner::IncompleteBlock { read: partial },
+                    )));
+                }
+                return Poll::Ready(Ok(()));
+            }
+            if let Some(offset) = bytes.iter().position(|byte| at_record_end || *byte != 0) {
+                return Poll::Ready(Err(FrameError::at(
+                    checked_position(self.position, offset)?,
+                    FrameErrorInner::TrailingData,
+                )));
+            }
+            self.position = checked_position(self.position, bytes.len())?;
+        }
+    }
+
     fn poll_next_frame(
         &mut self,
         context: &mut Context<'_>,
     ) -> Poll<Result<Option<Frame>, FrameError>> {
         loop {
-            if matches!(self.state, State::Complete | State::Failed) {
-                return Poll::Ready(Ok(None));
+            match self.state {
+                State::Complete | State::Failed => return Poll::Ready(Ok(None)),
+                State::ReadingPadding { blocking_factor } => {
+                    ready!(self.poll_padding(context, blocking_factor))?;
+                    self.state = State::Complete;
+                    return Poll::Ready(Ok(None));
+                }
+                _ => {}
             }
 
             let position = ready!(self.poll_fill_block(context))?;

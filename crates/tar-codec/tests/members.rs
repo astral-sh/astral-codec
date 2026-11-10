@@ -7,10 +7,13 @@ use std::{
     task::{Context, Waker},
 };
 
-use support::{ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum};
+use support::{
+    ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum,
+    single_pax_member,
+};
 use tar_codec::{
     Archive as _, DecodeError, DecodePolicy, DecodePolicyViolation, Member, MemberPayload,
-    PaxDecodePolicy, SpecialKind, TarArchive,
+    PaxDecodePolicy, SpecialKind, TarArchive, TrailingDataPolicy,
 };
 use tar_framing::{
     BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
@@ -30,6 +33,95 @@ async fn read_payload<P: MemberPayload<Error = DecodeError>>(
         data.extend_from_slice(&chunk);
     }
     Ok(data)
+}
+
+#[tokio::test]
+async fn trailing_zero_padding_stops_at_the_record_boundary() -> TestResult {
+    // The file header and two-block marker occupy three blocks.
+    let mut bytes = single_pax_member("file", b'0', b"", "", 0o644);
+    let blocking_factor = |blocks| {
+        DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::BlockingFactor(blocks))
+    };
+    for (policy, boundary) in [
+        (DecodePolicy::default(), 20),
+        (blocking_factor(0), 3),
+        (blocking_factor(2), 4),
+        (blocking_factor(3), 3),
+        (
+            DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Strict),
+            3,
+        ),
+    ] {
+        bytes.resize(boundary * BLOCK_SIZE + 1, 0);
+        for blocks in 3..=boundary {
+            let mut members = TarArchive::new(&bytes[..blocks * BLOCK_SIZE])
+                .with_policy(policy.clone())
+                .members();
+            assert!(matches!(members.next().await?, Some(Member::File { .. })));
+            assert!(
+                members.next().await?.is_none(),
+                "{policy:?}, {blocks} blocks"
+            );
+        }
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(policy)
+            .members();
+        assert!(matches!(members.next().await?, Some(Member::File { .. })));
+        assert!(matches!(
+            members.next().await,
+            Err(DecodeError::Framing(FrameError {
+                position,
+                inner: FrameErrorInner::TrailingData,
+            })) if position == (boundary * BLOCK_SIZE) as u64
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn trailing_padding_requires_complete_zero_blocks() -> TestResult {
+    let mut bytes = [0; 4 * BLOCK_SIZE];
+    let (reader, mut writer) = duplex(bytes.len());
+    writer.write_all(&bytes[..3 * BLOCK_SIZE + 1]).await?;
+    let mut members = TarArchive::new(reader).members();
+    let mut context = Context::from_waker(Waker::noop());
+    assert!(pin!(members.next()).poll(&mut context).is_pending());
+    // A retry must account for the first byte of the unfinished padding block.
+    drop(writer);
+    assert!(matches!(
+        members.next().await,
+        Err(DecodeError::Framing(FrameError {
+            position,
+            inner: FrameErrorInner::IncompleteBlock { read: 1 },
+        })) if position == (3 * BLOCK_SIZE) as u64
+    ));
+
+    bytes[3 * BLOCK_SIZE + 7] = 1;
+    let mut members = TarArchive::new(bytes.as_slice()).members();
+    assert!(matches!(
+        members.next().await,
+        Err(DecodeError::Framing(FrameError {
+            position,
+            inner: FrameErrorInner::TrailingData,
+        })) if position == (3 * BLOCK_SIZE + 7) as u64
+    ));
+    assert!(members.next().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn ignoring_trailing_data_leaves_the_reader_at_the_marker() -> TestResult {
+    let next_archive = single_pax_member("next", b'0', b"", "", 0o644);
+    let mut bytes = ArchiveBuilder::new().finish();
+    bytes.extend_from_slice(&next_archive);
+    let mut unread = bytes.as_slice();
+    let mut members = TarArchive::new(&mut unread)
+        .with_policy(DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Ignore))
+        .members();
+    assert!(members.next().await?.is_none());
+    assert_eq!(unread, next_archive);
+    Ok(())
 }
 
 #[tokio::test]

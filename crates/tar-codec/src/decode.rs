@@ -20,7 +20,7 @@ use tokio::io::AsyncRead;
 
 pub use tar_framing::{
     DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE, DEFAULT_MAX_GNU_EXTENSION_SIZE,
-    DEFAULT_MAX_PAX_EXTENSION_SIZE,
+    DEFAULT_MAX_PAX_EXTENSION_SIZE, TrailingDataPolicy,
 };
 
 /// This type reads one structurally valid pax or GNU tar archive in one pass.
@@ -28,6 +28,9 @@ pub use tar_framing::{
 /// Member paths and link targets are not normalized for extraction. A direct
 /// consumer must validate them before it uses them as file-system paths.
 /// [`ArchiveTrait::extract_in`] does this validation.
+///
+/// By default, member iteration validates final record padding and waits for
+/// EOF before reporting the end of the archive. See [`DecodePolicy::trailing_data_policy`].
 ///
 /// Member iteration is fused. After reaching the end of the archive or
 /// returning a decoding error, every subsequent attempt returns end-of-archive.
@@ -52,6 +55,7 @@ impl<R> TarArchive<R> {
     /// Call before reading any members.
     pub fn with_policy(mut self, policy: DecodePolicy) -> Self {
         let stream_policy = StreamPolicy::default()
+            .trailing_data_policy(policy.trailing_data_policy)
             .max_pax_extension_size(policy.pax_policy.max_extension_size)
             .max_global_pax_extensions_size(policy.pax_policy.max_global_extensions_size)
             .allow_pax_hardlink_linkdata(policy.pax_policy.allow_hardlink_linkdata)
@@ -72,6 +76,7 @@ impl<R> TarArchive<R> {
 /// See each configuration API for its default.
 #[derive(Clone, Debug)]
 pub struct DecodePolicy {
+    trailing_data_policy: TrailingDataPolicy,
     allow_gnu: bool,
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
@@ -149,6 +154,7 @@ impl Default for PaxDecodePolicy {
 impl Default for DecodePolicy {
     fn default() -> Self {
         Self {
+            trailing_data_policy: TrailingDataPolicy::default(),
             allow_gnu: true,
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
@@ -159,6 +165,14 @@ impl Default for DecodePolicy {
 }
 
 impl DecodePolicy {
+    /// Configures which bytes may follow the two-block end-of-archive marker.
+    ///
+    /// The default is [`TrailingDataPolicy::BlockingFactor`] with a factor of 20.
+    pub fn trailing_data_policy(mut self, policy: TrailingDataPolicy) -> Self {
+        self.trailing_data_policy = policy;
+        self
+    }
+
     /// Configures whether archives in the GNU framing family may be decoded.
     ///
     /// GNU tar archives are **allowed by default**.
