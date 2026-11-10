@@ -13,7 +13,7 @@ use crate::{
     UstarKind,
     header::{GNAME_RANGE, LINK_NAME_RANGE, UNAME_RANGE},
     pax::GlobalPaxRecords,
-    stream::{DataFrame, DataOwner, Frame, GnuFrame, HeaderFrame, State, TarStream},
+    stream::{DataFrame, DataOwner, Frame, HeaderFrame, State, TarStream},
 };
 
 pub use crate::{PaxExtension, PaxState};
@@ -25,37 +25,27 @@ const PAYLOAD_DRAIN_CHUNK_BYTES: usize = 1024 * 1024;
 pub struct GnuExtension {
     /// The absolute byte position of the GNU extension header block.
     pub position: u64,
-    /// Whether this extension carries a member name or a link target.
-    pub kind: GnuKind,
     /// The meaningful extension payload bytes, excluding tar padding.
     pub payload: Vec<u8>,
-    allow_unterminated: bool,
 }
 
 impl GnuExtension {
-    fn new(frame: &GnuFrame, policy: &StreamPolicy) -> Self {
-        Self {
-            position: frame.position,
-            kind: frame.kind,
-            payload: Vec::new(),
-            allow_unterminated: policy.allow_gnu_extensions_without_terminator,
-        }
-    }
-
     /// Returns the name or link target, excluding its NUL terminator and trailing NULs.
     ///
-    /// If the reader permits unterminated GNU extensions, a payload with no NUL
+    /// If the policy permits unterminated GNU extensions, a payload with no NUL
     /// is returned in full. Non-NUL bytes following a terminator are an error.
-    pub fn value(&self) -> Result<&[u8], FrameError> {
+    pub fn value(&self, kind: GnuKind, policy: &StreamPolicy) -> Result<&[u8], FrameError> {
         let terminator = self
             .payload
             .iter()
             .position(|byte| *byte == 0)
-            .or(self.allow_unterminated.then_some(self.payload.len()))
+            .or(policy
+                .allow_gnu_extensions_without_terminator
+                .then_some(self.payload.len()))
             .ok_or_else(|| {
                 FrameError::invalid_gnu_extension(
                     self.position,
-                    self.kind,
+                    kind,
                     "value is not NUL-terminated",
                 )
             })?;
@@ -66,7 +56,7 @@ impl GnuExtension {
         if padding.iter().any(|byte| *byte != 0) {
             return Err(FrameError::invalid_gnu_extension(
                 self.position,
-                self.kind,
+                kind,
                 "non-NUL bytes follow the terminator",
             ));
         }
@@ -188,7 +178,9 @@ impl<R> MemberFrame<'_, R> {
                 None => self.header.header_path,
             },
             MemberExtensions::Gnu { long_name, .. } => match long_name {
-                Some(extension) => extension.value()?,
+                Some(extension) => {
+                    extension.value(GnuKind::LongName, &self.payload.reader.stream.policy)?
+                }
                 None => self.header.header_path,
             },
         };
@@ -220,7 +212,9 @@ impl<R> MemberFrame<'_, R> {
                 None => self.header.link_name,
             },
             MemberExtensions::Gnu { long_link, .. } => match long_link {
-                Some(extension) => extension.value()?,
+                Some(extension) => {
+                    extension.value(GnuKind::LongLink, &self.payload.reader.stream.policy)?
+                }
                 None => self.header.link_name,
             },
         };
@@ -389,8 +383,10 @@ impl<R: AsyncRead + Unpin> TarReader<R> {
                     self.pending_extensions.pax_header_position = Some(frame.position);
                 }
                 Frame::Gnu(frame) => {
-                    *self.pending_extensions.gnu_extension_mut(frame.kind) =
-                        Some(GnuExtension::new(&frame, &self.payload.stream.policy));
+                    *self.pending_extensions.gnu_extension_mut(frame.kind) = Some(GnuExtension {
+                        position: frame.position,
+                        payload: Vec::new(),
+                    });
                 }
                 Frame::Data(frame) => self.process_extension_data(frame)?,
                 Frame::Header(header) => return Ok(Some(header)),
@@ -1114,10 +1110,7 @@ mod tests {
 
     #[test]
     fn retains_gnu_metadata_across_cancelled_reads() {
-        let expected_name = vec![b'n'; BLOCK_SIZE + 10];
-        let mut long_name = expected_name.clone();
-        long_name.push(0);
-
+        let long_name = vec![b'n'; BLOCK_SIZE + 10];
         let mut bytes = Vec::new();
         append_gnu(&mut bytes, b'L', &long_name);
         let after_first_payload_block = BLOCK_SIZE * 2;
@@ -1128,10 +1121,13 @@ mod tests {
         for position in [BLOCK_SIZE, after_first_payload_block, after_extension] {
             let mut reader = TarReader::new(ChunkedReader::pending_once(bytes.clone(), position));
             cancel_pending(reader.next_frame());
+            // Resume before the first member with unterminated names enabled.
+            let mut reader = reader
+                .with_policy(StreamPolicy::default().allow_gnu_extensions_without_terminator(true));
 
             ready_ok(async {
                 let member = next_member(&mut reader).await?;
-                assert_eq!(member.effective_path()?, expected_name);
+                assert_eq!(member.effective_path()?, long_name);
                 Ok(())
             });
         }
