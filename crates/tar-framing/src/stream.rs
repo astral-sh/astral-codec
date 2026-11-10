@@ -530,10 +530,7 @@ impl StreamPolicy {
 
 /// A strict stream of POSIX-pax or GNU frames sourced from an underlying reader.
 pub struct TarStream<R> {
-    /// Our current stream position.
-    pub(super) position: u64,
-    /// Our interior source.
-    pub(super) inner: R,
+    input: BlockReader<R>,
     pub(super) block: Block,
     pub(super) block_len: usize,
     pub(super) format: Option<ArchiveFormat>,
@@ -549,8 +546,10 @@ impl<R> TarStream<R> {
     /// Creates a new [`TarStream`] from the given reader.
     pub fn new(reader: R) -> Self {
         Self {
-            position: 0,
-            inner: reader,
+            input: BlockReader {
+                reader,
+                position: 0,
+            },
             block: [0; BLOCK_SIZE],
             block_len: 0,
             format: None,
@@ -593,7 +592,9 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             match self.state {
                 State::Complete | State::Failed => return Ok(None),
                 State::ReadingPadding { blocking_factor } => {
-                    self.read_padding(blocking_factor).await?;
+                    self.input
+                        .read_padding(&mut self.block, blocking_factor)
+                        .await?;
                     self.state = State::Complete;
                     return Ok(None);
                 }
@@ -670,7 +671,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             .checked_next_multiple_of(BLOCK_SIZE)
             .ok_or_else(|| {
                 FrameError::arithmetic_overflow(
-                    self.position,
+                    self.input.position,
                     "member payload chunk physical length",
                 )
             })?;
@@ -692,18 +693,15 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             chunk.buffer[..len].copy_from_slice(&self.block[..len]);
             chunk.unread.end = len;
         }
-        let physical_len = read_blocks(
-            &mut self.inner,
-            &mut self.position,
-            &mut chunk.buffer[..read_len],
-            &mut chunk.unread.end,
-        )
-        .await?;
+        let physical_len = self
+            .input
+            .read_blocks(&mut chunk.buffer[..read_len], &mut chunk.unread.end)
+            .await?;
         let meaningful_len = remaining.min(physical_len as u64) as usize;
         let remaining = remaining - meaningful_len as u64;
         if physical_len < read_len {
             return Err(FrameError::truncated_payload(
-                self.position,
+                self.input.position,
                 DataOwner::Member,
                 remaining,
             ));
@@ -735,7 +733,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             State::ReadingMember { remaining } => Ok(remaining),
             State::AwaitingHeader => Ok(0),
             _ => Err(FrameError::unexpected_order(
-                self.position,
+                self.input.position,
                 "ordinary member payload",
                 "parser state without member payload",
             )),
@@ -744,14 +742,11 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
 
     /// Fills `self.block` and returns its starting position.
     async fn fill_block(&mut self) -> Result<u64, FrameError> {
-        let position = self.position;
-        let read = read_blocks(
-            &mut self.inner,
-            &mut self.position,
-            &mut self.block,
-            &mut self.block_len,
-        )
-        .await?;
+        let position = self.input.position;
+        let read = self
+            .input
+            .read_blocks(&mut self.block, &mut self.block_len)
+            .await?;
         if read == 0 {
             return Err(self.handle_eof());
         }
@@ -790,7 +785,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
                 }
             }
         };
-        FrameError::at(self.position, inner)
+        FrameError::at(self.input.position, inner)
     }
 
     fn process_block(&mut self, position: u64, block: Block) -> Result<Option<Frame>, FrameError> {
@@ -1148,13 +1143,52 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         self.state = member_payload_state(frame.effective_size);
         Ok(Frame::Header(frame))
     }
+}
 
-    async fn read_padding(&mut self, blocking_factor: u8) -> Result<(), FrameError> {
+/// Reads physical tar blocks and validates final record padding.
+struct BlockReader<R> {
+    reader: R,
+    /// Bytes consumed by the framer. A cancelled block read can have buffered bytes beyond this point.
+    position: u64,
+}
+
+impl<R: AsyncRead + Unpin> BlockReader<R> {
+    /// Fills a block-aligned buffer or stops at EOF. Returns the length in bytes
+    /// of all complete blocks, including any retained from a wider read.
+    async fn read_blocks(
+        &mut self,
+        buffer: &mut [u8],
+        filled: &mut usize,
+    ) -> Result<usize, FrameError> {
+        while *filled < buffer.len() {
+            let read = self.read_more(buffer, *filled).await?;
+            if read == 0 {
+                break;
+            }
+            *filled += read;
+        }
+        let partial_len = *filled % BLOCK_SIZE;
+        let complete_len = *filled - partial_len;
+        self.position = self.position_after(complete_len)?;
+        if complete_len < buffer.len() && partial_len != 0 {
+            return Err(FrameError::at(
+                self.position,
+                FrameErrorInner::IncompleteBlock { read: partial_len },
+            ));
+        }
+        Ok(complete_len)
+    }
+
+    async fn read_padding(
+        &mut self,
+        block: &mut Block,
+        blocking_factor: u8,
+    ) -> Result<(), FrameError> {
         let record_size = u64::from(blocking_factor) * BLOCK_SIZE as u64;
         while !self.position.is_multiple_of(record_size) {
             let partial = (self.position % BLOCK_SIZE as u64) as usize;
-            let buffer = &mut self.block[..BLOCK_SIZE - partial];
-            let read = read_once(&mut self.inner, buffer, self.position).await?;
+            let buffer = &mut block[..BLOCK_SIZE - partial];
+            let read = self.read_more(buffer, 0).await?;
             if read == 0 {
                 if partial != 0 {
                     return Err(FrameError::at(
@@ -1166,17 +1200,35 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
             }
             if let Some(offset) = buffer[..read].iter().position(|byte| *byte != 0) {
                 return Err(FrameError::at(
-                    checked_position(self.position, offset)?,
+                    self.position_after(offset)?,
                     FrameErrorInner::TrailingData,
                 ));
             }
-            self.position = checked_position(self.position, read)?;
+            self.position = self.position_after(read)?;
         }
         // At the record boundary even one more byte exceeds the padding limit.
-        if read_once(&mut self.inner, &mut self.block[..1], self.position).await? != 0 {
+        if self.read_more(&mut block[..1], 0).await? != 0 {
             return Err(FrameError::at(self.position, FrameErrorInner::TrailingData));
         }
         Ok(())
+    }
+
+    /// Reads once after the `filled` bytes already buffered at `self.position`.
+    async fn read_more(&mut self, buffer: &mut [u8], filled: usize) -> Result<usize, FrameError> {
+        let position = self.position_after(filled)?;
+        let mut buffer = ReadBuf::new(&mut buffer[filled..]);
+        poll_fn(|cx| Pin::new(&mut self.reader).poll_read(cx, &mut buffer))
+            .await
+            .map_err(|source| FrameError::at(position, FrameErrorInner::Io { source }))?;
+        Ok(buffer.filled().len())
+    }
+
+    fn position_after(&self, len: usize) -> Result<u64, FrameError> {
+        let len = u64::try_from(len)
+            .map_err(|_| FrameError::arithmetic_overflow(self.position, "stream position"))?;
+        self.position
+            .checked_add(len)
+            .ok_or_else(|| FrameError::arithmetic_overflow(self.position, "stream position"))
     }
 }
 
@@ -1204,64 +1256,12 @@ fn trim_nul(bytes: &[u8]) -> &[u8] {
     &bytes[..end]
 }
 
-async fn read_once<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    buffer: &mut [u8],
-    position: u64,
-) -> Result<usize, FrameError> {
-    let mut buffer = ReadBuf::new(buffer);
-    poll_fn(|cx| Pin::new(&mut *reader).poll_read(cx, &mut buffer))
-        .await
-        .map_err(|source| FrameError::at(position, FrameErrorInner::Io { source }))?;
-    Ok(buffer.filled().len())
-}
-
-/// Fills a block-aligned buffer or stops at EOF. Returns the length in bytes
-/// of all complete blocks, including any retained from a wider read.
-async fn read_blocks<R: AsyncRead + Unpin>(
-    reader: &mut R,
-    position: &mut u64,
-    buffer: &mut [u8],
-    filled: &mut usize,
-) -> Result<usize, FrameError> {
-    while *filled < buffer.len() {
-        let read = read_once(
-            reader,
-            &mut buffer[*filled..],
-            checked_position(*position, *filled)?,
-        )
-        .await?;
-        if read == 0 {
-            break;
-        }
-        *filled += read;
-    }
-    let partial_len = *filled % BLOCK_SIZE;
-    let complete_len = *filled - partial_len;
-    *position = checked_position(*position, complete_len)?;
-    if complete_len < buffer.len() && partial_len != 0 {
-        return Err(FrameError::at(
-            *position,
-            FrameErrorInner::IncompleteBlock { read: partial_len },
-        ));
-    }
-    Ok(complete_len)
-}
-
 fn member_payload_state(remaining: u64) -> State {
     if remaining == 0 {
         State::AwaitingHeader
     } else {
         State::ReadingMember { remaining }
     }
-}
-
-fn checked_position(position: u64, len: usize) -> Result<u64, FrameError> {
-    let len = u64::try_from(len)
-        .map_err(|_| FrameError::arithmetic_overflow(position, "stream position"))?;
-    position
-        .checked_add(len)
-        .ok_or_else(|| FrameError::arithmetic_overflow(position, "stream position"))
 }
 
 impl TryFromFramed<&Block> for ParsedHeader {
