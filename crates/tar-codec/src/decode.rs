@@ -12,7 +12,7 @@ use archive_trait::{
     SpecialKind,
 };
 use tar_framing::{
-    ArchiveFormat, FrameError, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
+    FrameError, PaxExtension, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
     logical::{MemberExtensions, MemberFrame, MemberPayload as FramingMemberPayload, TarReader},
 };
 use thiserror::Error;
@@ -236,55 +236,29 @@ impl DecodePolicy {
         self
     }
 
-    fn check_format(&self, position: u64, format: ArchiveFormat) -> Result<(), DecodeError> {
-        if format == ArchiveFormat::Gnu && !self.allow_gnu {
-            return Err(DecodeError::policy_violation(
-                position,
-                DecodePolicyViolation::GnuArchive,
-            ));
-        }
-        Ok(())
-    }
-
-    fn check_global_pax(&self, position: u64, records: &[PaxRecord]) -> Result<(), DecodeError> {
-        self.pax_policy.check_global_pax_extension(position)?;
-        self.pax_policy
-            .check_pax_records(position, PaxKind::Global, records)
-    }
-
     fn check_member<R>(&self, frame: &MemberFrame<'_, R>) -> Result<(), DecodeError> {
-        if let MemberExtensions::Pax(state) = &frame.extensions {
-            for extension in state
-                .extensions()
-                .filter(|extension| extension.kind == PaxKind::Global)
-            {
-                self.check_global_pax(extension.position, extension.records())?;
+        match &frame.extensions {
+            MemberExtensions::Pax(state) => {
+                for extension in state.extensions() {
+                    self.pax_policy.check_extension(extension)?;
+                }
             }
-        }
-        let format_position = match &frame.extensions {
-            MemberExtensions::Pax(_) => frame.header.position,
             MemberExtensions::Gnu {
                 long_name,
                 long_link,
-            } => long_name
-                .iter()
-                .chain(long_link.iter())
-                .map(|header| header.position)
-                .min()
-                .unwrap_or(frame.header.position),
-        };
-        self.check_format(format_position, frame.header.format)?;
-        if let MemberExtensions::Pax(state) = &frame.extensions {
-            for extension in state
-                .extensions()
-                .filter(|extension| extension.kind == PaxKind::Local)
-            {
-                self.pax_policy.check_pax_records(
-                    extension.position,
-                    PaxKind::Local,
-                    extension.records(),
-                )?;
+            } if !self.allow_gnu => {
+                let position = long_name
+                    .iter()
+                    .chain(long_link)
+                    .map(|extension| extension.position)
+                    .min()
+                    .unwrap_or(frame.header.position);
+                return Err(DecodeError::policy_violation(
+                    position,
+                    DecodePolicyViolation::GnuArchive,
+                ));
             }
+            MemberExtensions::Gnu { .. } => {}
         }
         Ok(())
     }
@@ -411,22 +385,16 @@ impl PaxDecodePolicy {
         self
     }
 
-    fn check_global_pax_extension(&self, position: u64) -> Result<(), DecodeError> {
-        if !self.allow_global_pax_extensions {
+    fn check_extension(&self, extension: &PaxExtension) -> Result<(), DecodeError> {
+        let position = extension.position;
+        if extension.kind == PaxKind::Global && !self.allow_global_pax_extensions {
             return Err(DecodeError::policy_violation(
                 position,
                 DecodePolicyViolation::GlobalPaxExtension,
             ));
         }
-        Ok(())
-    }
 
-    fn check_pax_records(
-        &self,
-        position: u64,
-        kind: PaxKind,
-        records: &[PaxRecord],
-    ) -> Result<(), DecodeError> {
+        let records = extension.records();
         for record in records {
             if let PaxRecord::Vendor {
                 vendor,
@@ -466,7 +434,7 @@ impl PaxDecodePolicy {
             }
         }
 
-        if kind == PaxKind::Global && !self.allow_global_pax_member_metadata {
+        if extension.kind == PaxKind::Global && !self.allow_global_pax_member_metadata {
             for record in records {
                 let keyword = match record.keyword() {
                     PaxKeyword::Path => Some("path"),

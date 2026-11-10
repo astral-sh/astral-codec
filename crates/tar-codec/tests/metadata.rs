@@ -1,6 +1,6 @@
 pub mod support;
 
-use std::sync::Arc;
+use std::{io, sync::Arc};
 
 use support::{
     ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum,
@@ -166,8 +166,9 @@ async fn gnu_archives_can_be_forbidden_without_rejecting_empty_archives() {
     let destination = temp.path().join("gnu");
     let mut archive = ArchiveBuilder::new();
     archive
+        .gnu("longlink", b'K', b"target\0", "", 0o644)
         .gnu("longname", b'L', b"renamed\0", "", 0o644)
-        .gnu("raw", b'0', b"contents", "", 0o644);
+        .gnu("raw", b'2', b"", "", 0o644);
     let bytes = archive.finish();
     assert!(matches!(
         TarArchive::new(bytes.as_slice())
@@ -179,7 +180,10 @@ async fn gnu_archives_can_be_forbidden_without_rejecting_empty_archives() {
             violation: DecodePolicyViolation::GnuArchive,
         }))
     ));
-    assert!(!destination.join("renamed").exists());
+    assert!(matches!(
+        destination.join("renamed").symlink_metadata(),
+        Err(error) if error.kind() == io::ErrorKind::NotFound
+    ));
 
     let bytes = ArchiveBuilder::new().finish();
     TarArchive::new(bytes.as_slice())
@@ -548,6 +552,8 @@ async fn global_pax_headers_support_opt_out_and_ignore_trailing_updates() {
     let mut archive = ArchiveBuilder::new();
     archive
         .pax(b'g', &pax_record(PaxKeyword::Comment, "metadata"))
+        // The global policy error precedes the local vendor-record error.
+        .pax(b'x', &pax_record(vendor_attribute_keyword(), "value"))
         .ustar("file", b'0', b"", "", 0o644);
     let bytes = archive.finish();
     let reject_globals = DecodePolicy::default()
