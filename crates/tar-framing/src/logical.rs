@@ -921,23 +921,7 @@ mod tests {
     }
 
     #[test]
-    fn resolves_and_validates_gnu_metadata_lazily() {
-        let mut bytes = Vec::new();
-        append_block(&mut bytes, &gnu_header(b'L', 5));
-        append_payload(&mut bytes, b"name\0");
-        append_block(&mut bytes, &gnu_header(b'K', 5));
-        append_payload(&mut bytes, b"link\0");
-        append_block(&mut bytes, &gnu_header(b'2', 0));
-        append_terminator(&mut bytes);
-
-        ready_ok(async {
-            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
-            let member = next_member(&mut reader).await?;
-            assert_eq!(member.effective_path()?, b"name");
-            assert_eq!(member.effective_link_path()?, b"link");
-            Ok(())
-        });
-
+    fn validates_gnu_extensions_on_path_access() {
         for (typeflag, payload, kind) in [
             (b'L', b"no-nul".as_slice(), GnuKind::LongName),
             (b'K', b"link\0bad".as_slice(), GnuKind::LongLink),
@@ -946,14 +930,13 @@ mod tests {
             append_gnu(&mut bytes, typeflag, payload);
             append_block(&mut bytes, &gnu_header(b'2', 0));
             append_terminator(&mut bytes);
-            let result: Result<(), FrameError> = ready(async {
-                let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
-                let member = next_member(&mut reader).await?;
-                match kind {
-                    GnuKind::LongName => member.effective_path().map(|_| ()),
-                    GnuKind::LongLink => member.effective_link_path().map(|_| ()),
-                }
-            });
+            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
+            let member = ready(next_member(&mut reader))
+                .expect("a malformed GNU extension should still yield a member");
+            let result = match kind {
+                GnuKind::LongName => member.effective_path(),
+                GnuKind::LongLink => member.effective_link_path(),
+            };
             assert!(matches!(
                 result,
                 Err(FrameError {
@@ -1289,41 +1272,38 @@ mod tests {
     }
 
     #[test]
-    fn resumes_cancelled_member_payload_block_during_automatic_drain() {
+    fn automatic_drain_resumes_after_cancellation() {
+        #[derive(Clone, Copy, Debug)]
+        enum CancelDuring {
+            BlockRead,
+            AutomaticDrain,
+        }
+
         let payload = vec![b'x'; BLOCK_SIZE * 2 + 17];
         let (bytes, next_member_position) = member_followed_by_empty_member(&payload);
 
-        ready_ok(async {
-            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
-            {
+        for operation in [CancelDuring::BlockRead, CancelDuring::AutomaticDrain] {
+            ready_ok(async {
+                let mut reader =
+                    TarReader::new(ChunkedReader::pending_once(bytes.clone(), BLOCK_SIZE + 73));
                 let mut member = next_member(&mut reader).await?;
-                cancel_pending(member.payload.next_block());
-            }
+                match operation {
+                    CancelDuring::BlockRead => cancel_pending(member.payload.next_block()),
+                    CancelDuring::AutomaticDrain => {
+                        drop(member);
+                        cancel_pending(reader.next_frame());
+                    }
+                }
 
-            let member = next_member(&mut reader).await?;
-            assert_eq!(member.header.position, next_member_position);
-            drop(member);
-            assert!(reader.next_frame().await?.is_none());
-            Ok(())
-        });
-    }
-
-    #[test]
-    fn resumes_cancelled_automatic_payload_drain() {
-        let payload = vec![b'x'; BLOCK_SIZE * 2 + 17];
-        let (bytes, next_member_position) = member_followed_by_empty_member(&payload);
-
-        ready_ok(async {
-            let mut reader = TarReader::new(ChunkedReader::pending_once(bytes, BLOCK_SIZE + 73));
-            drop(next_member(&mut reader).await?);
-            cancel_pending(reader.next_frame());
-
-            let member = next_member(&mut reader).await?;
-            assert_eq!(member.header.position, next_member_position);
-            drop(member);
-            assert!(reader.next_frame().await?.is_none());
-            Ok(())
-        });
+                assert_eq!(
+                    next_member(&mut reader).await?.header.position,
+                    next_member_position,
+                    "{operation:?}"
+                );
+                assert!(reader.next_frame().await?.is_none(), "{operation:?}");
+                Ok(())
+            });
+        }
     }
 
     #[test]
@@ -1398,33 +1378,6 @@ mod tests {
                 "{expected:?}: {error:?}"
             );
         }
-    }
-
-    #[test]
-    fn groups_gnu_metadata_with_its_member() {
-        let mut bytes = Vec::new();
-        append_block(&mut bytes, &gnu_header(b'L', 5));
-        append_payload(&mut bytes, b"name\0");
-        append_block(&mut bytes, &gnu_header(b'K', 5));
-        append_payload(&mut bytes, b"link\0");
-        append_block(&mut bytes, &gnu_header(b'2', 0));
-        append_terminator(&mut bytes);
-
-        ready_ok(async {
-            let mut reader = TarReader::new(ChunkedReader::new(bytes, BLOCK_SIZE));
-            let mut member = next_member(&mut reader).await?;
-            let MemberExtensions::Gnu {
-                long_name: Some(long_name),
-                long_link: Some(long_link),
-            } = &member.extensions
-            else {
-                panic!("expected GNU extensions");
-            };
-            assert_eq!(long_name.payload, b"name\0");
-            assert_eq!(long_link.payload, b"link\0");
-            assert!(member.payload.next_block().await?.is_none());
-            Ok(())
-        });
     }
 
     #[test]
@@ -1512,7 +1465,7 @@ mod tests {
 
         ready_ok(async {
             let mut reader = TarReader::new(ChunkedReader::new(bytes, 19));
-            let member = next_member(&mut reader).await?;
+            let mut member = next_member(&mut reader).await?;
             let MemberExtensions::Gnu {
                 long_name: Some(name_metadata),
                 long_link: Some(link_metadata),
@@ -1524,7 +1477,12 @@ mod tests {
             assert_eq!(name_metadata.payload, long_name);
             assert_eq!(link_metadata.position, (BLOCK_SIZE * 4) as u64);
             assert_eq!(link_metadata.payload, long_link);
-            member.payload.skip().await?;
+            assert_eq!(member.effective_path()?, &long_name[..long_name.len() - 1]);
+            assert_eq!(
+                member.effective_link_path()?,
+                &long_link[..long_link.len() - 1]
+            );
+            assert!(member.payload.next_block().await?.is_none());
             assert!(reader.next_frame().await?.is_none());
             Ok(())
         });
