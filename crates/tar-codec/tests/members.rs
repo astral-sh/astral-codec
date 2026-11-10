@@ -353,7 +353,7 @@ async fn unterminated_gnu_extensions_are_policy_controlled() -> TestResult {
         assert!(matches!(
             members.next().await,
             Err(DecodeError::Framing(FrameError {
-                inner: FrameErrorInner::InvalidGnuMetadata { kind: found, .. },
+                inner: FrameErrorInner::InvalidGnuExtension { kind: found, .. },
                 ..
             })) if found == kind
         ));
@@ -387,7 +387,7 @@ async fn unterminated_gnu_extensions_preserve_all_bytes() -> TestResult {
     assert!(matches!(
         member.effective_link_path(),
         Err(FrameError {
-            inner: FrameErrorInner::InvalidGnuMetadata {
+            inner: FrameErrorInner::InvalidGnuExtension {
                 kind: GnuKind::LongLink,
                 ..
             },
@@ -587,7 +587,7 @@ async fn rejects_zero_length_gnu_extensions_at_their_header() -> TestResult {
                 members.next().await,
                 Err(DecodeError::Framing(FrameError {
                     position,
-                    inner: FrameErrorInner::InvalidGnuMetadata { kind: found, .. },
+                    inner: FrameErrorInner::InvalidGnuExtension { kind: found, .. },
                 })) if position == header_position as u64 && found == kind
             ));
             assert!(members.next().await?.is_none());
@@ -631,7 +631,7 @@ async fn projection_errors_fuse_member_iteration() -> TestResult {
     assert!(matches!(
         members.next().await,
         Err(DecodeError::Framing(FrameError {
-            inner: FrameErrorInner::InvalidGnuMetadata {
+            inner: FrameErrorInner::InvalidGnuExtension {
                 kind: GnuKind::LongName,
                 ..
             },

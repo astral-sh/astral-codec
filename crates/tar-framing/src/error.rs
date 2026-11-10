@@ -22,14 +22,18 @@ impl FrameError {
         Self::at(position, FrameErrorInner::ArithmeticOverflow { context })
     }
 
-    pub(crate) fn deleted_pax_metadata(position: u64, keyword: &'static str) -> Self {
-        Self::at(position, FrameErrorInner::DeletedPaxMetadata { keyword })
+    pub(crate) fn deleted_pax_record(position: u64, keyword: &'static str) -> Self {
+        Self::at(position, FrameErrorInner::DeletedPaxRecord { keyword })
     }
 
-    pub(crate) fn invalid_gnu_metadata(position: u64, kind: GnuKind, reason: &'static str) -> Self {
+    pub(crate) fn invalid_gnu_extension(
+        position: u64,
+        kind: GnuKind,
+        reason: &'static str,
+    ) -> Self {
         Self::at(
             position,
-            FrameErrorInner::InvalidGnuMetadata { kind, reason },
+            FrameErrorInner::InvalidGnuExtension { kind, reason },
         )
     }
 
@@ -160,7 +164,7 @@ pub enum FrameErrorInner {
     /// A GNU long-name or long-link extension declares an empty payload or
     /// contains an invalid value.
     #[error("malformed GNU {kind:?} metadata payload: {reason}")]
-    InvalidGnuMetadata {
+    InvalidGnuExtension {
         /// The GNU metadata extension being decoded.
         kind: GnuKind,
         /// The reason the metadata value was rejected.
@@ -168,7 +172,7 @@ pub enum FrameErrorInner {
     },
     /// A pax record removed metadata required to interpret a member.
     #[error("pax metadata {keyword:?} deletes a required member field")]
-    DeletedPaxMetadata {
+    DeletedPaxRecord {
         /// The standard pax keyword that deleted its header fallback.
         keyword: &'static str,
     },

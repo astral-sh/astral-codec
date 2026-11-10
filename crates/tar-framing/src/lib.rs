@@ -165,7 +165,7 @@ pub const DEFAULT_MAX_PAX_EXTENSION_SIZE: u64 = 256 * 1024;
 /// This is 1 MiB.
 pub const DEFAULT_MAX_GLOBAL_PAX_EXTENSIONS_SIZE: u64 = 4 * DEFAULT_MAX_PAX_EXTENSION_SIZE;
 
-/// The default maximum size in bytes of one GNU metadata extension.
+/// The default maximum size in bytes of one GNU extension.
 ///
 /// This is 128 KiB.
 pub const DEFAULT_MAX_GNU_EXTENSION_SIZE: u64 = 128 * 1024;
@@ -200,7 +200,7 @@ pub enum PaxKind {
     Global,
 }
 
-/// The supported GNU metadata extension kinds.
+/// The supported GNU extension kinds.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub enum GnuKind {
     /// A typeflag `L` extension giving a long name for the next member.
