@@ -69,6 +69,13 @@ impl ArchiveBuilder {
         self
     }
 
+    pub fn payload(&mut self, payload: &[u8]) -> &mut Self {
+        self.bytes.extend_from_slice(payload);
+        self.bytes
+            .resize(self.bytes.len().next_multiple_of(BLOCK_SIZE), 0);
+        self
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
         self.bytes.resize(self.bytes.len() + 2 * BLOCK_SIZE, 0);
         self.bytes

@@ -3,12 +3,13 @@
 //! [`ExtractPolicy`] configures common path, overwrite, and link behavior.
 //! Filesystem mutation is capability-relative and confined to the destination.
 
+mod metadata;
 mod path;
 mod root;
 
 use std::path::Path;
 
-use self::{path::decode_member, root::ExtractionRoot};
+use self::{metadata::PreservedMetadata, path::decode_member, root::ExtractionRoot};
 use super::*;
 
 /// Controls behavior shared by [`Archive::extract_in`] implementations.
@@ -19,6 +20,21 @@ pub struct ExtractPolicy {
     pub(crate) link_policy: LinkPolicy,
     pub(crate) allow_overwrites: bool,
     pub(crate) name_validation: crate::name::NameValidation,
+    pub(crate) metadata_policy: MetadataPolicy,
+}
+
+/// Controls which archived Unix attributes extraction writes back.
+///
+/// Every setting is **disabled by default**. Permissions, ownership,
+/// modification times, and extended attributes then come from the extracting
+/// process. Enabling a setting restores that archived attribute, including
+/// setuid bits and file capabilities when those are present.
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct MetadataPolicy {
+    preserve_permissions: bool,
+    preserve_ownership: bool,
+    preserve_mtime: bool,
+    preserve_xattrs: bool,
 }
 
 /// Controls how symbolic- and hard-link members are extracted.
@@ -52,6 +68,7 @@ impl Default for ExtractPolicy {
             link_policy: LinkPolicy::default(),
             allow_overwrites: true,
             name_validation: crate::name::NameValidation::Default,
+            metadata_policy: MetadataPolicy::default(),
         }
     }
 }
@@ -81,6 +98,14 @@ impl ExtractPolicy {
     /// directories are always reused, including when overwrites are disabled.
     pub fn allow_overwrites(mut self, allow: bool) -> Self {
         self.allow_overwrites = allow;
+        self
+    }
+
+    /// Configures which archived Unix attributes are written during extraction.
+    ///
+    /// The default [`MetadataPolicy`] restores none of them.
+    pub fn metadata_policy(mut self, policy: MetadataPolicy) -> Self {
+        self.metadata_policy = policy;
         self
     }
 
@@ -153,12 +178,55 @@ impl LinkPolicy {
     }
 }
 
+impl MetadataPolicy {
+    /// Restores archived permission bits, including setuid, setgid, and sticky.
+    ///
+    /// Permissions are **normalized by default**. On Unix, a preserved mode is
+    /// applied with `fchmod` after creation so the process umask does not mask it.
+    pub fn preserve_permissions(mut self, preserve: bool) -> Self {
+        self.preserve_permissions = preserve;
+        self
+    }
+
+    /// Restores archived numeric user and group ids.
+    ///
+    /// Ownership follows the extracting process **by default**. Preserving it
+    /// requires permission to change ownership, and a value that does not fit
+    /// the platform id type fails extraction.
+    pub fn preserve_ownership(mut self, preserve: bool) -> Self {
+        self.preserve_ownership = preserve;
+        self
+    }
+
+    /// Restores archived modification times, in whole seconds.
+    ///
+    /// Timestamps follow extraction activity **by default**. Directory times are
+    /// applied after descendant members are created.
+    pub fn preserve_mtime(mut self, preserve: bool) -> Self {
+        self.preserve_mtime = preserve;
+        self
+    }
+
+    /// Restores archived extended attributes.
+    ///
+    /// Extended attributes are **discarded by default**. Names are applied as
+    /// stored, without following symbolic links.
+    pub fn preserve_xattrs(mut self, preserve: bool) -> Self {
+        self.preserve_xattrs = preserve;
+        self
+    }
+}
+
 /// Extracts a member stream into `destination` under the shared extraction policy.
 pub(crate) async fn extract<A: Archive>(
     mut members: Members<A>,
     destination: &Path,
     policy: ExtractPolicy,
 ) -> Result<(), ExtractError<A::Error>> {
+    if !cfg!(unix) && policy.metadata_policy != MetadataPolicy::default() {
+        return Err(ExtractError::UnixMetadataUnsupported);
+    }
+
     let mut root = ExtractionRoot::<A::Error>::open(destination, policy.allow_overwrites).await?;
     // Scratch space reused for each payload read and streamed directly for large files.
     let mut chunk_buffer = Vec::new();
@@ -167,6 +235,7 @@ pub(crate) async fn extract<A: Archive>(
     let result: Result<(), ExtractError<A::Error>> = async {
         while let Some(member) = members.next().await.map_err(ExtractError::Archive)? {
             check_member_policy(&member, policy)?;
+            let preserved = PreservedMetadata::prepare(member.metadata(), policy.metadata_policy)?;
             let decoded = decode_member(&member, policy)?;
             match member {
                 Member::File {
@@ -182,17 +251,20 @@ pub(crate) async fn extract<A: Archive>(
                         payload,
                         &mut chunk_buffer,
                         &mut buffered_payload,
+                        &preserved,
                     )
                     .await?;
                 }
-                Member::Directory { .. } => root.extract_directory(&decoded.path).await?,
+                Member::Directory { .. } => {
+                    root.extract_directory(&decoded.path, &preserved).await?
+                }
                 Member::SymbolicLink { .. } => {
                     if policy.link_policy.symlink_policy == SymlinkPolicy::Preserve {
-                        root.reserve_symlink(&decoded).await?;
+                        root.reserve_symlink(&decoded, &preserved).await?;
                     }
                 }
                 Member::HardLink { size, payload, .. } => {
-                    root.extract_hard_link(&decoded, size, payload, &mut chunk_buffer)
+                    root.extract_hard_link(&decoded, size, payload, &mut chunk_buffer, &preserved)
                         .await?;
                 }
                 Member::Special { kind, .. } => {
@@ -210,7 +282,8 @@ pub(crate) async fn extract<A: Archive>(
     // Commit earlier validated files before reporting a later member error.
     root.flush_buffered_files().await?;
     result?;
-    root.finalize_symlinks(policy.link_policy).await
+    root.finalize_symlinks(policy.link_policy).await?;
+    root.apply_deferred_mtimes().await
 }
 
 fn check_member_policy<E, P>(

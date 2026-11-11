@@ -23,6 +23,9 @@ tar = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt", "time"] }
 
+[target.'cfg(unix)'.dev-dependencies]
+rustix = { workspace = true }
+
 [[bench]]
 name = "comparison"
 harness = false

@@ -4,16 +4,19 @@ use std::path::Path;
 #[cfg(unix)]
 use std::{
     fs::{DirBuilder, Permissions},
-    os::unix::fs::{DirBuilderExt as _, PermissionsExt as _},
+    os::unix::fs::{
+        DirBuilderExt as _, MetadataExt as _, OpenOptionsExt as _, PermissionsExt as _,
+    },
+    sync::Arc,
 };
 
-#[cfg(unix)]
-use support::EntryKind;
 use support::{
     ArchiveBuilder, ArchiveFormat, header, pax_record, set_ustar_path, single_pax_member,
 };
 #[cfg(unix)]
-use tar_codec::extract::LinkPolicy;
+use support::{EntryKind, set_owner_and_mtime};
+#[cfg(unix)]
+use tar_codec::extract::{LinkPolicy, MetadataPolicy};
 use tar_codec::{
     Archive as _, DecodeError, ExtractError, ExtractPolicyViolation, TarArchive,
     extract::ExtractPolicy,
@@ -718,4 +721,117 @@ async fn rejects_a_symlink_destination_root_without_modifying_its_target() {
     }
     assert_eq!(std::fs::read(target.join("keep")).unwrap(), b"keep");
     assert!(!target.join("file").exists());
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn opted_in_metadata_restores_mode_owner_mtime_and_xattrs() {
+    let temp = tempdir().unwrap();
+    let probe = temp.path().join("probe");
+    std::fs::write(&probe, b"").unwrap();
+    let probe_metadata = std::fs::metadata(&probe).unwrap();
+    let uid = u64::from(probe_metadata.uid());
+    let gid = u64::from(probe_metadata.gid());
+    let restoring = ExtractPolicy::default().metadata_policy(
+        MetadataPolicy::default()
+            .preserve_permissions(true)
+            .preserve_ownership(true)
+            .preserve_mtime(true)
+            .preserve_xattrs(true),
+    );
+    let owned_header = |name, typeflag, size, link_name, mode, mtime| {
+        let mut block = header(ArchiveFormat::Pax, name, typeflag, size, link_name, mode);
+        set_owner_and_mtime(&mut block, uid, gid, mtime);
+        block
+    };
+    // Files above 1 MiB are streamed rather than buffered.
+    let large = vec![b'x'; 2 * 1024 * 1024];
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .block(&owned_header(".", b'5', 0, "", 0o705, 60_000))
+        .block(&owned_header("sub", b'5', 0, "", 0o750, 40_000))
+        .pax(
+            b'x',
+            &pax_record(
+                PaxKeyword::Vendor {
+                    vendor: Arc::from("SCHILY"),
+                    name: Arc::from("xattr.user.demo"),
+                },
+                "layer",
+            ),
+        )
+        .block(&owned_header("sub/file", b'0', 5, "", 0o640, 50_000))
+        .payload(b"hello")
+        .block(&owned_header(
+            "sub/large",
+            b'0',
+            large.len() as u64,
+            "",
+            0o4750,
+            80_000,
+        ))
+        .payload(&large)
+        .block(&owned_header("link", b'2', 0, "sub/file", 0o777, 70_000));
+    let bytes = archive.finish();
+    let destination = temp.path().join("restored");
+
+    TarArchive::new(bytes.as_slice())
+        .extract_in(&destination, restoring)
+        .await
+        .unwrap();
+
+    for (path, mode, mtime) in [
+        ("", Some(0o705), 60_000),
+        ("sub", Some(0o750), 40_000),
+        ("sub/file", Some(0o640), 50_000),
+        ("sub/large", Some(0o4750), 80_000),
+        ("link", None, 70_000),
+    ] {
+        let path = destination.join(path);
+        let metadata = std::fs::symlink_metadata(&path).unwrap();
+        if let Some(mode) = mode {
+            assert_eq!(metadata.mode() & 0o7777, mode, "{}", path.display());
+        }
+        assert_eq!(metadata.mtime(), mtime, "{}", path.display());
+        assert_eq!(u64::from(metadata.uid()), uid, "{}", path.display());
+        assert_eq!(u64::from(metadata.gid()), gid, "{}", path.display());
+    }
+    assert_eq!(std::fs::read(destination.join("sub/large")).unwrap(), large);
+    assert_eq!(
+        std::fs::read_link(destination.join("link")).unwrap(),
+        Path::new("sub/file")
+    );
+    let mut xattr = [0u8; 8];
+    let len = rustix::fs::getxattr(destination.join("sub/file"), "user.demo", &mut xattr).unwrap();
+    assert_eq!(&xattr[..len], b"layer");
+
+    let defaults = temp.path().join("defaults");
+    TarArchive::new(bytes.as_slice())
+        .extract_in(&defaults, ExtractPolicy::default())
+        .await
+        .unwrap();
+    let mut control = std::fs::OpenOptions::new();
+    control.write(true).create_new(true).mode(0o666);
+    control.open(temp.path().join("control")).unwrap();
+    let file = std::fs::metadata(defaults.join("sub/file")).unwrap();
+    let control = std::fs::metadata(temp.path().join("control")).unwrap();
+    assert_eq!(file.mode() & 0o7777, control.mode() & 0o7777);
+    assert_ne!(file.mtime(), 50_000);
+    assert!(rustix::fs::getxattr(defaults.join("sub/file"), "user.demo", &mut xattr).is_err());
+
+    let mut unapplicable = ArchiveBuilder::new();
+    unapplicable
+        .pax(b'x', &pax_record(PaxKeyword::Uid, "4294967296"))
+        .block(&owned_header("wide", b'0', 1, "", 0o644, 10))
+        .payload(b"x");
+    assert!(matches!(
+        TarArchive::new(unapplicable.finish().as_slice())
+            .extract_in(temp.path().join("wide"), restoring)
+            .await,
+        Err(ExtractError::UnapplicableMetadata {
+            field: "user id",
+            value: 4294967296,
+            ..
+        })
+    ));
 }

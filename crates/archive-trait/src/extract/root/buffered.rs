@@ -13,6 +13,7 @@ use cap_std::fs::{Dir, File as CapFile, Metadata};
 
 use super::{FileOpenMode, metadata_is_link, remove_directory_error, remove_file_or_symlink};
 use crate::ExtractError;
+use crate::extract::metadata::{PreservedMetadata, apply_fd};
 
 /// Whether a buffered file may replace an existing destination leaf.
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -43,6 +44,7 @@ pub(super) struct BufferedFile {
     pub(super) executable: bool,
     pub(super) contents: Vec<u8>,
     pub(super) replacement: BufferedFileReplacement,
+    pub(super) metadata: PreservedMetadata,
 }
 
 /// The reusable buffers and first error produced by an ordered file batch.
@@ -83,6 +85,7 @@ pub(super) fn write_buffered_files(
                 file.executable,
                 &file.contents,
                 file.replacement,
+                &file.metadata,
             )
         {
             error = Some((file.error_path, source));
@@ -99,6 +102,7 @@ pub(super) fn write_buffered_file(
     executable: bool,
     contents: &[u8],
     replacement: BufferedFileReplacement,
+    preserved: &PreservedMetadata,
 ) -> Result<(), BufferedFileError> {
     let mode = FileOpenMode::CreateNew { executable };
     // Unique destination access makes this the common duplicate-member path.
@@ -107,11 +111,11 @@ pub(super) fn write_buffered_file(
         let file = mode
             .open(directory, path)
             .map_err(|source| BufferedFileError::filesystem("create file", source))?;
-        return write_buffered_contents(file, contents);
+        return write_buffered_contents(file, contents, preserved);
     }
 
     let create_error = match mode.open(directory, path) {
-        Ok(file) => return write_buffered_contents(file, contents),
+        Ok(file) => return write_buffered_contents(file, contents, preserved),
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
         Err(error) => return Err(BufferedFileError::filesystem("create file", error)),
     };
@@ -129,12 +133,21 @@ pub(super) fn write_buffered_file(
     let file = mode
         .open(directory, path)
         .map_err(|source| BufferedFileError::filesystem("create file", source))?;
-    write_buffered_contents(file, contents)
+    write_buffered_contents(file, contents, preserved)
 }
 
-fn write_buffered_contents(mut file: CapFile, contents: &[u8]) -> Result<(), BufferedFileError> {
+fn write_buffered_contents(
+    mut file: CapFile,
+    contents: &[u8],
+    metadata: &PreservedMetadata,
+) -> Result<(), BufferedFileError> {
     file.write_all(contents)
-        .map_err(|source| BufferedFileError::filesystem("write file", source))
+        .map_err(|source| BufferedFileError::filesystem("write file", source))?;
+    if metadata.is_empty() {
+        return Ok(());
+    }
+    apply_fd(&file, metadata)
+        .map_err(|error| BufferedFileError::filesystem(error.operation, error.source))
 }
 
 fn remove_buffered_leaf(
