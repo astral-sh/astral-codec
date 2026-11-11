@@ -65,6 +65,9 @@ impl<R> TarArchive<R> {
             )
             .allow_gnu_extensions_without_terminator(policy.allow_gnu_extensions_without_terminator)
             .allow_pax_base256_uid_and_gid(policy.pax_policy.allow_base256_uid_and_gid)
+            .allow_header_linkname_on_non_link_members(
+                policy.allow_header_linkname_on_non_link_members,
+            )
             .max_gnu_extension_size(policy.max_gnu_extension_size);
         self.reader = self.reader.with_policy(stream_policy);
         self.policy = policy;
@@ -82,6 +85,7 @@ pub struct DecodePolicy {
     allow_all_nul_numeric_fields: bool,
     allow_header_uname_and_gname_without_terminator: bool,
     allow_gnu_extensions_without_terminator: bool,
+    allow_header_linkname_on_non_link_members: bool,
     max_gnu_extension_size: u64,
     pax_policy: PaxDecodePolicy,
 }
@@ -161,6 +165,7 @@ impl Default for DecodePolicy {
             allow_all_nul_numeric_fields: true,
             allow_header_uname_and_gname_without_terminator: false,
             allow_gnu_extensions_without_terminator: false,
+            allow_header_linkname_on_non_link_members: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
             pax_policy: PaxDecodePolicy::default(),
         }
@@ -215,6 +220,17 @@ impl DecodePolicy {
     /// accepts the whole payload as the value when it contains no NUL byte.
     pub fn allow_gnu_extensions_without_terminator(mut self, allow: bool) -> Self {
         self.allow_gnu_extensions_without_terminator = allow;
+        self
+    }
+
+    /// Configures whether non-link members may carry an ordinary header `linkname`.
+    ///
+    /// This compatibility option applies to ordinary pax/ustar and GNU member
+    /// headers and is **disabled by default**. Enabling it ignores the field on
+    /// members other than hard and symbolic links. A pax `linkpath` record or a
+    /// GNU long-link extension on such a member is still rejected.
+    pub fn allow_header_linkname_on_non_link_members(mut self, allow: bool) -> Self {
+        self.allow_header_linkname_on_non_link_members = allow;
         self
     }
 
