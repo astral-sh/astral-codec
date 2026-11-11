@@ -35,6 +35,35 @@ pub struct MemberMetadata {
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
+    /// Unix attributes recorded for this member.
+    pub unix: UnixMetadata,
+}
+
+/// Unix attributes carried by one archive member.
+///
+/// Missing fields were absent from the archive. Extended attribute values are
+/// raw bytes, and `mtime` is whole seconds.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnixMetadata {
+    /// Permission bits, masked to `0o7777`.
+    pub mode: Option<u32>,
+    /// Numeric user id.
+    pub uid: Option<u64>,
+    /// Numeric group id.
+    pub gid: Option<u64>,
+    /// Modification time in seconds.
+    pub mtime: Option<u64>,
+    /// Extended attributes. Names omit any archive-specific prefix.
+    pub xattrs: Vec<UnixXattr>,
+}
+
+/// One Unix extended attribute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnixXattr {
+    /// Attribute name, such as `user.demo`.
+    pub name: String,
+    /// Attribute value.
+    pub value: Vec<u8>,
 }
 
 /// A special-file kind that generic extraction deliberately rejects.

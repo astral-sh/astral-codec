@@ -9,7 +9,7 @@ use std::collections::HashSet;
 
 use archive_trait::{
     Archive as ArchiveTrait, Member, MemberMetadata, MemberPayload as MemberPayloadTrait,
-    SpecialKind,
+    SpecialKind, UnixMetadata, UnixXattr,
 };
 use tar_framing::{
     FrameError, PaxExtension, PaxKeyword, PaxKind, PaxRecord, PaxValue, StreamPolicy, UstarKind,
@@ -335,7 +335,9 @@ impl PaxDecodePolicy {
     ///
     /// **IMPORTANT**: Only permit records whose ignored semantics are
     /// acceptable. Unknown vendor-namespaced pax records are **forbidden by
-    /// default**.
+    /// default**. `SCHILY.xattr.*` records are known extended attributes and
+    /// are accepted under every vendor policy. Their values stay raw bytes.
+    /// Other `SCHILY.*` records remain subject to this policy.
     pub fn vendor_extension_policy(mut self, policy: PaxVendorExtensionPolicy) -> Self {
         self.vendor_extension_policy = policy;
         self
@@ -356,6 +358,8 @@ impl PaxDecodePolicy {
     ///
     /// When enabled, standard pax semantics permit global `path`, `linkpath`,
     /// and `size` records to apply to following members until overridden.
+    /// Global `uid`, `gid`, `mtime`, and `SCHILY.xattr.*` records are likewise
+    /// projected into [`UnixMetadata`] only when this is enabled.
     ///
     /// Member metadata within global pax headers is **forbidden by default**,
     /// as it is extremely differential-prone.
@@ -402,6 +406,13 @@ impl PaxDecodePolicy {
                 value,
             } = record
             {
+                if vendor.as_ref() == "SCHILY"
+                    && name
+                        .strip_prefix("xattr.")
+                        .is_some_and(|attribute| !attribute.is_empty())
+                {
+                    continue;
+                }
                 let allowed = match &self.vendor_extension_policy {
                     PaxVendorExtensionPolicy::RejectUnknown => false,
                     PaxVendorExtensionPolicy::Ignore(allowed) => {
@@ -590,6 +601,37 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     }
 }
 
+fn pax_numeric<R>(
+    frame: &MemberFrame<'_, R>,
+    allow_global: bool,
+    keyword: &PaxKeyword,
+    header: Option<u64>,
+) -> Option<u64> {
+    let MemberExtensions::Pax(state) = &frame.extensions else {
+        return header;
+    };
+    let record = if let Some(record) = state.local_record(keyword) {
+        Some(record)
+    } else if allow_global {
+        state.global_record(keyword)
+    } else {
+        None
+    };
+    match record {
+        Some(
+            PaxRecord::Uid(PaxValue::Value(value))
+            | PaxRecord::Gid(PaxValue::Value(value))
+            | PaxRecord::Mtime(PaxValue::Value(value)),
+        ) => Some(*value),
+        Some(
+            PaxRecord::Uid(PaxValue::Deleted)
+            | PaxRecord::Gid(PaxValue::Deleted)
+            | PaxRecord::Mtime(PaxValue::Deleted),
+        ) => None,
+        _ => header,
+    }
+}
+
 fn decode_member<'a, R>(
     frame: MemberFrame<'a, R>,
     policy: &DecodePolicy,
@@ -598,6 +640,31 @@ fn decode_member<'a, R>(
     let position = frame.header.position;
     let kind = frame.header.kind;
     let size = frame.header.effective_size;
+    let allow_global = policy.pax_policy.allow_global_pax_member_metadata;
+    let mut xattrs = Vec::new();
+    if let MemberExtensions::Pax(state) = &frame.extensions {
+        for (name, value) in state.vendor_records("SCHILY", allow_global) {
+            if let Some(attribute) = name.strip_prefix("xattr.")
+                && !attribute.is_empty()
+                && let PaxValue::Value(value) = value
+            {
+                xattrs.push(UnixXattr {
+                    name: attribute.to_owned(),
+                    value: value.as_ref().to_vec(),
+                });
+            }
+        }
+    }
+    let unix = UnixMetadata {
+        mode: frame
+            .header
+            .mode
+            .and_then(|mode| u32::try_from(mode & 0o7777).ok()),
+        uid: pax_numeric(&frame, allow_global, &PaxKeyword::Uid, frame.header.uid),
+        gid: pax_numeric(&frame, allow_global, &PaxKeyword::Gid, frame.header.gid),
+        mtime: pax_numeric(&frame, allow_global, &PaxKeyword::Mtime, frame.header.mtime),
+        xattrs,
+    };
     let executable = frame.header.mode.unwrap_or_default() & 0o111 != 0;
     let path = std::str::from_utf8(frame.effective_path()?)
         .map(str::to_owned)
@@ -615,7 +682,11 @@ fn decode_member<'a, R>(
     } else {
         String::new()
     };
-    let metadata = MemberMetadata { path, position };
+    let metadata = MemberMetadata {
+        path,
+        position,
+        unix,
+    };
 
     Ok(match kind {
         UstarKind::Regular | UstarKind::Contiguous => Member::File {

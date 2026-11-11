@@ -139,6 +139,13 @@ pub fn header(
     block
 }
 
+pub fn set_owner_and_mtime(block: &mut Block, uid: u64, gid: u64, mtime: u64) {
+    block[UID_RANGE].copy_from_slice(format!("{uid:07o}\0").as_bytes());
+    block[GID_RANGE].copy_from_slice(format!("{gid:07o}\0").as_bytes());
+    block[MTIME_RANGE].copy_from_slice(format!("{mtime:011o}\0").as_bytes());
+    set_checksum(block);
+}
+
 pub fn set_checksum(block: &mut Block) {
     block[CHECKSUM_RANGE].fill(b' ');
     let checksum: u64 = block.iter().map(|byte| u64::from(*byte)).sum();

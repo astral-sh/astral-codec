@@ -1,6 +1,6 @@
 use std::collections::VecDeque;
 
-use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
+use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind, UnixMetadata};
 use thiserror::Error;
 
 const MAX_TEST_CHUNK_BYTES: usize = 64 * 1024;
@@ -89,6 +89,7 @@ pub mod entry {
         MemberMetadata {
             path: path.to_owned(),
             position: 0,
+            unix: UnixMetadata::default(),
         }
     }
 }
