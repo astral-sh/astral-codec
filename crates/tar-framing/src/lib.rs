@@ -107,6 +107,8 @@
 //! Only hard links and symbolic links may carry a link target in the ordinary
 //! `linkname` field, a pax `linkpath` record, or a GNU long-link extension.
 //! A pax deletion cannot hide a populated `linkname` on a non-link member.
+//! Some older Docker layers leave a stale `linkname` on regular-file whiteouts;
+//! [`StreamPolicy::allow_header_linkname_on_non_link_members`] ignores that field instead.
 //!
 //! tar-framing accepts wholly NUL `mode`, `uid`, `gid`, and `mtime` fields by default for
 //! compatibility with real-world writers in both families. These fields are represented as

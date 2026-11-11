@@ -4,11 +4,11 @@ use std::{io, sync::Arc};
 
 use support::{
     ArchiveBuilder, ArchiveFormat, header, pax_record, raw_pax_record, set_checksum,
-    set_identity_byte,
+    set_identity_byte, set_owner_and_mtime,
 };
 use tar_codec::{
-    Archive as _, DecodeError, DecodePolicy, DecodePolicyViolation, ExtractError, PaxDecodePolicy,
-    PaxVendorExtensionPolicy, TarArchive, extract::ExtractPolicy,
+    Archive as _, DecodeError, DecodePolicy, DecodePolicyViolation, ExtractError, Member,
+    PaxDecodePolicy, PaxVendorExtensionPolicy, TarArchive, extract::ExtractPolicy,
 };
 #[cfg(unix)]
 use tar_codec::{ExtractPolicyViolation, default_name_validator};
@@ -695,4 +695,114 @@ async fn binary_names_are_rejected_and_streaming_failures_preserve_prior_output(
         std::fs::read_to_string(destination.join("created")).unwrap(),
         "kept"
     );
+}
+
+#[tokio::test]
+async fn projects_header_metadata_pax_overrides_and_schily_xattrs() {
+    let xattr = raw_pax_record(
+        PaxKeyword::Vendor {
+            vendor: Arc::from("SCHILY"),
+            name: Arc::from("xattr.user.demo"),
+        },
+        &[1, 2, 255],
+    );
+    let mut local = pax_record(PaxKeyword::Uid, "11");
+    local.extend_from_slice(&xattr);
+    let mut archive = ArchiveBuilder::new();
+    archive.pax(b'x', &local).block(&owned_file_header());
+    let bytes = archive.finish();
+    let mut members = TarArchive::new(bytes.as_slice()).members();
+    let Some(Member::File {
+        metadata,
+        executable,
+        ..
+    }) = members.next().await.unwrap()
+    else {
+        panic!("expected file");
+    };
+    assert!(!executable);
+    assert_eq!(metadata.unix.mode, Some(0o640));
+    assert_eq!(metadata.unix.uid, Some(11));
+    assert_eq!(metadata.unix.gid, Some(20));
+    assert_eq!(metadata.unix.mtime, Some(30));
+    assert_eq!(metadata.unix.xattrs.len(), 1);
+    assert_eq!(metadata.unix.xattrs[0].name, "user.demo");
+    assert_eq!(metadata.unix.xattrs[0].value, [1, 2, 255]);
+
+    let mut deleted = ArchiveBuilder::new();
+    deleted
+        .pax(b'x', &pax_record(PaxKeyword::Uid, ""))
+        .block(&owned_file_header());
+    let bytes = deleted.finish();
+    let mut members = TarArchive::new(bytes.as_slice()).members();
+    let Some(Member::File { metadata, .. }) = members.next().await.unwrap() else {
+        panic!("expected file");
+    };
+    assert_eq!(metadata.unix.uid, None);
+    assert_eq!(metadata.unix.gid, Some(20));
+
+    let mut rejected = ArchiveBuilder::new();
+    rejected
+        .pax(
+            b'x',
+            &pax_record(
+                PaxKeyword::Vendor {
+                    vendor: Arc::from("SCHILY"),
+                    name: Arc::from("fflags"),
+                },
+                "nodump",
+            ),
+        )
+        .ustar("file", b'0', b"x", "", 0o644);
+    assert!(matches!(
+        TarArchive::new(rejected.finish().as_slice())
+            .members()
+            .next()
+            .await,
+        Err(DecodeError::PolicyViolation {
+            violation: DecodePolicyViolation::PaxVendorExtension { .. },
+            ..
+        })
+    ));
+}
+
+#[tokio::test]
+async fn global_uid_and_xattrs_follow_the_member_metadata_flag() {
+    let mut records = pax_record(PaxKeyword::Uid, "99");
+    records.extend_from_slice(&pax_record(
+        PaxKeyword::Vendor {
+            vendor: Arc::from("SCHILY"),
+            name: Arc::from("xattr.user.fromglobal"),
+        },
+        "global",
+    ));
+    let mut archive = ArchiveBuilder::new();
+    archive.pax(b'g', &records).block(&owned_file_header());
+    let bytes = archive.finish();
+
+    let mut members = TarArchive::new(bytes.as_slice()).members();
+    let Some(Member::File { metadata, .. }) = members.next().await.unwrap() else {
+        panic!("expected file");
+    };
+    assert_eq!(metadata.unix.uid, Some(10));
+    assert!(metadata.unix.xattrs.is_empty());
+
+    let policy = DecodePolicy::default()
+        .pax_policy(PaxDecodePolicy::default().allow_global_pax_member_metadata(true));
+    let mut members = TarArchive::new(bytes.as_slice())
+        .with_policy(policy)
+        .members();
+    let Some(Member::File { metadata, .. }) = members.next().await.unwrap() else {
+        panic!("expected file");
+    };
+    assert_eq!(metadata.unix.uid, Some(99));
+    assert_eq!(metadata.unix.xattrs.len(), 1);
+    assert_eq!(metadata.unix.xattrs[0].name, "user.fromglobal");
+    assert_eq!(metadata.unix.xattrs[0].value, b"global");
+}
+
+fn owned_file_header() -> tar_framing::Block {
+    let mut block = header(ArchiveFormat::Pax, "file", b'0', 0, "", 0o640);
+    set_owner_and_mtime(&mut block, 10, 20, 30);
+    block
 }

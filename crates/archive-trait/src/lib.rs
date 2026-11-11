@@ -35,6 +35,37 @@ pub struct MemberMetadata {
     pub path: String,
     /// The member's byte position in the source archive.
     pub position: u64,
+    /// Unix attributes recorded for this member.
+    ///
+    /// Extraction ignores these until [`extract::MetadataPolicy`] enables them.
+    pub unix: UnixMetadata,
+}
+
+/// Unix attributes carried by one archive member.
+///
+/// Missing fields were absent from the archive. Extended attribute values are
+/// raw bytes, and `mtime` is whole seconds.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct UnixMetadata {
+    /// Permission bits, masked to `0o7777`.
+    pub mode: Option<u32>,
+    /// Numeric user id.
+    pub uid: Option<u64>,
+    /// Numeric group id.
+    pub gid: Option<u64>,
+    /// Modification time in seconds.
+    pub mtime: Option<u64>,
+    /// Extended attributes. Names omit any archive-specific prefix.
+    pub xattrs: Vec<UnixXattr>,
+}
+
+/// One Unix extended attribute.
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct UnixXattr {
+    /// Attribute name, such as `user.demo`.
+    pub name: String,
+    /// Attribute value.
+    pub value: Vec<u8>,
 }
 
 /// A special-file kind that generic extraction deliberately rejects.
@@ -261,15 +292,15 @@ pub trait Archive: Sized {
     /// are preserved by default on platforms that support native creation;
     /// hard links require explicit opt-in through [`extract::LinkPolicy`].
     ///
-    /// Archived Unix permission modes are normalized rather than restored.
-    /// When creating a regular file on Unix, the extractor requests mode
-    /// `0o777` if the archive marks the file executable and `0o666` otherwise.
-    /// The host determines the file's effective permissions from that mode and
-    /// local settings such as the process umask or an access control list
-    /// inherited from the parent directory.
-    /// Directories use the platform's default creation mode, and special mode
-    /// bits are not restored. Ownership and timestamps are likewise determined
-    /// by extraction activity rather than archived metadata.
+    /// By default, creating a regular file on Unix requests mode `0o777` when
+    /// the archive marks the file executable and `0o666` otherwise. The host
+    /// combines that mode with local settings such as the process umask.
+    /// Directories use the platform's default creation mode. Ownership,
+    /// timestamps, and extended attributes come from the extracting process.
+    /// [`extract::MetadataPolicy`] restores archived permissions, ownership,
+    /// modification times, and extended attributes instead. Restoring them can
+    /// keep setuid bits and file capabilities, so enable it only for trusted
+    /// archives.
     ///
     /// **IMPORTANT**: `destination` must not be concurrently modified during
     /// extraction. No correctness or isolation guarantees are made under
@@ -377,6 +408,19 @@ pub enum ExtractError<E> {
         /// The selected policy rule that rejected the member.
         violation: ExtractPolicyViolation,
     },
+    /// Archived metadata cannot be represented by the platform owner or time types.
+    #[error("at byte {position}: archived {field} {value} cannot be applied")]
+    UnapplicableMetadata {
+        /// Source member position.
+        position: u64,
+        /// Metadata field that cannot be applied.
+        field: &'static str,
+        /// Archived value.
+        value: u64,
+    },
+    /// Unix metadata preservation was requested where the platform cannot apply it.
+    #[error("preserving archived Unix metadata is not supported on this platform")]
+    UnixMetadataUnsupported,
 }
 
 impl<E> ExtractError<E> {
@@ -415,6 +459,14 @@ impl<E> ExtractError<E> {
             operation,
             path,
             source,
+        }
+    }
+
+    fn unapplicable_metadata(position: u64, field: &'static str, value: u64) -> Self {
+        Self::UnapplicableMetadata {
+            position,
+            field,
+            value,
         }
     }
 }

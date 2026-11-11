@@ -180,7 +180,7 @@ impl HeaderFrame {
             PaxState::effective_record_from(local_records, global_records, &PaxKeyword::LinkPath),
             Some(PaxRecord::LinkPath(PaxValue::Value(_)))
         );
-        let kind = UstarKind::from_header(position, &block, has_linkpath)?;
+        let kind = UstarKind::from_header(position, &block, has_linkpath, policy)?;
 
         // Some real-world pax writers encode absent ordinary-header metadata as
         // all NULs. The compatibility policy may accept these empty fields; every
@@ -241,7 +241,7 @@ impl HeaderFrame {
         has_long_link: bool,
         policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
-        let kind = UstarKind::from_header(position, &block, has_long_link)?;
+        let kind = UstarKind::from_header(position, &block, has_long_link, policy)?;
         validate_gnu_member_size(position, kind, declared_size)?;
         let parse_numeric_field = |field, range: Range<usize>| {
             Self::parse_numeric_field(
@@ -451,6 +451,7 @@ pub struct StreamPolicy {
     allow_header_uname_and_gname_without_terminator: bool,
     allow_pax_base256_uid_and_gid: bool,
     pub(super) allow_gnu_extensions_without_terminator: bool,
+    allow_header_linkname_on_non_link_members: bool,
     max_gnu_extension_size: u64,
 }
 
@@ -465,6 +466,7 @@ impl Default for StreamPolicy {
             allow_header_uname_and_gname_without_terminator: false,
             allow_pax_base256_uid_and_gid: false,
             allow_gnu_extensions_without_terminator: false,
+            allow_header_linkname_on_non_link_members: false,
             max_gnu_extension_size: DEFAULT_MAX_GNU_EXTENSION_SIZE,
         }
     }
@@ -547,6 +549,17 @@ impl StreamPolicy {
     /// the whole payload as the value when it contains no NUL byte.
     pub fn allow_gnu_extensions_without_terminator(mut self, allow: bool) -> Self {
         self.allow_gnu_extensions_without_terminator = allow;
+        self
+    }
+
+    /// Configures whether non-link members may carry an ordinary header `linkname`.
+    ///
+    /// This compatibility option applies to ordinary pax/ustar and GNU member
+    /// headers and is disabled by default. Enabling it ignores the field on
+    /// members other than hard and symbolic links. A pax `linkpath` record or
+    /// a GNU long-link extension on such a member is still rejected.
+    pub fn allow_header_linkname_on_non_link_members(mut self, allow: bool) -> Self {
+        self.allow_header_linkname_on_non_link_members = allow;
         self
     }
 
@@ -1363,11 +1376,14 @@ impl UstarKind {
         position: u64,
         block: &Block,
         has_extended_target: bool,
+        policy: &StreamPolicy,
     ) -> Result<Self, FrameError> {
         let kind = Self::try_from_framed(position, block[TYPEFLAG_OFFSET])?;
+        let rejects_header_target =
+            block[LINK_NAME_RANGE.start] != 0 && !policy.allow_header_linkname_on_non_link_members;
         match kind {
             Self::HardLink | Self::SymbolicLink => Ok(kind),
-            _ if has_extended_target || block[LINK_NAME_RANGE.start] != 0 => Err(FrameError::at(
+            _ if has_extended_target || rejects_header_target => Err(FrameError::at(
                 position,
                 FrameErrorInner::UnexpectedLinkTarget { kind },
             )),

@@ -69,6 +69,13 @@ impl ArchiveBuilder {
         self
     }
 
+    pub fn payload(&mut self, payload: &[u8]) -> &mut Self {
+        self.bytes.extend_from_slice(payload);
+        self.bytes
+            .resize(self.bytes.len().next_multiple_of(BLOCK_SIZE), 0);
+        self
+    }
+
     pub fn finish(mut self) -> Vec<u8> {
         self.bytes.resize(self.bytes.len() + 2 * BLOCK_SIZE, 0);
         self.bytes
@@ -137,6 +144,13 @@ pub fn header(
     });
     set_checksum(&mut block);
     block
+}
+
+pub fn set_owner_and_mtime(block: &mut Block, uid: u64, gid: u64, mtime: u64) {
+    block[UID_RANGE].copy_from_slice(format!("{uid:07o}\0").as_bytes());
+    block[GID_RANGE].copy_from_slice(format!("{gid:07o}\0").as_bytes());
+    block[MTIME_RANGE].copy_from_slice(format!("{mtime:011o}\0").as_bytes());
+    set_checksum(block);
 }
 
 pub fn set_checksum(block: &mut Block) {

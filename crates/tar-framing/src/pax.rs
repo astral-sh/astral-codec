@@ -264,6 +264,37 @@ impl<'global> PaxState<'global> {
         }
     }
 
+    /// Returns the local extended-header record for `keyword`, including deletions.
+    pub fn local_record(&self, keyword: &PaxKeyword) -> Option<&PaxRecord> {
+        self.local_extension
+            .as_ref()
+            .and_then(|extension| extension.records.get(keyword))
+    }
+
+    /// Returns the accumulated global record for `keyword`, including deletions.
+    pub fn global_record(&self, keyword: &PaxKeyword) -> Option<&PaxRecord> {
+        self.global_records.get(keyword)
+    }
+
+    /// Returns effective `vendor.*` records, with local records overriding global ones.
+    ///
+    /// Deletion tombstones are included. When `include_global` is false, only the
+    /// local extended header contributes.
+    pub fn vendor_records(
+        &self,
+        vendor: &str,
+        include_global: bool,
+    ) -> Vec<(&str, &PaxValue<Arc<[u8]>>)> {
+        let mut found = Vec::new();
+        if include_global {
+            collect_vendor_records(self.global_records.records.as_slice(), vendor, &mut found);
+        }
+        if let Some(extension) = &self.local_extension {
+            collect_vendor_records(extension.records.as_slice(), vendor, &mut found);
+        }
+        found
+    }
+
     pub(super) fn effective_size<'records>(
         local_records: Option<&'records PaxRecords>,
         global_records: &'records GlobalPaxRecords,
@@ -284,6 +315,31 @@ impl<'global> PaxState<'global> {
         local_records
             .and_then(|records| records.get(keyword))
             .or_else(|| global_records.get(keyword))
+    }
+}
+
+fn collect_vendor_records<'records>(
+    records: &'records [PaxRecord],
+    vendor: &str,
+    found: &mut Vec<(&'records str, &'records PaxValue<Arc<[u8]>>)>,
+) {
+    for record in records {
+        if let PaxRecord::Vendor {
+            vendor: record_vendor,
+            name,
+            value,
+        } = record
+            && record_vendor.as_ref() == vendor
+        {
+            if let Some(existing) = found
+                .iter_mut()
+                .find(|(existing_name, _)| *existing_name == name.as_ref())
+            {
+                *existing = (name.as_ref(), value);
+            } else {
+                found.push((name.as_ref(), value));
+            }
+        }
     }
 }
 

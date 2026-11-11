@@ -7,7 +7,7 @@ mod buffered;
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{HashMap, HashSet},
     fs as std_fs, io,
     marker::PhantomData,
     mem,
@@ -38,6 +38,9 @@ use {
 use self::buffered::{BufferedFile, BufferedFileReplacement, write_buffered_files};
 use super::{
     LinkPolicy,
+    metadata::{
+        MetadataError, PreservedMetadata, apply_directory, apply_fd, apply_file, apply_symlink,
+    },
     path::{ExtractMember, NormalizedPath, resolve_link_target, validate_symlink_target},
 };
 use crate::{
@@ -55,6 +58,7 @@ struct PendingSymlink {
     target: String,
     resolved_target: NormalizedPath,
     requires_directory: bool,
+    metadata: PreservedMetadata,
 }
 
 impl PendingSymlink {
@@ -236,6 +240,8 @@ pub(super) struct ExtractionRoot<E> {
     buffered_file_buffers: Vec<Vec<u8>>,
     /// Signals an in-flight blocking batch when the extraction future is dropped.
     buffered_file_cancellation: Arc<AtomicBool>,
+    /// Directory modification times applied after descendants and links exist.
+    deferred_mtimes: HashMap<NormalizedPath, i64>,
     /// Associates filesystem failures with the archive error type without owning it.
     error: PhantomData<fn() -> E>,
 }
@@ -277,6 +283,7 @@ async fn write_payload<P: MemberPayload>(
     chunk_buffer: &mut Vec<u8>,
     path: &NormalizedPath,
     mut file: File,
+    metadata: &PreservedMetadata,
 ) -> Result<(), ExtractError<P::Error>> {
     let result = loop {
         match payload
@@ -294,7 +301,14 @@ async fn write_payload<P: MemberPayload>(
     file.flush()
         .await
         .map_err(|source| ExtractError::filesystem("flush file", path.to_path_buf(), source))?;
-    result
+    result?;
+    // Applied after the flush so that no queued write can move the restored mtime.
+    if !metadata.is_empty() {
+        apply_fd(&file, metadata).map_err(|error| {
+            ExtractError::filesystem(error.operation, path.to_path_buf(), error.source)
+        })?;
+    }
+    Ok(())
 }
 
 // Member operations invoked by the extraction loop.
@@ -348,11 +362,16 @@ impl<E> ExtractionRoot<E> {
             buffered_file_bytes: 0,
             buffered_file_buffers: Vec::new(),
             buffered_file_cancellation: Arc::new(AtomicBool::new(false)),
+            deferred_mtimes: HashMap::new(),
             error: PhantomData,
         })
     }
 
     /// Extracts a regular file, validating small payloads before creating it.
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "payload streaming and preserved metadata stay explicit at this private boundary"
+    )]
     pub(super) async fn extract_file<P: MemberPayload<Error = E>>(
         &mut self,
         path: &NormalizedPath,
@@ -361,6 +380,7 @@ impl<E> ExtractionRoot<E> {
         mut payload: P,
         chunk_buffer: &mut Vec<u8>,
         buffered_payload: &mut Vec<u8>,
+        metadata: &PreservedMetadata,
     ) -> Result<(), ExtractError<E>> {
         if size <= BUFFERED_PAYLOAD_MAX_BYTES as u64 {
             if let Ok(payload_size) = usize::try_from(size) {
@@ -401,19 +421,20 @@ impl<E> ExtractionRoot<E> {
                 buffered_payload.clear();
             }
             *buffered_payload = self
-                .queue_buffered_file(path, executable, mem::take(buffered_payload))
+                .queue_buffered_file(path, executable, mem::take(buffered_payload), metadata)
                 .await?;
             return Ok(());
         }
         self.flush_buffered_files().await?;
         let file = self.create_file(path, executable).await?;
-        write_payload(payload, chunk_buffer, path, file).await
+        write_payload(payload, chunk_buffer, path, file, metadata).await
     }
 
     /// Creates or reuses the real directory at `path`.
     pub(super) async fn extract_directory(
         &mut self,
         path: &NormalizedPath,
+        metadata: &PreservedMetadata,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         if !path.is_empty() {
@@ -422,13 +443,30 @@ impl<E> ExtractionRoot<E> {
             self.ensure_directory(path, entry, parent, DirectoryPurpose::ExplicitMember)
                 .await?;
         }
-        Ok(())
+        if let Some(mtime) = metadata.mtime {
+            self.deferred_mtimes.insert(path.clone(), mtime);
+        }
+        let metadata = PreservedMetadata {
+            mtime: None,
+            ..metadata.clone()
+        };
+        if metadata.is_empty() {
+            return Ok(());
+        }
+        spawn_metadata(
+            Arc::clone(&self.directory),
+            path.to_path_buf(),
+            path.to_path_buf(),
+            move |directory, relative| apply_directory(directory, relative, &metadata),
+        )
+        .await
     }
 
     /// Reserves a symbolic link for validation after all members are read.
     pub(super) async fn reserve_symlink(
         &mut self,
         member: &ExtractMember,
+        metadata: &PreservedMetadata,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         let target = validate_symlink_target(member.position, &member.path, &member.link_target)?;
@@ -447,6 +485,7 @@ impl<E> ExtractionRoot<E> {
             target: member.link_target.clone(),
             resolved_target: target.resolved_target,
             requires_directory: target.requires_directory,
+            metadata: metadata.clone(),
         });
         Ok(())
     }
@@ -462,6 +501,7 @@ impl<E> ExtractionRoot<E> {
         size: u64,
         payload: P,
         chunk_buffer: &mut Vec<u8>,
+        metadata: &PreservedMetadata,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         let target_text = member.link_target.clone();
@@ -503,7 +543,18 @@ impl<E> ExtractionRoot<E> {
         // name updates both while preserving the hard-link relationship.
         if size == 0 {
             payload.skip().await.map_err(ExtractError::Archive)?;
-            Ok(())
+            if metadata.is_empty() {
+                return Ok(());
+            }
+            let (directory, relative) = self.entry_capability(&member.path, parent);
+            let metadata = metadata.clone();
+            spawn_metadata(
+                directory,
+                relative,
+                member.path.to_path_buf(),
+                move |directory, relative| apply_file(directory, relative, &metadata),
+            )
+            .await
         } else {
             let file = self
                 .open_file(
@@ -513,7 +564,7 @@ impl<E> ExtractionRoot<E> {
                     FileOpenMode::Truncate,
                 )
                 .await?;
-            write_payload(payload, chunk_buffer, &member.path, file).await
+            write_payload(payload, chunk_buffer, &member.path, file, metadata).await
         }
     }
 
@@ -564,13 +615,14 @@ impl<E> ExtractionRoot<E> {
         }
 
         for &index in &links {
-            let (entry, parent, path, contents) = {
+            let (entry, parent, path, contents, preserved) = {
                 let link = &self.symlinks[index];
                 (
                     link.entry,
                     link.parent,
                     link.path.clone(),
                     link.target.clone(),
+                    link.metadata.clone(),
                 )
             };
             // The link target was validated at this depth. A filesystem alias
@@ -594,7 +646,11 @@ impl<E> ExtractionRoot<E> {
                 .try_create_symlink(&path, parent, contents.clone())
                 .await?
             {
-                Ok(()) => continue,
+                Ok(()) => {
+                    self.apply_symlink_metadata(&path, parent, &preserved)
+                        .await?;
+                    continue;
+                }
                 Err(error) if error.kind() == io::ErrorKind::AlreadyExists => {}
                 Err(source) => {
                     return Err(ExtractError::filesystem(
@@ -623,6 +679,8 @@ impl<E> ExtractionRoot<E> {
                 .map_err(|source| {
                     ExtractError::filesystem("create symbolic link", path.to_path_buf(), source)
                 })?;
+            self.apply_symlink_metadata(&path, parent, &preserved)
+                .await?;
         }
 
         // A later link can make a missing target reachable through a filesystem alias.
@@ -644,6 +702,44 @@ impl<E> ExtractionRoot<E> {
         }
         Ok(())
     }
+
+    /// Applies directory modification times once no later member can change them.
+    pub(super) async fn apply_deferred_mtimes(&self) -> Result<(), ExtractError<E>> {
+        for (path, &mtime) in &self.deferred_mtimes {
+            let metadata = PreservedMetadata {
+                mtime: Some(mtime),
+                ..PreservedMetadata::default()
+            };
+            spawn_metadata(
+                Arc::clone(&self.directory),
+                path.to_path_buf(),
+                path.to_path_buf(),
+                move |directory, relative| apply_directory(directory, relative, &metadata),
+            )
+            .await?;
+        }
+        Ok(())
+    }
+
+    async fn apply_symlink_metadata(
+        &self,
+        path: &NormalizedPath,
+        parent: EntryId,
+        metadata: &PreservedMetadata,
+    ) -> Result<(), ExtractError<E>> {
+        if metadata.is_empty() {
+            return Ok(());
+        }
+        let (directory, relative) = self.entry_capability(path, parent);
+        let metadata = metadata.clone();
+        spawn_metadata(
+            directory,
+            relative,
+            path.to_path_buf(),
+            move |directory, relative| apply_symlink(directory, relative, &metadata),
+        )
+        .await
+    }
 }
 
 // Destination state transitions and replacement policy.
@@ -654,6 +750,7 @@ impl<E> ExtractionRoot<E> {
         path: &NormalizedPath,
         executable: bool,
         contents: Vec<u8>,
+        metadata: &PreservedMetadata,
     ) -> Result<Vec<u8>, ExtractError<E>> {
         let parent = if let Some(parent) = self.known_parent(path) {
             parent
@@ -698,6 +795,7 @@ impl<E> ExtractionRoot<E> {
             executable,
             contents,
             replacement,
+            metadata: metadata.clone(),
         });
         self.entries.set_state(entry, ExtractedEntry::File);
         if self.buffered_files.len() >= BUFFERED_FILE_BATCH_MAX_ENTRIES
@@ -1167,6 +1265,21 @@ fn check_symlink_resolution_limit(
         .filter(|bytes| *bytes <= MAX_SYMLINK_RESOLUTION_WORK_BYTES)
         .ok_or(SYMLINK_RESOLUTION_LIMIT_EXCEEDED)?;
     Ok(())
+}
+
+async fn spawn_metadata<E, F>(
+    directory: Arc<Dir>,
+    relative: PathBuf,
+    error_path: PathBuf,
+    action: F,
+) -> Result<(), ExtractError<E>>
+where
+    F: FnOnce(&Dir, &Path) -> Result<(), MetadataError> + Send + 'static,
+{
+    tokio::task::spawn_blocking(move || action(&directory, &relative))
+        .await
+        .map_err(ExtractError::<E>::BlockingTask)?
+        .map_err(|error| ExtractError::filesystem(error.operation, error_path, error.source))
 }
 
 fn leaf_name(path: &NormalizedPath) -> &str {

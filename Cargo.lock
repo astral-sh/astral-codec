@@ -94,6 +94,7 @@ version = "0.0.16"
 dependencies = [
  "cap-std",
  "junction",
+ "rustix",
  "tempfile",
  "thiserror",
  "tokio",
@@ -872,6 +873,7 @@ dependencies = [
  "archive-trait",
  "astral-tokio-tar",
  "codspeed-divan-compat",
+ "rustix",
  "tar",
  "tar-framing",
  "tempfile",
