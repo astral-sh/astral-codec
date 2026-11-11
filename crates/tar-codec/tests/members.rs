@@ -17,6 +17,7 @@ use tar_codec::{
 };
 use tar_framing::{
     BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
+    UstarKind,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::{MemberExtensions, TarReader},
 };
@@ -395,6 +396,50 @@ async fn unterminated_owner_names_are_policy_controlled() -> TestResult {
             assert!(members.next().await?.is_none());
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn non_link_header_linknames_are_policy_controlled() -> TestResult {
+    let policy = DecodePolicy::default().allow_header_linkname_on_non_link_members(true);
+    let rejects_link_target = |result| {
+        matches!(
+            result,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::UnexpectedLinkTarget {
+                    kind: UstarKind::Regular
+                },
+                ..
+            }))
+        )
+    };
+    for format in [ArchiveFormat::Pax, ArchiveFormat::Gnu] {
+        let mut archive = ArchiveBuilder::new();
+        archive.block(&header(format, "dir/.wh.file", b'0', 0, "dir/file", 0o644));
+        let bytes = archive.finish();
+
+        let mut members = TarArchive::new(bytes.as_slice()).members();
+        assert!(rejects_link_target(members.next().await.map(|_| ())));
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(policy.clone())
+            .members();
+        assert!(matches!(
+            members.next().await?,
+            Some(Member::File { metadata, .. }) if metadata.path == "dir/.wh.file"
+        ));
+        assert!(members.next().await?.is_none());
+    }
+
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .pax(b'x', &pax_record(PaxKeyword::LinkPath, "dir/file"))
+        .ustar("dir/.wh.file", b'0', b"", "", 0o644);
+    let bytes = archive.finish();
+    let mut members = TarArchive::new(bytes.as_slice())
+        .with_policy(policy)
+        .members();
+    assert!(rejects_link_target(members.next().await.map(|_| ())));
     Ok(())
 }
 
