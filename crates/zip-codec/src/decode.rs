@@ -18,10 +18,10 @@ pub struct ZipArchive<R> {
     poisoned: bool,
 }
 
-/// Resource limits and policies for [`ZipArchive::with_options`].
+/// Controls resource limits and which ZIP features [`ZipArchive::with_policy`] accepts.
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
-pub struct ZipReadOptions {
+pub struct DecodePolicy {
     limits: Limits,
     framing: ReadOptions,
 }
@@ -33,21 +33,21 @@ struct DecoderState<R> {
     active: Option<Payload>,
 }
 
-impl ZipReadOptions {
+impl DecodePolicy {
     /// Sets the resource limits for this archive.
-    pub fn with_limits(mut self, limits: Limits) -> Self {
+    pub fn limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
         self
     }
 
     /// Sets the extra-field policy for both central and local headers.
-    pub fn with_policy(mut self, policy: ExtraFieldPolicy) -> Self {
+    pub fn extra_field_policy(mut self, policy: ExtraFieldPolicy) -> Self {
         self.framing.extra_fields = policy;
         self
     }
 
     /// Sets the [`CommentPolicy`] for member and archive comments.
-    pub fn with_comment_policy(mut self, policy: CommentPolicy) -> Self {
+    pub fn comment_policy(mut self, policy: CommentPolicy) -> Self {
         self.framing.comments = policy;
         self
     }
@@ -66,16 +66,15 @@ impl ZipReadOptions {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens the archive with the default [`ZipReadOptions`].
-    /// Use [`Self::with_options`] for custom limits or policies.
+    /// Opens the archive with the default [`DecodePolicy`].
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
-        Self::with_options(reader, ZipReadOptions::default()).await
+        Self::with_policy(reader, DecodePolicy::default()).await
     }
 
-    /// Opens the archive with the supplied limits and policies, validating its central directory.
+    /// Opens the archive and validates its central directory under the supplied [`DecodePolicy`].
     /// Local headers are checked on member access or by [`Self::validate_all`].
-    pub async fn with_options(mut reader: R, options: ZipReadOptions) -> Result<Self, DecodeError> {
-        let index = Index::read_with_options(&mut reader, options.limits, options.framing).await?;
+    pub async fn with_policy(mut reader: R, policy: DecodePolicy) -> Result<Self, DecodeError> {
+        let index = Index::read_with_options(&mut reader, policy.limits, policy.framing).await?;
 
         Ok(Self {
             state: DecoderState {
