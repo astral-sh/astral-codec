@@ -16,7 +16,7 @@ use zip_codec::{
     Archive, CommentPolicy,
     CommentRule::{AllowAll, AllowAscii, AllowUtf8, Reject},
     CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy, LimitExceeded,
-    Limits, Member, MemberPayload, ZipArchive,
+    Limits, Member, MemberPayload, ZipArchive, ZipReadOptions,
     extract::ExtractPolicy,
 };
 use zip_framing::{
@@ -116,12 +116,12 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
             (AllowUtf8, str::from_utf8(comment).is_ok()),
             (AllowAll, true),
         ] {
-            let result = ZipArchive::builder(Cursor::new(&bytes))
+            let result = ZipReadOptions::default()
                 .with_comment_policy(CommentPolicy {
                     per_member: AllowAscii,
                     archive,
                 })
-                .open()
+                .open(Cursor::new(&bytes))
                 .await;
             assert_eq!(result.is_ok(), accepted, "{archive:?}, comment={comment:?}");
         }
@@ -222,13 +222,13 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
 
 #[tokio::test]
 async fn reads_python_archives_and_projects_members() -> TestResult {
+    let options = ZipReadOptions::default().allow_stored_data_descriptors(true);
     for (label, bytes) in FIXTURES {
         // Short reads must work across headers, descriptors, and payloads,
         // including when a DEFLATE input buffer needs more than one read.
         // Python also stores empty members in the streaming DEFLATE fixtures.
-        let mut members = ZipArchive::builder(Interruptible::short_reads(bytes))
-            .allow_stored_data_descriptors(true)
-            .open()
+        let mut members = options
+            .open(Interruptible::short_reads(bytes))
             .await?
             .members();
 
@@ -694,9 +694,9 @@ async fn non_unix_symlink_modes_require_opt_in() -> TestResult {
             }))
         ));
 
-        let mut archive = ZipArchive::builder(Cursor::new(&bytes))
+        let mut archive = ZipReadOptions::default()
             .allow_ambiguous_symlink_modes(true)
-            .open()
+            .open(Cursor::new(&bytes))
             .await?;
         let member = archive.next_member().await?;
         if host == HostSystem::Darwin {
@@ -720,22 +720,21 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
             ..
         }))
     ));
-    let builder =
-        || ZipArchive::builder(Cursor::new(bytes)).with_policy(ExtraFieldPolicy::AllowListed);
+    let options = ZipReadOptions::default().with_policy(ExtraFieldPolicy::AllowListed);
     assert!(matches!(
-        builder()
+        options
             .with_limits(Limits {
                 member_size: 0,
                 ..Limits::default()
             })
-            .open()
+            .open(Cursor::new(bytes))
             .await,
         Err(DecodeError::Framing(FrameError::Limit(
             LimitExceeded::MemberSize(0)
         )))
     ));
 
-    let mut archive = builder().open().await?;
+    let mut archive = options.open(Cursor::new(bytes)).await?;
     assert!(
         matches!(archive.next_member().await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );
@@ -748,7 +747,7 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
         }))
     ));
 
-    let mut archive = builder().open().await?;
+    let mut archive = options.open(Cursor::new(bytes)).await?;
     assert!(
         matches!(archive.member(2).await?, Some(Member::SymbolicLink { target, .. }) if target == "target")
     );

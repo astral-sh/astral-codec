@@ -18,12 +18,12 @@ pub struct ZipArchive<R> {
     poisoned: bool,
 }
 
-/// Configures a ZIP reader before opening its central directory.
+/// Resource limits and policies for opening a [`ZipArchive`].
+#[derive(Clone, Copy, Debug, Default)]
 #[must_use]
-pub struct ZipArchiveBuilder<R> {
-    reader: R,
+pub struct ZipReadOptions {
     limits: Limits,
-    options: ReadOptions,
+    framing: ReadOptions,
 }
 
 struct DecoderState<R> {
@@ -33,7 +33,7 @@ struct DecoderState<R> {
     active: Option<Payload>,
 }
 
-impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
+impl ZipReadOptions {
     /// Sets the resource limits for this archive.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.limits = limits;
@@ -42,36 +42,39 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 
     /// Sets the extra-field policy for both central and local headers.
     pub fn with_policy(mut self, policy: ExtraFieldPolicy) -> Self {
-        self.options.extra_fields = policy;
+        self.framing.extra_fields = policy;
         self
     }
 
     /// Sets the [`CommentPolicy`] for member and archive comments.
     pub fn with_comment_policy(mut self, policy: CommentPolicy) -> Self {
-        self.options.comments = policy;
+        self.framing.comments = policy;
         self
     }
 
     /// Allows [Stored members with data descriptors](ReadOptions::allow_stored_data_descriptors).
     pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
-        self.options.allow_stored_data_descriptors = allow;
+        self.framing.allow_stored_data_descriptors = allow;
         self
     }
 
     /// Allows [Unix symlink modes from non-Unix creators](ReadOptions::allow_ambiguous_symlink_modes).
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
-        self.options.allow_ambiguous_symlink_modes = allow;
+        self.framing.allow_ambiguous_symlink_modes = allow;
         self
     }
 
     /// Reads and validates the central directory. Local headers are checked
     /// on member access or by [`ZipArchive::validate_all`].
-    pub async fn open(mut self) -> Result<ZipArchive<R>, DecodeError> {
-        let index = Index::read_with_options(&mut self.reader, self.limits, self.options).await?;
+    pub async fn open<R: AsyncRead + AsyncSeek + Unpin>(
+        self,
+        mut reader: R,
+    ) -> Result<ZipArchive<R>, DecodeError> {
+        let index = Index::read_with_options(&mut reader, self.limits, self.framing).await?;
 
         Ok(ZipArchive {
             state: DecoderState {
-                reader: self.reader,
+                reader,
                 index,
                 next: 0,
                 active: None,
@@ -82,18 +85,10 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens the archive with default limits and [read options](ReadOptions).
+    /// Opens the archive with the default [`ZipReadOptions`].
+    /// Use [`ZipReadOptions::open`] for custom limits or policies.
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
-        Self::builder(reader).open().await
-    }
-
-    /// Configures resource limits and accepted ZIP features before opening the archive.
-    pub fn builder(reader: R) -> ZipArchiveBuilder<R> {
-        ZipArchiveBuilder {
-            reader,
-            limits: Limits::default(),
-            options: ReadOptions::default(),
-        }
+        ZipReadOptions::default().open(reader).await
     }
 
     /// Returns indexed members without fetching local records or payloads.

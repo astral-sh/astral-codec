@@ -51,7 +51,8 @@ ZipArchive::open(reader).await?
     .await?;
 ```
 
-- Use `ZipArchive::builder` to set resource limits and ZIP reader policies before opening.
+- To set resource limits or reader policies, configure `ZipReadOptions::default()` and call
+  `options.open(reader).await?`. The same options can open multiple archives.
 - Use `ExtractPolicy` to control how archive members are written to disk.
 
 For random access, `ZipArchive::entries` lists central-directory entries and
