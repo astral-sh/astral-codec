@@ -27,8 +27,9 @@ stores empty members uncompressed.
 **Streaming ZIP64.** Python can put a member's sizes in a 64-bit data
 descriptor and finish the archive with a classic end record. We accept this
 when the descriptor agrees with the central directory and the directory's
-entry count, size, and offset fit in the classic record. A sentinel in the end
-record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
+entry count, size, and offset fit in the classic record (§§4.3.9.2, 4.4.3.3,
+4.5.3). A classic directory can contain exactly 65,535 entries. We still require
+a ZIP64 locator when the directory size or offset is `0xffffffff` (§§4.4.21–24).
 
 ## Member extra fields
 

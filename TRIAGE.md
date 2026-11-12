@@ -28,11 +28,11 @@ A member comment can also give readers two different file lists. Write one file 
 
 We accept the false rejection on classic input. A complete classic directory alone is insufficient reason to ignore an apparent locator when other readers may follow it. Our writer always emits a genuine ZIP64 locator in that slot, so finding 2 does not affect its round trips. [Locator detection](crates/zip-framing/src/index.rs#L594)
 
-### 3. An exact classic count of 65,535 is treated as an unresolved sentinel
+### 3. Classic archives with exactly 65,535 entries (fixed)
 
-Using Python's default ZIP64 settings, write 65,535 empty, uniquely named Stored files. Python emits a classic single-disk end record with both counts equal to `0xffff` and no locator. Python reads every member, and `unzip -tqq` succeeds. Our default index rejects the archive with “ZIP64 sentinel without locator.” The same generator passes here at 65,534 (classic) and 65,536 (ZIP64). All three fit the default entry and metadata limits.
+Using Python's default ZIP64 settings, write 65,535 empty, uniquely named Stored files. Python emits a classic single-disk end record with both counts equal to `0xffff` and no locator. Info-ZIP Zip 3.0 also writes a classic end record at 65,535 entries and a ZIP64 end record at 65,536. Our reader previously rejected the exact classic maximum with “ZIP64 sentinel without locator.”
 
-This is a compatibility boundary in the documented sentinel policy. A literal count of 65,535 can be established by counting the complete central records and matching the directory extent. A count mismatch, missing records, or a truncated ZIP64 archive should still fail. The reproducer exercises the count boundary only. [Classic count handling](crates/zip-framing/src/index.rs#L421) · [Current policy](crates/zip-codec/APPNOTE.md#writer-conventions) · [APPNOTE §§4.4.1.4, 4.4.21–24](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
+Without a ZIP64 locator, the reader now accepts `0xffff` when the two classic counts agree and exactly 65,535 central records fill the declared directory. [Info-ZIP count fields](https://github.com/zlib-ng/minizip-ng/blob/dbde5db1df911df7b0707b6b88e84aeb93a74f61/doc/zip/appnote.iz.txt#L2123-L2136) · [Info-ZIP writer](https://github.com/LuaDist/zip/blob/f6cfe48f6bc5bf2d505a0e0eb265ce4cb238db89/zipfile.c#L5832-L5851) · [PKWARE APPNOTE §§4.4.1.4, 4.4.21–22](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
 
 ### 4. A central-only ZIP64 offset can raise the version independently
 
