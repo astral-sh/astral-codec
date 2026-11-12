@@ -31,6 +31,15 @@ entry count, size, and offset fit in the classic record (§§4.3.9.2, 4.4.3.3,
 4.5.3). A classic directory can contain exactly 65,535 entries. We still require
 a ZIP64 locator when the directory size or offset is `0xffffffff` (§§4.4.21–24).
 
+**Extraction versions.** The local header and central directory entry must agree
+on the version needed to extract a member. A ZIP64 local-header offset requires
+4.5 in both headers (§§4.4.3, 4.5.3). Python can leave the local version at 2.0
+when only the offset uses ZIP64, so we reject those members.
+
+We accept supported versions above the feature minimum, including 4.5 without
+ZIP64. For ordinary Stored files, Python and `ditto` declare 2.0, and Info-ZIP
+`zip` declares 1.0 even with extra fields (§4.4.28).
+
 ## Member extra fields
 
 ZIP64 (`0x0001`) is accepted by default. The other fields in the table require
@@ -70,9 +79,7 @@ record starts with a four-byte length (§4.4.14.2). We currently return those
 lengths as part of the file contents.
 
 **Tighten extraction versions?** Framing accepts unlisted versions such as
-1.9 and volume labels below the 1.1 minimum (§4.4.3.2). We also accept 4.5
-without ZIP64. For ordinary stored files, Python and `ditto` declare 2.0,
-and Info-ZIP `zip` declares 1.0 even with extra fields (§4.4.28).
+1.9 and volume labels below the 1.1 minimum (§4.4.3.2).
 
 [appnote]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
 [is-dir]: https://docs.python.org/3.14/library/zipfile.html#zipfile.ZipInfo.is_dir

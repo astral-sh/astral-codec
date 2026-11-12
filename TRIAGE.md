@@ -34,7 +34,7 @@ Using Python's default ZIP64 settings, write 65,535 empty, uniquely named Stored
 
 Without a ZIP64 locator, the reader now accepts `0xffff` when the two classic counts agree and exactly 65,535 central records fill the declared directory. [Info-ZIP count fields](https://github.com/zlib-ng/minizip-ng/blob/dbde5db1df911df7b0707b6b88e84aeb93a74f61/doc/zip/appnote.iz.txt#L2123-L2136) · [Info-ZIP writer](https://github.com/LuaDist/zip/blob/f6cfe48f6bc5bf2d505a0e0eb265ce4cb238db89/zipfile.c#L5832-L5851) · [PKWARE APPNOTE §§4.4.1.4, 4.4.21–22](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
 
-### 4. A central-only ZIP64 offset can raise the version independently
+### 4. Python can declare different extraction versions for the same member (accepted)
 
 Python can produce this layout with two tiny files. The threshold override makes its normal large-offset writer path reproducible without a multi-gigabyte fixture.
 
@@ -49,7 +49,7 @@ with zipfile.ZipFile("offset.zip", "w") as archive:
 
 The second local header starts at 106 and declares version 2.0. Its sizes fit in classic fields. The central header declares version 4.5 and uses a ZIP64 extra for the local-header offset. There is no corresponding offset field in the local header. Indexing succeeds, but selecting that member or calling `validate_all` fails at 106 with “local and central headers disagree.” Python, Info-ZIP, bsdtar and 7-Zip read both files.
 
-The reader already checks each header's feature minimum, then compares the entire common header including its version. Consider allowing this specific pair when the central-only ZIP64 field accounts for the difference. Keep the independent minimum-version checks and ordinary mismatch rejection. This is an interoperability finding with a concrete producer. [Header comparison](crates/zip-framing/src/index/entry.rs#L378) · [APPNOTE §§4.4.3, 4.5.3](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
+We accept this rejection. Both headers describe the same member, so we require them to agree on the version needed to extract it. The ZIP64 offset requires 4.5 even though both sizes fit in classic fields. Raising the local version to 4.5 makes this archive pass. Lowering the central version to 2.0 makes the headers agree but understates the ZIP64 requirement. [Header comparison](crates/zip-framing/src/index/entry.rs#L378) · [APPNOTE §§4.4.3, 4.5.3](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
 
 ## Extraction and member identity
 
