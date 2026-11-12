@@ -18,7 +18,7 @@ pub struct ZipArchive<R> {
     poisoned: bool,
 }
 
-/// Resource limits and policies for opening a [`ZipArchive`].
+/// Resource limits and policies for [`ZipArchive::with_options`].
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
 pub struct ZipReadOptions {
@@ -63,16 +63,21 @@ impl ZipReadOptions {
         self.framing.allow_ambiguous_symlink_modes = allow;
         self
     }
+}
 
-    /// Reads and validates the central directory. Local headers are checked
-    /// on member access or by [`ZipArchive::validate_all`].
-    pub async fn open<R: AsyncRead + AsyncSeek + Unpin>(
-        self,
-        mut reader: R,
-    ) -> Result<ZipArchive<R>, DecodeError> {
-        let index = Index::read_with_options(&mut reader, self.limits, self.framing).await?;
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
+    /// Opens the archive with the default [`ZipReadOptions`].
+    /// Use [`Self::with_options`] for custom limits or policies.
+    pub async fn open(reader: R) -> Result<Self, DecodeError> {
+        Self::with_options(reader, ZipReadOptions::default()).await
+    }
 
-        Ok(ZipArchive {
+    /// Opens the archive with the supplied limits and policies, validating its central directory.
+    /// Local headers are checked on member access or by [`Self::validate_all`].
+    pub async fn with_options(mut reader: R, options: ZipReadOptions) -> Result<Self, DecodeError> {
+        let index = Index::read_with_options(&mut reader, options.limits, options.framing).await?;
+
+        Ok(Self {
             state: DecoderState {
                 reader,
                 index,
@@ -81,14 +86,6 @@ impl ZipReadOptions {
             },
             poisoned: false,
         })
-    }
-}
-
-impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
-    /// Opens the archive with the default [`ZipReadOptions`].
-    /// Use [`ZipReadOptions::open`] for custom limits or policies.
-    pub async fn open(reader: R) -> Result<Self, DecodeError> {
-        ZipReadOptions::default().open(reader).await
     }
 
     /// Returns indexed members without fetching local records or payloads.
