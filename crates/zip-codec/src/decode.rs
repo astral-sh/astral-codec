@@ -1,0 +1,392 @@
+//! ZIP member projection and seekable archive access.
+
+use std::io::{self, SeekFrom};
+
+use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
+use thiserror::Error;
+use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
+use zip_framing::{
+    CommentPolicy, Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, ReadOptions,
+    constants::attributes,
+};
+
+use crate::payload::{CHUNK_SIZE, Payload};
+
+/// An indexed ZIP archive over an immutable, seekable source.
+pub struct ZipArchive<R> {
+    state: DecoderState<R>,
+    poisoned: bool,
+}
+
+/// Controls resource limits and which ZIP features [`ZipArchive::with_policy`] accepts.
+#[derive(Clone, Copy, Debug, Default)]
+#[must_use]
+pub struct DecodePolicy {
+    limits: Limits,
+    framing: ReadOptions,
+}
+
+struct DecoderState<R> {
+    reader: R,
+    index: Index,
+    next: usize,
+    active: Option<Payload>,
+}
+
+impl DecodePolicy {
+    /// Sets the resource limits for this archive.
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Sets the extra-field policy for both central and local headers.
+    pub fn extra_field_policy(mut self, policy: ExtraFieldPolicy) -> Self {
+        self.framing.extra_fields = policy;
+        self
+    }
+
+    /// Sets the [`CommentPolicy`] for member and archive comments.
+    pub fn comment_policy(mut self, policy: CommentPolicy) -> Self {
+        self.framing.comments = policy;
+        self
+    }
+
+    /// Allows [Stored members with data descriptors](ReadOptions::allow_stored_data_descriptors).
+    pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
+        self.framing.allow_stored_data_descriptors = allow;
+        self
+    }
+
+    /// Allows [Unix symlink modes from non-Unix creators](ReadOptions::allow_ambiguous_symlink_modes).
+    pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
+        self.framing.allow_ambiguous_symlink_modes = allow;
+        self
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
+    /// Opens the archive with the default [`DecodePolicy`].
+    pub async fn open(reader: R) -> Result<Self, DecodeError> {
+        Self::with_policy(reader, DecodePolicy::default()).await
+    }
+
+    /// Opens the archive and validates its central directory under the supplied [`DecodePolicy`].
+    /// Local headers are checked on member access or by [`Self::validate_all`].
+    pub async fn with_policy(mut reader: R, policy: DecodePolicy) -> Result<Self, DecodeError> {
+        let index = Index::read_with_options(&mut reader, policy.limits, policy.framing).await?;
+
+        Ok(Self {
+            state: DecoderState {
+                reader,
+                index,
+                next: 0,
+                active: None,
+            },
+            poisoned: false,
+        })
+    }
+
+    /// Returns indexed members without fetching local records or payloads.
+    pub fn entries(&self) -> &[IndexedEntry] {
+        self.state.index.entries()
+    }
+
+    /// Returns a previously checked entry by index, without performing I/O.
+    ///
+    /// Returns [`None`] if the index is out of bounds or the member is unresolved.
+    pub fn resolved(&self, index: usize) -> Option<Entry<'_>> {
+        self.state.index.resolved(index)
+    }
+
+    /// Selects a member by central-directory index.
+    ///
+    /// The selected local header and descriptor must agree with the directory
+    /// before a member is returned. Successful metadata checks are cached.
+    /// An unfinished prior payload is drained and validated first. The next
+    /// sequential read resumes immediately after the selected entry. Repeated
+    /// explicit selections repeat the associated I/O and decompression work.
+    /// Errors and cancellation poison the archive; subsequent operations fail.
+    pub async fn member(
+        &mut self,
+        index: usize,
+    ) -> Result<Option<Member<ZipMemberPayload<'_, R>>>, DecodeError> {
+        let member = self
+            .run(async |state| state.prepare_member(index).await)
+            .await?;
+        Ok(member.map(|member| member.map_payload(|()| ZipMemberPayload { archive: self })))
+    }
+
+    /// Checks metadata for all members, including those never selected.
+    ///
+    /// An active payload is drained first. Other payloads are not decoded;
+    /// their CRCs and decoded sizes are still checked when they are read.
+    pub async fn validate_all(&mut self) -> Result<(), DecodeError> {
+        self.run(DecoderState::validate_all).await
+    }
+
+    /// Borrows the source for operations such as HTTP range prefetching.
+    ///
+    /// Drains and validates an active payload before lending the reader. The
+    /// caller may change its cursor, but must not replace the source or change
+    /// its contents. Subsequent member selection seeks to the checked offset.
+    pub async fn reader_mut(&mut self) -> Result<&mut R, DecodeError> {
+        self.run(DecoderState::drain).await?;
+        Ok(&mut self.state.reader)
+    }
+
+    /// Returns the source without validating any remaining payloads.
+    pub fn into_inner(self) -> R {
+        self.state.reader
+    }
+
+    async fn run<T>(
+        &mut self,
+        operation: impl AsyncFnOnce(&mut DecoderState<R>) -> Result<T, DecodeError>,
+    ) -> Result<T, DecodeError> {
+        if self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+
+        // An error or cancellation leaves the archive poisoned.
+        self.poisoned = true;
+        let value = operation(&mut self.state).await?;
+        self.poisoned = false;
+        Ok(value)
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> DecoderState<R> {
+    // Finish all fallible work before lending the archive to a payload.
+    async fn prepare_member(&mut self, index: usize) -> Result<Option<Member<()>>, DecodeError> {
+        self.drain().await?;
+
+        let Some(entry) = self.index.entry(&mut self.reader, index).await? else {
+            return Ok(None);
+        };
+
+        let kind = Kind::try_from(&entry)?;
+        let directory = entry.directory();
+        let metadata = MemberMetadata {
+            path: directory.path().to_owned(),
+            position: directory.position(),
+        };
+        let size = directory.size();
+
+        let previous = self.active.take();
+        let active = self.active.insert(Payload::new(&entry, previous)?);
+        self.reader
+            .seek(SeekFrom::Start(entry.data_offset()))
+            .await?;
+        self.next = index + 1;
+
+        let member = match kind {
+            Kind::File(executable) => Member::File {
+                metadata,
+                size,
+                executable,
+                payload: (),
+            },
+            Kind::Directory => {
+                self.drain().await?;
+                Member::Directory { metadata }
+            }
+            Kind::SymbolicLink(expected) => {
+                let mut target = Vec::new();
+                active.read_to_end(&mut self.reader, &mut target).await?;
+
+                let mut target = String::from_utf8(target).map_err(|_| DecodeError::Integrity {
+                    position: metadata.position,
+                    reason: "non-UTF-8 symbolic-link target",
+                })?;
+                if target.contains('\0') {
+                    return Err(DecodeError::Integrity {
+                        position: metadata.position,
+                        reason: "NUL in symbolic-link target",
+                    });
+                }
+
+                // APPNOTE 4.5.7 defines a symbolic-link target in the optional PKWARE
+                // UNIX extra field (0x000d). Writers including Info-ZIP, libarchive, and
+                // our encoder store the target in the member payload by convention.
+                // If both contain targets, require an exact match to avoid ambiguity.
+                if let Some(expected) = expected {
+                    if size == 0 {
+                        target = expected.to_owned();
+                    } else if target != expected {
+                        return Err(DecodeError::Integrity {
+                            position: metadata.position,
+                            reason: "symbolic-link payload and UNIX extra field disagree",
+                        });
+                    }
+                }
+
+                Member::SymbolicLink { metadata, target }
+            }
+            Kind::Special(kind) => {
+                self.drain().await?;
+                Member::Special { metadata, kind }
+            }
+        };
+
+        Ok(Some(member))
+    }
+
+    async fn validate_all(&mut self) -> Result<(), DecodeError> {
+        self.drain().await?;
+        self.index.validate_all(&mut self.reader).await?;
+
+        for entry in (0..self.index.entries().len()).filter_map(|index| self.index.resolved(index))
+        {
+            Kind::try_from(&entry)?;
+        }
+
+        Ok(())
+    }
+
+    async fn read_chunk(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        target_len: usize,
+    ) -> Result<bool, DecodeError> {
+        let Some(active) = &mut self.active else {
+            return Ok(false);
+        };
+
+        active
+            .next::<false, _>(&mut self.reader, buffer, target_len)
+            .await
+    }
+
+    async fn drain(&mut self) -> Result<(), DecodeError> {
+        let mut buffer = Vec::new();
+        while self.read_chunk(&mut buffer, CHUNK_SIZE).await? {}
+
+        // Keep the completed decoder and its input allocation for the next member.
+        Ok(())
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> Archive for ZipArchive<R> {
+    type Error = DecodeError;
+    type Payload<'a>
+        = ZipMemberPayload<'a, R>
+    where
+        Self: 'a;
+
+    async fn next_member(&mut self) -> Result<Option<Member<Self::Payload<'_>>>, Self::Error> {
+        self.member(self.state.next).await
+    }
+}
+
+/// A lending cursor over one member's decoded, integrity-checked bytes.
+pub struct ZipMemberPayload<'a, R> {
+    archive: &'a mut ZipArchive<R>,
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> ZipMemberPayload<'_, R> {
+    /// Appends the remaining decoded payload to `buffer`, returning the number
+    /// of bytes appended after validating the payload's size and CRC.
+    ///
+    /// Existing bytes in `buffer` are preserved. Reads and decompression still
+    /// proceed in bounded chunks, but the buffer grows to hold the whole payload.
+    /// An error or cancellation poisons the archive and may leave partially
+    /// appended data in `buffer`.
+    pub async fn read_to_end(&mut self, buffer: &mut Vec<u8>) -> Result<usize, DecodeError> {
+        self.archive
+            .run(async |state| match &mut state.active {
+                Some(active) => active.read_to_end(&mut state.reader, buffer).await,
+                None => Ok(0),
+            })
+            .await
+    }
+}
+
+impl<R: AsyncRead + AsyncSeek + Unpin> MemberPayload for ZipMemberPayload<'_, R> {
+    type Error = DecodeError;
+
+    async fn next_chunk(
+        &mut self,
+        buffer: &mut Vec<u8>,
+        target_len: usize,
+    ) -> Result<bool, DecodeError> {
+        self.archive
+            .run(async |state| state.read_chunk(buffer, target_len).await)
+            .await
+    }
+
+    async fn skip(self) -> Result<(), DecodeError> {
+        self.archive.run(DecoderState::drain).await
+    }
+}
+
+enum Kind<'a> {
+    File(bool),
+    Directory,
+    SymbolicLink(Option<&'a str>),
+    Special(SpecialKind),
+}
+
+impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
+    type Error = DecodeError;
+
+    fn try_from(entry: &'a Entry<'_>) -> Result<Self, Self::Error> {
+        let directory = entry.directory();
+        match entry.kind() {
+            EntryKind::File => Ok(Self::File(
+                entry.unix_mode() & attributes::UNIX_EXECUTABLE != 0,
+            )),
+            EntryKind::Directory => Ok(Self::Directory),
+            EntryKind::SymbolicLink { unix_target } => {
+                if directory.size() > u64::from(u16::MAX) {
+                    return Err(DecodeError::Integrity {
+                        position: directory.position(),
+                        reason: "oversized symbolic-link target",
+                    });
+                }
+                Ok(Self::SymbolicLink(unix_target.as_deref()))
+            }
+            EntryKind::CharacterDevice { .. } => Ok(Self::Special(SpecialKind::CharacterDevice)),
+            EntryKind::BlockDevice { .. } => Ok(Self::Special(SpecialKind::BlockDevice)),
+            EntryKind::Fifo => Ok(Self::Special(SpecialKind::Fifo)),
+            EntryKind::VolumeLabel => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "volume label",
+            }),
+            _ => Err(DecodeError::Unsupported {
+                position: directory.position(),
+                feature: "unsupported file attributes",
+            }),
+        }
+    }
+}
+
+/// A ZIP framing, payload, or member-projection failure.
+#[derive(Debug, Error)]
+pub enum DecodeError {
+    /// ZIP record parsing failed.
+    #[error(transparent)]
+    Framing(#[from] zip_framing::Error),
+    /// Payload I/O failed.
+    #[error("ZIP payload I/O failed: {0}")]
+    Io(#[from] io::Error),
+    /// Member data did not agree with its declared metadata.
+    #[error("at byte {position}: invalid ZIP payload: {reason}")]
+    Integrity {
+        /// Local-header offset.
+        position: u64,
+        /// Failed integrity requirement.
+        reason: &'static str,
+    },
+    /// A member cannot be represented by this codec.
+    #[error("at byte {position}: unsupported ZIP {feature}")]
+    Unsupported {
+        /// Local-header offset.
+        position: u64,
+        /// The unsupported member feature.
+        feature: &'static str,
+    },
+    /// A prior error or interrupted operation invalidated the cursor.
+    #[error("ZIP reader is poisoned after an error or cancelled operation")]
+    Poisoned,
+}

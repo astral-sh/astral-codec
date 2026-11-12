@@ -112,7 +112,8 @@ impl<P> Member<P> {
         }
     }
 
-    fn lend_payload<'a>(self) -> Member<LentPayload<'a, P>> {
+    /// Transforms this member's payload, if it has one.
+    pub fn map_payload<Q>(self, map: impl FnOnce(P) -> Q) -> Member<Q> {
         match self {
             Self::File {
                 metadata,
@@ -123,7 +124,7 @@ impl<P> Member<P> {
                 metadata,
                 size,
                 executable,
-                payload: LentPayload::new(payload),
+                payload: map(payload),
             },
             Self::Directory { metadata } => Member::Directory { metadata },
             Self::SymbolicLink { metadata, target } => Member::SymbolicLink { metadata, target },
@@ -136,7 +137,7 @@ impl<P> Member<P> {
                 metadata,
                 target,
                 size,
-                payload: LentPayload::new(payload),
+                payload: map(payload),
             },
             Self::Special { metadata, kind } => Member::Special { metadata, kind },
         }
@@ -222,7 +223,11 @@ impl<A: Archive> Members<A> {
     pub async fn next<'a>(
         &'a mut self,
     ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>>>, A::Error> {
-        Ok(self.archive.next_member().await?.map(Member::lend_payload))
+        Ok(self
+            .archive
+            .next_member()
+            .await?
+            .map(|member| member.map_payload(LentPayload::new)))
     }
 }
 
@@ -251,6 +256,11 @@ pub trait Archive: Sized {
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
 
     /// Consumes this archive and returns its lending member cursor.
+    ///
+    /// Member paths may repeat, and distinct paths may resolve to the same file
+    /// on disk. Callers that write members to disk themselves (i.e. without
+    /// [`Self::extract_in`]) must decide how to handle those collisions. Doing so
+    /// is non-trivial, and most users are **strongly** encouraged to use [`Self::extract_in`].
     fn members(self) -> Members<Self> {
         Members { archive: self }
     }
