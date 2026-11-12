@@ -48,7 +48,9 @@ use thiserror::Error;
 pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
-pub use index::{CentralDirectoryEntry, CommentPolicy, Entry, Index, IndexedEntry, ReadOptions};
+pub use index::{
+    CentralDirectoryEntry, CommentPolicy, CommentRule, Entry, Index, IndexedEntry, ReadOptions,
+};
 pub use kind::{DeviceNumbers, EntryKind};
 
 /// A supported ZIP compression method.

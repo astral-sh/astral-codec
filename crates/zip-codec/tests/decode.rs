@@ -13,8 +13,8 @@ use flate2::{Compression, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip::{ZipWriter, write::FullFileOptions};
 use zip_codec::{
-    Archive,
-    CommentPolicy::{AllowAll, AllowAscii, AllowUtf8, Reject},
+    Archive, CommentPolicy,
+    CommentRule::{AllowAll, AllowAscii, AllowUtf8, Reject},
     CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy, LimitExceeded,
     Limits, Member, MemberPayload, ZipArchive,
     extract::ExtractPolicy,
@@ -101,9 +101,9 @@ fn single_member_archive(
 
 #[tokio::test]
 async fn configures_member_and_archive_comments_independently() -> TestResult {
-    let policies = [Reject, AllowAscii, AllowUtf8, AllowAll];
+    let rules = [Reject, AllowAscii, AllowUtf8, AllowAll];
     for (comment, accepted) in [
-        (b"".as_slice(), policies.as_slice()),
+        (b"".as_slice(), rules.as_slice()),
         (b"zip-rs", &[AllowAscii, AllowUtf8, AllowAll]),
         ("café".as_bytes(), &[AllowUtf8, AllowAll]),
         (b"\xff", &[AllowAll]),
@@ -113,16 +113,23 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
         let member = FullFileOptions::default().with_file_comment("member");
         writer.start_file("file", member)?;
         let bytes = writer.finish()?.into_inner();
-        let allow_members =
-            || ZipArchive::builder(Cursor::new(&bytes)).with_member_comment_policy(AllowAscii);
+        let mut policy = CommentPolicy {
+            per_member: AllowAscii,
+            ..CommentPolicy::default()
+        };
+        let open = |policy| {
+            ZipArchive::builder(Cursor::new(&bytes))
+                .with_comment_policy(policy)
+                .open()
+        };
         assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
-        assert_eq!(allow_members().open().await.is_ok(), comment.is_ascii());
-        for policy in policies {
-            let builder = allow_members().with_archive_comment_policy(policy);
+        assert_eq!(open(policy).await.is_ok(), comment.is_ascii());
+        for archive in rules {
+            policy.archive = archive;
             assert_eq!(
-                builder.open().await.is_ok(),
-                accepted.contains(&policy),
-                "{policy:?}, archive comment={comment:?}"
+                open(policy).await.is_ok(),
+                accepted.contains(&archive),
+                "{archive:?}, archive comment={comment:?}"
             );
         }
     }
