@@ -1,12 +1,12 @@
 # ZIP correctness review
 
-Reviewed `ww/zip-codec` at `ced194eb524480495526cf9d57294d5ffa4a277d`, including the shared builder and extractor used by the ZIP APIs. The first two fixes I would prioritize are distinguishing end records from file contents and checking symlink target ownership after publishing deferred links. The first breaks a writer-to-reader round trip. The second bypasses a default extraction policy on a case-insensitive volume.
+Reviewed `ww/zip-codec` at `ced194eb524480495526cf9d57294d5ffa4a277d`, including the shared builder and extractor used by the ZIP APIs. The priority for extraction is checking symlink target ownership after publishing deferred links. Finding 5 shows how a case-insensitive volume can bypass the default policy.
 
 A valid archive that fails closed is a compatibility problem. A successful interpretation can be a differential without qualifying as a vulnerability, particularly when APPNOTE supports that interpretation or the difference comes solely from the destination filesystem and stays inside the root. [Security model](SECURITY.md)
 
 ## End records and ZIP64
 
-### 1. A Stored payload can make the encoder's output unreadable
+### 1. A Stored payload can make the encoder's output unreadable (accepted)
 
 With an empty seekable output, use `ZipEncoder::with_compression(CompressionMethod::Stored)`. Add a single regular file named `a` containing these 22 bytes and finish the builder.
 
@@ -16,7 +16,7 @@ payload = b"PK\x05\x06" + bytes(16) + (173).to_bytes(2, "little")
 
 The resulting ZIP is 246 bytes. The payload at offset 51 resembles a classic end-of-central-directory record (EOCD) with a comment reaching EOF. The real EOCD starts at 224. The apparent record advertises an empty directory at offset zero, which cannot end at 51. Only the real record accounts for the local header, payload, central directory, ZIP64 end and locator. Default `ZipArchive::open` reports “ambiguous end records” at 224. Python returns the original 22 bytes, and Info-ZIP, bsdtar and 7-Zip read the archive successfully.
 
-`find_end` declares a conflict as soon as two signatures have an EOF-reaching length, before checking the directory described by either. A fix needs to disqualify a candidate whose directory cannot meet its boundary while retaining the checks for competing interpretations and for readers that scan backward into the real comment. This case needs a writer-to-reader regression fixture. [End-record search](crates/zip-framing/src/index.rs#L542)
+We accept this round-trip failure. Other readers can use different rules to locate the end record, so `find_end` deliberately rejects two candidates whose comment lengths both reach EOF, even when our directory checks could distinguish them. [End-record search](crates/zip-framing/src/index.rs#L542)
 
 ### 2. Central-directory bytes can masquerade as a ZIP64 locator
 

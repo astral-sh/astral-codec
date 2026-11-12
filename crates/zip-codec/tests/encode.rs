@@ -97,7 +97,7 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
 
     let default = ZipFileOptions::default();
     let stored = default.with_compression(CompressionMethod::Stored);
-    let deflated = default.with_compression(CompressionMethod::Deflate);
+    let deflated = default.with_compression(CompressionMethod::default());
     for default_method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
         let cases = [
             ("stored", stored, source, CompressionMethod::Stored),
