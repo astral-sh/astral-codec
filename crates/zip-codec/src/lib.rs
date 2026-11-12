@@ -20,7 +20,7 @@ pub use archive_trait::{
     ExtractPolicyViolation, FilePayload, LentPayload, Member, MemberMetadata, MemberPayload,
     Members, NameValidator, SpecialKind, TraversalError, builder, default_name_validator, extract,
 };
-pub use decode::{DecodeError, ZipArchive, ZipArchiveBuilder, ZipMemberPayload};
+pub use decode::{DecodeError, DecodePolicy, ZipArchive, ZipMemberPayload};
 pub use encode::{EncodeError, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{
     CentralDirectoryEntry, CommentPolicy, CommentRule, CompressionMethod, DeviceNumbers, Entry,
