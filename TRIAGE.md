@@ -18,11 +18,15 @@ The resulting ZIP is 246 bytes. The payload at offset 51 resembles a classic end
 
 We accept this round-trip failure. Other readers can use different rules to locate the end record, so `find_end` deliberately rejects two candidates whose comment lengths both reach EOF, even when our directory checks could distinguish them. [End-record search](crates/zip-framing/src/index.rs#L542)
 
-### 2. Central-directory bytes can masquerade as a ZIP64 locator
+### 2. Central-directory bytes can masquerade as a ZIP64 locator (accepted)
 
-Write a classic ZIP containing one Stored byte and use the 20-byte filename `b"PK\x06\x07" + b"A" * 16`, with no extras or comments. The last 20 bytes of the central directory are the filename. The reader treats them as a ZIP64 locator and reports “unsupported ZIP multiple volumes.” This occurs during indexing, before any extraction filename policy. A printable name and a 20-byte member comment with the same prefix reproduce it when member comments are enabled.
+A classic ZIP can contain the ZIP64 locator signature exactly 20 bytes before its EOCD. A small reproducer is a one-byte Stored file named `b"PK\x06\x07" + b"A" * 16`, with no extras or comments. The filename occupies the entire locator slot. Both Python and our reader reject it as a multi-volume archive. Info-ZIP, bsdtar and 7-Zip accept it.
 
-Python also rejects the filename case. Info-ZIP, bsdtar and 7-Zip accept it. The classic count, size and offset describe the entire central directory through the EOCD, including the putative locator. Distinguish this layout from a malformed ZIP64 archive by proving the complete classic directory extent. Merely ignoring every broken locator could admit contradictory end records. [Locator detection](crates/zip-framing/src/index.rs#L594)
+This also happens with ordinary filenames. Place the local header for the final member, `ordinaryname.txt`, at offset `0x07064b50` and omit extras and comments. Its central header stores the offset in little-endian order as `PK\x06\x07`, immediately followed by the 16-byte name. Info-ZIP verified both files in this archive. Python and our reader rejected it.
+
+A member comment can also give readers two different file lists. Write one file named `visible.txt`. In its central-directory comment, put a 56-byte ZIP64 end record declaring an empty directory at that record's own offset, followed by a 20-byte locator pointing to it. The classic EOCD still describes one file. Python and seekable bsdtar listed an empty archive. Streaming bsdtar and Info-ZIP listed `visible.txt`. Our reader rejected the conflicting end records.
+
+We accept the false rejection on classic input. A complete classic directory alone is insufficient reason to ignore an apparent locator when other readers may follow it. Our writer always emits a genuine ZIP64 locator in that slot, so finding 2 does not affect its round trips. [Locator detection](crates/zip-framing/src/index.rs#L594)
 
 ### 3. An exact classic count of 65,535 is treated as an unresolved sentinel
 
