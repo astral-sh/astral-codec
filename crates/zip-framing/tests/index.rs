@@ -1754,36 +1754,46 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
 }
 
 #[tokio::test]
-async fn indexes_zip64_counts_above_the_classic_limit() -> TestResult {
-    let count = u64::from(u16::MAX) + 2;
-    let mut bytes = Vec::new();
-    let mut directory = Vec::new();
-    for ordinal in 0..count {
-        let name = format!("{ordinal}.txt");
-        let member = PendingMember::new(
-            &name,
-            CompressionMethod::Stored,
-            WriteEntryKind::File { executable: false },
-        )?
-        .finish(0, 0, 0, bytes.len() as u64)?;
-        bytes.extend(member.local_header());
-        directory.extend(member.central_header());
-    }
-    let offset = bytes.len() as u64;
-    let size = directory.len() as u64;
-    bytes.extend(directory);
-    bytes.extend(end_records(count, offset, size)?);
-    let mut source = Cursor::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
-    assert_eq!(index.entries().len() as u64, count);
-    // Select both sides of the classic sentinel, in reverse directory order.
-    for ordinal in [count - 1, count - 2, count - 3, 0] {
-        let entry = index
-            .entry(&mut source, ordinal as usize)
-            .await?
-            .ok_or("missing entry")?;
-        assert_eq!(entry.directory().path(), format!("{ordinal}.txt"));
-        assert_eq!(entry.directory().size(), 0);
+async fn indexes_counts_at_and_above_the_classic_limit() -> TestResult {
+    for count in [u64::from(u16::MAX), u64::from(u16::MAX) + 2] {
+        let mut bytes = Vec::new();
+        let mut directory = Vec::new();
+        for ordinal in 0..count {
+            let name = format!("{ordinal}.txt");
+            let member = PendingMember::new(
+                &name,
+                CompressionMethod::Stored,
+                WriteEntryKind::File { executable: false },
+            )?
+            .finish(0, 0, 0, bytes.len() as u64)?;
+            bytes.extend(member.local_header());
+            directory.extend(member.central_header());
+        }
+        let offset = bytes.len() as u64;
+        let size = directory.len() as u64;
+        bytes.extend(directory);
+        if let Ok(classic_count) = u16::try_from(count) {
+            bytes.extend(end_record(
+                classic_count,
+                offset.try_into()?,
+                size.try_into()?,
+                &[],
+            ));
+        } else {
+            bytes.extend(end_records(count, offset, size)?);
+        }
+        let mut source = Cursor::new(bytes);
+        let mut index = Index::read(&mut source, Limits::default()).await?;
+        assert_eq!(index.entries().len() as u64, count);
+        // Include the entries across the classic count boundary in the ZIP64 case.
+        for ordinal in [count - 1, count - 2, count - 3, 0] {
+            let entry = index
+                .entry(&mut source, ordinal as usize)
+                .await?
+                .ok_or("missing entry")?;
+            assert_eq!(entry.directory().path(), format!("{ordinal}.txt"));
+            assert_eq!(entry.directory().size(), 0);
+        }
     }
 
     Ok(())
