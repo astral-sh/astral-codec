@@ -7,7 +7,7 @@
 //! because zip-codec's decoder is conservative about control structures
 //! (like EOCD signatures) appearing in stored (uncompressed) ZIP members.
 //!
-//! For this reason, users are **strongly** encouraged to not use
+//! For this reason, users are **strongly** encouraged to **not** use
 //! [`CompressionMethod::Stored`] as an archive-wide or per-member setting
 //! **unless** they can guarantee that member contents cannot be confused
 //! for ZIP control structures.
