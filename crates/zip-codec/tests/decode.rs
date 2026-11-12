@@ -101,36 +101,29 @@ fn single_member_archive(
 
 #[tokio::test]
 async fn configures_member_and_archive_comments_independently() -> TestResult {
-    let rules = [Reject, AllowAscii, AllowUtf8, AllowAll];
-    for (comment, accepted) in [
-        (b"".as_slice(), rules.as_slice()),
-        (b"zip-rs", &[AllowAscii, AllowUtf8, AllowAll]),
-        ("café".as_bytes(), &[AllowUtf8, AllowAll]),
-        (b"\xff", &[AllowAll]),
-    ] {
+    assert_eq!(CommentPolicy::default().archive, AllowAscii);
+    for comment in [b"".as_slice(), b"zip-rs", "café".as_bytes(), b"\xff"] {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer.set_raw_comment(comment.into())?;
         let member = FullFileOptions::default().with_file_comment("member");
         writer.start_file("file", member)?;
         let bytes = writer.finish()?.into_inner();
-        let mut policy = CommentPolicy {
-            per_member: AllowAscii,
-            ..CommentPolicy::default()
-        };
-        let open = |policy| {
-            ZipArchive::builder(Cursor::new(&bytes))
-                .with_comment_policy(policy)
-                .open()
-        };
+
         assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
-        assert_eq!(open(policy).await.is_ok(), comment.is_ascii());
-        for archive in rules {
-            policy.archive = archive;
-            assert_eq!(
-                open(policy).await.is_ok(),
-                accepted.contains(&archive),
-                "{archive:?}, archive comment={comment:?}"
-            );
+        for (archive, accepted) in [
+            (Reject, comment.is_empty()),
+            (AllowAscii, comment.is_ascii()),
+            (AllowUtf8, str::from_utf8(comment).is_ok()),
+            (AllowAll, true),
+        ] {
+            let result = ZipArchive::builder(Cursor::new(&bytes))
+                .with_comment_policy(CommentPolicy {
+                    per_member: AllowAscii,
+                    archive,
+                })
+                .open()
+                .await;
+            assert_eq!(result.is_ok(), accepted, "{archive:?}, comment={comment:?}");
         }
     }
     Ok(())

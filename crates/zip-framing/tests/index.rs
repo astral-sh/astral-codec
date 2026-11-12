@@ -1009,7 +1009,7 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
 }
 
 #[tokio::test]
-async fn checks_the_member_comment_encoding_flag() -> TestResult {
+async fn checks_the_member_comment_encoding_flag() {
     let utf8 = "café".as_bytes();
     for (comment, per_member, flags, accepted) in [
         (b"zip".as_slice(), AllowUtf8, 0, true),
@@ -1034,7 +1034,6 @@ async fn checks_the_member_comment_encoding_flag() -> TestResult {
             "{per_member:?}, flags={flags:#x}: {result:?}"
         );
     }
-    Ok(())
 }
 
 #[tokio::test]
