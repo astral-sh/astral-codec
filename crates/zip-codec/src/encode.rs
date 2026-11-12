@@ -77,6 +77,11 @@ impl<W> ZipEncoder<W> {
     /// Selects the default compression method for nonempty regular files.
     ///
     /// Individual files can override this with [`ZipFileOptions::with_compression`].
+    ///
+    /// [`CompressionMethod::Stored`] copies file contents verbatim. If those bytes
+    /// contain an apparent end-of-central-directory record whose comment length
+    /// reaches the end of the archive, [`ZipArchive`](crate::ZipArchive) rejects
+    /// the archive as ambiguous.
     pub fn with_compression(mut self, method: CompressionMethod) -> Self {
         self.method = method;
         self
