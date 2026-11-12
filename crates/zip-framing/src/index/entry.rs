@@ -208,7 +208,8 @@ impl CentralDirectoryEntry {
         };
         let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
         options
-            .member_comments
+            .comments
+            .per_member
             .check(comment, Some(common.flags), position)?;
         if extras.needs_reconciliation() {
             extras.check_name(path, position)?;

@@ -13,8 +13,8 @@ use flate2::{Compression, write::DeflateEncoder};
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt, ReadBuf};
 use zip::{ZipWriter, write::FullFileOptions};
 use zip_codec::{
-    Archive,
-    CommentPolicy::{AllowAll, AllowAscii, AllowUtf8, Reject},
+    Archive, CommentPolicy,
+    CommentRule::{AllowAll, AllowAscii, AllowUtf8, Reject},
     CompressionMethod, DecodeError, EntryKind as DecodedEntryKind, ExtraFieldPolicy, LimitExceeded,
     Limits, Member, MemberPayload, ZipArchive,
     extract::ExtractPolicy,
@@ -101,29 +101,29 @@ fn single_member_archive(
 
 #[tokio::test]
 async fn configures_member_and_archive_comments_independently() -> TestResult {
-    let policies = [Reject, AllowAscii, AllowUtf8, AllowAll];
-    for (comment, accepted) in [
-        (b"".as_slice(), policies.as_slice()),
-        (b"zip-rs", &[AllowAscii, AllowUtf8, AllowAll]),
-        ("café".as_bytes(), &[AllowUtf8, AllowAll]),
-        (b"\xff", &[AllowAll]),
-    ] {
+    assert_eq!(CommentPolicy::default().archive, AllowAscii);
+    for comment in [b"".as_slice(), b"zip-rs", "café".as_bytes(), b"\xff"] {
         let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
         writer.set_raw_comment(comment.into())?;
         let member = FullFileOptions::default().with_file_comment("member");
         writer.start_file("file", member)?;
         let bytes = writer.finish()?.into_inner();
-        let allow_members =
-            || ZipArchive::builder(Cursor::new(&bytes)).with_member_comment_policy(AllowAscii);
+
         assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
-        assert_eq!(allow_members().open().await.is_ok(), comment.is_ascii());
-        for policy in policies {
-            let builder = allow_members().with_archive_comment_policy(policy);
-            assert_eq!(
-                builder.open().await.is_ok(),
-                accepted.contains(&policy),
-                "{policy:?}, archive comment={comment:?}"
-            );
+        for (archive, accepted) in [
+            (Reject, comment.is_empty()),
+            (AllowAscii, comment.is_ascii()),
+            (AllowUtf8, str::from_utf8(comment).is_ok()),
+            (AllowAll, true),
+        ] {
+            let result = ZipArchive::builder(Cursor::new(&bytes))
+                .with_comment_policy(CommentPolicy {
+                    per_member: AllowAscii,
+                    archive,
+                })
+                .open()
+                .await;
+            assert_eq!(result.is_ok(), accepted, "{archive:?}, comment={comment:?}");
         }
     }
     Ok(())

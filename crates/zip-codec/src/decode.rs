@@ -46,15 +46,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchiveBuilder<R> {
         self
     }
 
-    /// Sets the member comment policy. Defaults to [`CommentPolicy::Reject`].
-    pub fn with_member_comment_policy(mut self, policy: CommentPolicy) -> Self {
-        self.options.member_comments = policy;
-        self
-    }
-
-    /// Sets the archive comment policy. Defaults to [`CommentPolicy::AllowAscii`].
-    pub fn with_archive_comment_policy(mut self, policy: CommentPolicy) -> Self {
-        self.options.archive_comment = policy;
+    /// Sets the [`CommentPolicy`] for member and archive comments.
+    pub fn with_comment_policy(mut self, policy: CommentPolicy) -> Self {
+        self.options.comments = policy;
         self
     }
 

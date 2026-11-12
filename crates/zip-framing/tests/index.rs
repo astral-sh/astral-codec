@@ -5,8 +5,8 @@ use std::{error::Error, io::Cursor};
 use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
-    CentralDirectoryEntry,
-    CommentPolicy::{AllowAll, AllowUtf8},
+    CentralDirectoryEntry, CommentPolicy,
+    CommentRule::{AllowAll, AllowUtf8},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
     HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
@@ -27,8 +27,10 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 // Exercise the format checks for features that require an opt-in.
 const ALL_FEATURES: ReadOptions = ReadOptions {
     extra_fields: AllowListed,
-    member_comments: AllowAll,
-    archive_comment: AllowAll,
+    comments: CommentPolicy {
+        per_member: AllowAll,
+        archive: AllowAll,
+    },
     allow_stored_data_descriptors: true,
     allow_ambiguous_symlink_modes: true,
 };
@@ -1007,9 +1009,9 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
 }
 
 #[tokio::test]
-async fn checks_the_member_comment_encoding_flag() -> TestResult {
+async fn checks_the_member_comment_encoding_flag() {
     let utf8 = "café".as_bytes();
-    for (comment, policy, flags, accepted) in [
+    for (comment, per_member, flags, accepted) in [
         (b"zip".as_slice(), AllowUtf8, 0, true),
         (utf8, AllowUtf8, 0, false),
         (utf8, AllowUtf8, 0x0800, true),
@@ -1022,19 +1024,16 @@ async fn checks_the_member_comment_encoding_flag() -> TestResult {
             ..Fixture::default()
         }
         .build();
-        let options = ReadOptions {
-            member_comments: policy,
-            ..ReadOptions::default()
-        };
+        let mut options = ReadOptions::default();
+        options.comments.per_member = per_member;
         let mut source = Cursor::new(archive.bytes);
         let result = Index::read_with_options(&mut source, Limits::default(), options).await;
         assert_eq!(
             result.is_ok(),
             accepted,
-            "{policy:?}, flags={flags:#x}: {result:?}"
+            "{per_member:?}, flags={flags:#x}: {result:?}"
         );
     }
-    Ok(())
 }
 
 #[tokio::test]

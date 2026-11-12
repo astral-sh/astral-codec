@@ -57,7 +57,7 @@ impl Drop for DirectoryWindow {
 /// Which ZIP comment bytes the reader accepts. Empty comments are always accepted.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 #[non_exhaustive]
-pub enum CommentPolicy {
+pub enum CommentRule {
     /// Reject nonempty comments.
     Reject,
     /// Accept only ASCII bytes.
@@ -68,7 +68,7 @@ pub enum CommentPolicy {
     AllowAll,
 }
 
-impl CommentPolicy {
+impl CommentRule {
     fn check(
         self,
         bytes: &[u8],
@@ -94,32 +94,36 @@ impl CommentPolicy {
     }
 }
 
+/// Which comments the reader accepts in member and end records.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub struct CommentPolicy {
+    /// Comments in central directory entries. Defaults to [`CommentRule::Reject`].
+    pub per_member: CommentRule,
+    /// Comment in the end record. Defaults to [`CommentRule::AllowAscii`].
+    pub archive: CommentRule,
+}
+
+impl Default for CommentPolicy {
+    fn default() -> Self {
+        Self {
+            per_member: CommentRule::Reject,
+            archive: CommentRule::AllowAscii,
+        }
+    }
+}
+
 /// Which optional ZIP features the reader accepts.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, Default)]
 pub struct ReadOptions {
     /// Extra fields accepted in both headers. Defaults to [`ExtraFieldPolicy::Zip64Only`].
     pub extra_fields: ExtraFieldPolicy,
-    /// Comments in central directory entries. Defaults to [`CommentPolicy::Reject`].
-    pub member_comments: CommentPolicy,
-    /// Comment in the end record. Defaults to [`CommentPolicy::AllowAscii`].
-    pub archive_comment: CommentPolicy,
+    /// Rules for member and archive comments.
+    pub comments: CommentPolicy,
     /// Accept Stored members with data descriptors (bit 3). Disabled by default.
     pub allow_stored_data_descriptors: bool,
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
     pub allow_ambiguous_symlink_modes: bool,
-}
-
-impl Default for ReadOptions {
-    fn default() -> Self {
-        Self {
-            extra_fields: ExtraFieldPolicy::default(),
-            member_comments: CommentPolicy::Reject,
-            archive_comment: CommentPolicy::AllowAscii,
-            allow_stored_data_descriptors: false,
-            allow_ambiguous_symlink_modes: false,
-        }
-    }
 }
 
 /// A ZIP member index.
@@ -201,7 +205,7 @@ impl Index {
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
         let end =
-            CentralDirectory::read(&mut buffered, &mut budget, options.archive_comment).await?;
+            CentralDirectory::read(&mut buffered, &mut budget, options.comments.archive).await?;
         let mut entries = end
             .read_entries(&mut buffered, &mut budget, options)
             .await?;
@@ -350,7 +354,7 @@ impl CentralDirectory {
     async fn read<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        archive_comment: CommentPolicy,
+        archive_comment: CommentRule,
     ) -> Result<Self, Error> {
         let length = reader.length().await?;
         budget.check_archive_size(length)?;
