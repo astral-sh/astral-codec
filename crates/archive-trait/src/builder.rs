@@ -114,11 +114,11 @@ impl BuilderState {
         Ok(())
     }
 
-    fn prepare_entry<'a, E>(
+    fn prepare_entry<'a, B: ArchiveBuilder>(
         &self,
         path: &'a impl AsRef<Path>,
         entry: ArchivedEntry,
-    ) -> Result<(&'a str, EntryReservation), BuildError<E>> {
+    ) -> Result<(&'a str, EntryReservation<'a>), BuildError<B::Error>> {
         self.ensure_active()?;
         let archive_path = path.as_ref();
         let Some(path) = archive_path.to_str() else {
@@ -133,7 +133,7 @@ impl BuilderState {
                 value: path.to_owned(),
             });
         }
-        Ok((path, self.entries.preflight_entry(path, entry)?))
+        Ok((path, self.entries.preflight_entry::<B>(path, entry)?))
     }
 
     // Cancellation can leave partial output. Keep the builder poisoned until
@@ -379,6 +379,13 @@ pub trait ArchiveBuilder: Sized {
     /// Formats without additional settings can use [`EntryMetadata`] directly.
     type FileOptions: From<EntryMetadata>;
 
+    /// Returns the directory path used for collision tracking. Formats that add a
+    /// directory suffix can omit the caller-supplied suffix from this key.
+    /// The writer and name validator still receive the original path.
+    fn directory_collision_key(path: &str) -> &str {
+        path
+    }
+
     /// Wraps this format writer in a builder using default policy.
     ///
     /// Implementors should not override this default implementation.
@@ -454,7 +461,7 @@ impl<B: ArchiveBuilder> Builder<B> {
     {
         let (path, reservation) = self
             .state
-            .prepare_entry(&path, ArchivedEntry::NonDirectory)?;
+            .prepare_entry::<B>(&path, ArchivedEntry::NonDirectory)?;
         let mut payload = payload.into();
         if payload.started {
             return Err(BuildError::FilePayloadAlreadyRead);
@@ -470,7 +477,7 @@ impl<B: ArchiveBuilder> Builder<B> {
         payload.swap_buffer(&mut self.state.source_buffer);
         self.state.complete_write(result, false)?;
 
-        self.state.entries.commit_entry(path, reservation);
+        self.state.entries.commit_entry(reservation);
         Ok(())
     }
 
@@ -485,11 +492,11 @@ impl<B: ArchiveBuilder> Builder<B> {
     ) -> Result<(), BuildError<B::Error>> {
         let (path, reservation) = self
             .state
-            .prepare_entry(&path, ArchivedEntry::Directory { explicit: true })?;
+            .prepare_entry::<B>(&path, ArchivedEntry::Directory { explicit: true })?;
         self.state.begin_write();
         let result = self.backend.write_directory_member(path).await;
         self.state.complete_write(result, false)?;
-        self.state.entries.commit_entry(path, reservation);
+        self.state.entries.commit_entry(reservation);
         Ok(())
     }
 
@@ -588,7 +595,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
     for entry in entries {
         let reservation = traversal
             .entries
-            .preflight_entry(
+            .preflight_entry::<B>(
                 &entry.archive_path,
                 if matches!(&entry.kind, PreparedTraversalKind::Directory) {
                     ArchivedEntry::Directory { explicit: true }
@@ -642,9 +649,7 @@ async fn write_prepared_directory_entries<B: ArchiveBuilder>(
                     .await?;
             }
         }
-        traversal
-            .entries
-            .commit_entry(&entry.archive_path, reservation);
+        traversal.entries.commit_entry(reservation);
         traversal.emitted = true;
     }
     Ok(())
@@ -886,7 +891,8 @@ enum ArchivedEntry {
 struct BuildEntries(ComponentTree<Box<str>, ArchivedEntry>);
 
 /// Proof that an entry was checked against the current collision state.
-struct EntryReservation {
+struct EntryReservation<'a> {
+    path: &'a str,
     entry: ArchivedEntry,
 }
 
@@ -895,22 +901,27 @@ impl BuildEntries {
         Self(ComponentTree::new(None))
     }
 
-    fn preflight_entry<E>(
+    fn preflight_entry<'a, B: ArchiveBuilder>(
         &self,
-        path: &str,
+        path: &'a str,
         entry: ArchivedEntry,
-    ) -> Result<EntryReservation, BuildError<E>> {
+    ) -> Result<EntryReservation<'a>, BuildError<B::Error>> {
+        let path = match entry {
+            ArchivedEntry::Directory { .. } => B::directory_collision_key(path),
+            ArchivedEntry::NonDirectory => path,
+        };
+        let reservation = EntryReservation { path, entry };
         let mut parent = ROOT_NODE;
         let mut components = archive_path_components(path).peekable();
         while let Some((component, prefix)) = components.next() {
             let Some(node) = self.0.child(parent, component) else {
-                return Ok(EntryReservation { entry });
+                return Ok(reservation);
             };
             if components.peek().is_some() {
                 match self.0.state(node) {
                     Some(ArchivedEntry::Directory { .. }) => parent = node,
                     Some(ArchivedEntry::NonDirectory) => return Err(path_collision(prefix)),
-                    None => return Ok(EntryReservation { entry }),
+                    None => return Ok(reservation),
                 }
             } else {
                 match (self.0.state(node), entry) {
@@ -918,19 +929,19 @@ impl BuildEntries {
                         Some(ArchivedEntry::Directory { explicit: false }),
                         ArchivedEntry::Directory { .. },
                     )
-                    | (None, _) => return Ok(EntryReservation { entry }),
+                    | (None, _) => return Ok(reservation),
                     (Some(_), _) => return Err(path_collision(prefix)),
                 }
             }
         }
-        Ok(EntryReservation { entry })
+        Ok(reservation)
     }
 
-    fn commit_entry(&mut self, path: &str, reservation: EntryReservation) {
+    fn commit_entry(&mut self, reservation: EntryReservation<'_>) {
         // The builder holds exclusive state access while the backend hook is
         // awaited, so a successful reservation remains valid until this commit.
         let mut parent = ROOT_NODE;
-        let mut components = archive_path_components(path).peekable();
+        let mut components = archive_path_components(reservation.path).peekable();
         while let Some((component, _)) = components.next() {
             let node = self
                 .0
