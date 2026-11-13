@@ -261,9 +261,19 @@ async fn manual_entries_preserve_order_metadata_options_and_collision_state() {
         ));
     }
     builder
-        .add_directory("bin")
+        .add_directory("bin/")
         .await
         .expect("an implicit ancestor should accept its explicit directory member");
+    builder
+        .add_directory("lib")
+        .await
+        .expect("directory should be added");
+    for (alias, existing) in [("bin", "bin"), ("bin//", "bin"), ("lib/", "lib")] {
+        assert!(matches!(
+            builder.add_directory(alias).await,
+            Err(BuildError::PathCollision { path }) if path == existing
+        ));
+    }
     builder
         .add_file("bin/other", b"other".as_slice(), EntryMetadata::default())
         .await
@@ -280,7 +290,8 @@ async fn manual_entries_preserve_order_metadata_options_and_collision_state() {
                 options: Some("custom".to_owned()),
             },
             RecordedEntry::file("README", b"hello", false),
-            RecordedEntry::Directory("bin".to_owned()),
+            RecordedEntry::Directory("bin/".to_owned()),
+            RecordedEntry::Directory("lib".to_owned()),
             RecordedEntry::file("bin/other", b"other", false),
         ]
     );
