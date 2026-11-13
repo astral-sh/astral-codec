@@ -10,11 +10,14 @@ use std::{
 
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
-    Archive, ArchiveBuilder, BuildError, CompressionMethod, EncodeError, EntryMetadata,
-    FilePayload, LimitExceeded, Limits, Member, MemberPayload, ZipArchive, ZipEncoder,
-    ZipFileOptions,
+    Archive, ArchiveBuilder, BuildError, CompressionMethod, DecodePolicy, EncodeError,
+    EntryMetadata, FilePayload, LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
+    ZipEncoder, ZipFileOptions,
 };
-use zip_framing::write::{EntryKind, PendingMember};
+use zip_framing::{
+    constants::size,
+    write::{EntryKind, PendingMember},
+};
 
 #[cfg(unix)]
 use tokio::fs::File;
@@ -144,24 +147,62 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
 }
 
 #[tokio::test]
-async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> TestResult {
-    let output = ZipEncoder::new(Cursor::new(Vec::new()))
+async fn finalizes_empty_archives_at_the_metadata_limit() -> TestResult {
+    let mut output = Cursor::new(Vec::new());
+    let limits = Limits {
+        metadata_size: size::ZIP64_END as u64,
+        ..Limits::default()
+    };
+    let short_limits = Limits {
+        metadata_size: limits.metadata_size - 1,
+        ..limits
+    };
+    let builder = ZipEncoder::new(&mut output)
+        .with_limits(short_limits)
+        .builder();
+    assert!(matches!(
+        builder.finish().await,
+        Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
+            if limit == short_limits.metadata_size
+    ));
+    assert!(output.get_ref().is_empty());
+
+    ZipEncoder::new(&mut output)
+        .with_limits(limits)
         .builder()
-        .finish_into_inner()
-        .await?
-        .into_inner();
+        .finish()
+        .await?;
+    let archive = ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
+    assert!(archive.entries().is_empty());
+    Ok(())
+}
 
-    assert!(ZipArchive::open(output).await?.entries().is_empty());
-
+#[tokio::test]
+async fn recovers_from_member_preflight_failures() -> TestResult {
     let header = PendingMember::new(
         "file",
         CompressionMethod::Deflate,
         EntryKind::File { executable: false },
     )?;
     let limits = Limits {
-        metadata_size: header.local_header_size() as u64 + header.central_header_size() as u64,
+        metadata_size: (header.local_header_size() + header.central_header_size() + size::ZIP64_END)
+            as u64,
         ..Limits::default()
     };
+    let short_limits = Limits {
+        metadata_size: limits.metadata_size - 1,
+        ..limits
+    };
+    let mut output = Cursor::new(Vec::new());
+    let mut builder = ZipEncoder::new(&mut output)
+        .with_limits(short_limits)
+        .builder();
+    assert!(matches!(
+        builder.add_file("file", &b"ok"[..], EntryMetadata::default()).await,
+        Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
+            if limit == short_limits.metadata_size
+    ));
+    assert!(output.get_ref().is_empty());
     for limits in [
         Limits {
             member_size: 3,
@@ -194,7 +235,10 @@ async fn finalizes_empty_archives_and_recovers_from_preflight_failures() -> Test
         ));
         let output = builder.finish_into_inner().await?.into_inner();
 
-        assert_eq!(ZipArchive::open(output).await?.entries().len(), 1);
+        let mut archive =
+            ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
+        archive.validate_all().await?;
+        assert_eq!(archive.entries().len(), 1);
     }
 
     Ok(())

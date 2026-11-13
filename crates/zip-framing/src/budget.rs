@@ -16,8 +16,10 @@ pub struct Limits {
     pub entries: usize,
     /// Maximum cumulative metadata size (default: 64 MiB).
     ///
-    /// Readers charge central directory, resolved local, and ZIP64 end records.
-    /// Encoders charge local and central headers.
+    /// Counts central directory headers, local headers, and the ZIP64 end record
+    /// when present. Readers charge local headers as they resolve each member.
+    /// The ZIP64 locator and classic end record (including the archive comment)
+    /// count only toward [`Self::archive_size`].
     pub metadata_size: u64,
     /// Maximum uncompressed size of one member (default: 8 GiB).
     pub member_size: u64,

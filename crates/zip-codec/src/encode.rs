@@ -23,6 +23,7 @@ use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
     Budget, BudgetError, CompressionMethod, LimitExceeded, Limits,
+    constants::size,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -128,6 +129,10 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             header.local_header_size() as u64 + header.central_header_size() as u64,
         )?;
         pending_budget.charge_member(size)?;
+
+        // Leave room for the archive's single ZIP64 end record after this member.
+        let mut final_budget = pending_budget;
+        final_budget.charge_metadata(size::ZIP64_END as u64)?;
 
         Ok((header, pending_budget))
     }
@@ -274,6 +279,8 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             return Err(EncodeError::Finished);
         }
 
+        let mut final_budget = self.budget;
+        final_budget.charge_metadata(size::ZIP64_END as u64)?;
         let end = end_records(
             self.count as u64,
             self.position,
@@ -285,7 +292,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .checked_add(self.directory.len() as u64)
             .and_then(|position| position.checked_add(end.len() as u64))
             .ok_or(EncodeError::Overflow)?;
-        self.budget.check_archive_size(position)?;
+        final_budget.check_archive_size(position)?;
 
         Ok((end, position))
     }
