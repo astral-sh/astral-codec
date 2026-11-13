@@ -1,11 +1,11 @@
 pub mod support;
 
 #[cfg(unix)]
-use std::{io, os::unix::net::UnixListener, path::Path};
+use std::{os::unix::net::UnixListener, path::Path};
 
 use support::{ArchiveBuilder, single_pax_member};
 #[cfg(unix)]
-use support::{pax_record, symlink_file};
+use support::{pax_record, symlink_dir, symlink_file};
 #[cfg(not(unix))]
 use tar_codec::ExtractPolicyViolation;
 use tar_codec::{
@@ -252,51 +252,12 @@ async fn targets_blocked_by_archive_files_are_dangling() {
 #[tokio::test]
 async fn missing_targets_can_be_forbidden() {
     let temp = tempdir().unwrap();
-    let bytes = single_pax_member("link", b'2', b"", "missing", 0o644);
-    assert!(matches!(
-        TarArchive::new(bytes.as_slice())
-            .extract_in(
-                temp.path(),
-                ExtractPolicy::default()
-                    .link_policy(LinkPolicy::default().allow_missing_targets(false)),
-            )
-            .await,
-        Err(ExtractError::InvalidLink {
-            reason: "target was not created by this extraction",
-            ..
-        })
-    ));
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn native_target_controls_are_independent() {
-    let temp = tempdir().unwrap();
-
-    let destination = temp.path().join("missing-only");
+    let destination = temp.path().join("out");
     std::fs::create_dir(&destination).unwrap();
     std::fs::write(destination.join("ambient"), b"ambient").unwrap();
     let bytes = single_pax_member("link", b'2', b"", "ambient", 0o644);
-    let policy = ExtractPolicy::default();
-    assert!(matches!(
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, policy)
-            .await,
-        Err(ExtractError::InvalidLink {
-            reason: "ambient target is not allowed",
-            ..
-        })
-    ));
-
-    let destination = temp.path().join("ambient-allowed");
-    std::fs::create_dir(&destination).unwrap();
-    std::fs::write(destination.join("ambient"), b"ambient").unwrap();
-    let bytes = single_pax_member("link", b'2', b"", "ambient", 0o644);
-    let policy = ExtractPolicy::default().link_policy(
-        LinkPolicy::default()
-            .allow_ambient_targets(true)
-            .allow_missing_targets(false),
-    );
+    let policy =
+        ExtractPolicy::default().link_policy(LinkPolicy::default().allow_missing_targets(false));
     TarArchive::new(bytes.as_slice())
         .extract_in(&destination, policy)
         .await
@@ -328,11 +289,9 @@ async fn native_target_controls_are_independent() {
     }
 }
 
-/// A missing-target opt-in must not classify paths through existing filesystem
-/// symlinks as ordinary absent targets and bypass the ambient-target policy.
 #[cfg(unix)]
 #[tokio::test]
-async fn missing_target_opt_in_does_not_allow_dangling_targets_through_ambient_symlinks() {
+async fn missing_targets_through_pre_existing_symlinks_follow_the_missing_target_policy() {
     let temp = tempdir().unwrap();
     for (case, ambient_target, archive_target) in [
         ("leaf", "missing", "ambient-link"),
@@ -344,21 +303,25 @@ async fn missing_target_opt_in_does_not_allow_dangling_targets_through_ambient_s
         std::fs::write(destination.join("file"), b"contents").expect("file should be created");
         symlink_file(ambient_target, destination.join("ambient-link")).unwrap();
         let bytes = single_pax_member("link", b'2', b"", archive_target, 0o644);
-        let policy = ExtractPolicy::default();
-
+        let require_target = ExtractPolicy::default()
+            .link_policy(LinkPolicy::default().allow_missing_targets(false));
         assert!(matches!(
             TarArchive::new(bytes.as_slice())
-                .extract_in(&destination, policy)
+                .extract_in(&destination, require_target)
                 .await,
             Err(ExtractError::InvalidLink {
-                reason: "ambient target is not allowed",
+                reason: "target does not exist",
                 ..
             })
         ));
-        assert!(matches!(
-            std::fs::symlink_metadata(destination.join("link")),
-            Err(error) if error.kind() == io::ErrorKind::NotFound
-        ));
+        TarArchive::new(bytes.as_slice())
+            .extract_in(&destination, ExtractPolicy::default())
+            .await
+            .expect("contained dangling link should be preserved");
+        assert_eq!(
+            std::fs::read_link(destination.join("link")).expect("link should be readable"),
+            Path::new(archive_target)
+        );
         assert_eq!(
             std::fs::read_link(destination.join("ambient-link")).unwrap(),
             Path::new(ambient_target)
@@ -433,43 +396,23 @@ async fn symlink_graph_resolution_budget_is_shared_across_links() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn ambient_file_and_directory_targets_require_explicit_opt_in() {
-    let temp = tempdir().unwrap();
-    for (kind, directory) in [("file", false), ("directory", true)] {
-        for allow_ambient in [false, true] {
-            let destination = temp.path().join(format!(
-                "{kind}-{}",
-                if allow_ambient { "allow" } else { "deny" }
-            ));
-            std::fs::create_dir(&destination).unwrap();
-            let target = destination.join("ambient");
-            if directory {
-                std::fs::create_dir(&target).unwrap();
-            } else {
-                std::fs::write(&target, b"ambient").unwrap();
-            }
-            let bytes = single_pax_member("link", b'2', b"", "ambient", 0o644);
-            let policy = if allow_ambient {
-                ExtractPolicy::default()
-                    .link_policy(LinkPolicy::default().allow_ambient_targets(true))
-            } else {
-                ExtractPolicy::default()
-            };
-            let result = TarArchive::new(bytes.as_slice())
-                .extract_in(&destination, policy)
-                .await;
-            if allow_ambient {
-                result.unwrap();
-                assert_eq!(
-                    std::fs::read_link(destination.join("link")).unwrap(),
-                    Path::new("ambient")
-                );
-            } else {
-                assert!(matches!(result, Err(ExtractError::InvalidLink { .. })));
-                assert!(!destination.join("link").exists());
-            }
-        }
-    }
+async fn preserves_links_to_pre_existing_files_and_directories_by_default() {
+    let temp = tempdir().expect("temporary directory should be created");
+    std::fs::write(temp.path().join("file"), b"ambient").expect("file should be created");
+    std::fs::create_dir(temp.path().join("dir")).expect("directory should be created");
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .ustar("file-link", b'2', b"", "file", 0o644)
+        .ustar("dir-link", b'2', b"", "dir", 0o644);
+    TarArchive::new(archive.finish().as_slice())
+        .extract_in(temp.path(), ExtractPolicy::default())
+        .await
+        .expect("links to existing entries should be preserved");
+    assert_eq!(
+        std::fs::read(temp.path().join("file-link")).expect("file should be readable"),
+        b"ambient"
+    );
+    assert!(temp.path().join("dir-link").is_dir());
 }
 
 #[cfg(unix)]
@@ -481,10 +424,7 @@ async fn native_links_allow_ambient_non_regular_targets() {
     let _socket = UnixListener::bind(destination.join("socket")).unwrap();
     let bytes = single_pax_member("link", b'2', b"", "socket", 0o644);
     TarArchive::new(bytes.as_slice())
-        .extract_in(
-            &destination,
-            ExtractPolicy::default().link_policy(LinkPolicy::default().allow_ambient_targets(true)),
-        )
+        .extract_in(&destination, ExtractPolicy::default())
         .await
         .unwrap();
     assert_eq!(
@@ -496,11 +436,8 @@ async fn native_links_allow_ambient_non_regular_targets() {
 #[cfg(unix)]
 #[tokio::test]
 async fn ambient_link_components_must_resolve_beneath_the_root() {
-    use support::symlink_dir;
-
     let temp = tempdir().unwrap();
-    let policy =
-        ExtractPolicy::default().link_policy(LinkPolicy::default().allow_ambient_targets(true));
+    let policy = ExtractPolicy::default();
 
     let destination = temp.path().join("contained-leaf");
     std::fs::create_dir(&destination).unwrap();
@@ -564,11 +501,25 @@ async fn ambient_link_components_must_resolve_beneath_the_root() {
             .is_err()
     );
     assert!(!destination.join("alias").exists());
+
+    // The cycle only exists once the archive's link has been created.
+    let destination = temp.path().join("cycle");
+    std::fs::create_dir(&destination).expect("destination should be created");
+    symlink_file("alias", destination.join("ambient-link"))
+        .expect("ambient link should be created");
+    let bytes = single_pax_member("alias", b'2', b"", "ambient-link", 0o644);
+    assert!(matches!(
+        TarArchive::new(bytes.as_slice())
+            .extract_in(&destination, policy)
+            .await,
+        Err(ExtractError::Filesystem { operation: "resolve extracted symbolic link", path, .. })
+            if path == Path::new("alias")
+    ));
 }
 
 #[cfg(unix)]
 #[tokio::test]
-async fn default_target_policy_uses_filesystem_provenance() {
+async fn preserves_links_to_reused_directories_and_their_extracted_children() {
     let temp = tempdir().unwrap();
     let destination = temp.path().join("declared-ambient-directory");
     std::fs::create_dir_all(destination.join("ambient")).unwrap();
@@ -577,15 +528,11 @@ async fn default_target_policy_uses_filesystem_provenance() {
         .ustar("ambient", b'5', b"", "", 0o755)
         .ustar("alias", b'2', b"", "ambient", 0o644);
     let bytes = archive.finish();
-    assert!(matches!(
-        TarArchive::new(bytes.as_slice())
-            .extract_in(&destination, ExtractPolicy::default())
-            .await,
-        Err(ExtractError::InvalidLink {
-            reason: "ambient target is not allowed",
-            ..
-        })
-    ));
+    TarArchive::new(bytes.as_slice())
+        .extract_in(&destination, ExtractPolicy::default())
+        .await
+        .expect("link to the reused directory should be preserved");
+    assert!(destination.join("alias").is_dir());
 
     let destination = temp.path().join("created-file-under-ambient-directory");
     std::fs::create_dir_all(destination.join("ambient")).unwrap();

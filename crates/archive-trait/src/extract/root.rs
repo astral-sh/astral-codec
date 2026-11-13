@@ -86,26 +86,12 @@ const BUFFERED_FILE_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 // Balance reusable-buffer initialization against blocking write cadence.
 const STREAMING_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
-/// The latest archive-visible state and provenance of an extracted path.
+/// The latest archive-visible state of an extracted path.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ExtractedEntry {
     File,
-    CreatedDirectory,
-    /// An implicit parent whose creation is queued ahead of its children.
-    PendingDirectory,
-    AmbientDirectory,
-    Symlink {
-        index: usize,
-    },
-}
-
-impl ExtractedEntry {
-    fn is_directory(self) -> bool {
-        matches!(
-            self,
-            Self::CreatedDirectory | Self::AmbientDirectory | Self::PendingDirectory
-        )
-    }
+    Directory,
+    Symlink { index: usize },
 }
 
 type EntryId = NodeId;
@@ -117,7 +103,7 @@ struct EntryTree(ComponentTree<Box<str>, ExtractedEntry>);
 
 impl EntryTree {
     fn new() -> Self {
-        Self(ComponentTree::new(Some(ExtractedEntry::AmbientDirectory)))
+        Self(ComponentTree::new(Some(ExtractedEntry::Directory)))
     }
 
     fn child(&self, parent: EntryId, component: &str) -> Option<EntryId> {
@@ -141,7 +127,7 @@ impl EntryTree {
         let mut entry = ROOT_ENTRY;
         for component in path.parent_components() {
             entry = self.child(entry, component)?;
-            if !self.state(entry).is_some_and(ExtractedEntry::is_directory) {
+            if self.state(entry) != Some(ExtractedEntry::Directory) {
                 return None;
             }
         }
@@ -300,15 +286,10 @@ enum TerminalKind {
 }
 
 /// The result of resolving a target through the archive's symbolic-link graph.
-///
-/// Resolution stops when it reaches either an entry whose provenance and kind
-/// are known from this extraction, or a path whose terminal entry is not owned
-/// by the extraction and therefore requires policy-dependent handling.
 enum ResolvedTarget {
-    /// The extraction root or an archive-created entry of the given kind.
     Known(TerminalKind),
-    /// A normalized root-relative path not created by this extraction.
-    Unowned(NormalizedPath),
+    /// The archive graph has no entry for this path. Consult the filesystem.
+    Filesystem(NormalizedPath),
 }
 
 /// Streams a large payload into an already-created file.
@@ -574,26 +555,7 @@ impl<E> ExtractionRoot<E> {
                 .map_err(|reason| link.error(reason))?;
             let kind = match target {
                 ResolvedTarget::Known(kind) => kind,
-                ResolvedTarget::Unowned(_)
-                    if !policy.allow_ambient_targets && !policy.allow_missing_targets =>
-                {
-                    return Err(link.error("target was not created by this extraction"));
-                }
-                ResolvedTarget::Unowned(path) => {
-                    let (kind, traverses_ambient_link) = self.inspect_ambient_target(&path).await?;
-                    if traverses_ambient_link && !policy.allow_ambient_targets {
-                        return Err(link.error("ambient target is not allowed"));
-                    }
-                    match kind {
-                        TerminalKind::Directory | TerminalKind::NonDirectory
-                            if !policy.allow_ambient_targets =>
-                        {
-                            return Err(link.error("ambient target is not allowed"));
-                        }
-                        _ => {}
-                    }
-                    kind
-                }
+                ResolvedTarget::Filesystem(path) => self.inspect_target(&path).await?,
             };
             if kind == TerminalKind::Dangling && !policy.allow_missing_targets {
                 return Err(link.error("target does not exist"));
@@ -760,11 +722,6 @@ impl<E> ExtractionRoot<E> {
         .await
         .map_err(ExtractError::<E>::BlockingTask)?;
         self.directory_handles = result.handles;
-        for (entry, state) in result.directories {
-            if self.entries.state(entry) == Some(ExtractedEntry::PendingDirectory) {
-                self.entries.set_state(entry, state);
-            }
-        }
         for mut buffer in result.buffers {
             buffer.clear();
             self.buffered_file_buffers.push(buffer);
@@ -784,7 +741,7 @@ impl<E> ExtractionRoot<E> {
             current.push(component);
             let entry = self.entries.ensure_child(parent, component);
             match self.entries.state(entry) {
-                Some(state) if state.is_directory() => {}
+                Some(ExtractedEntry::Directory) => {}
                 Some(_) => {
                     self.flush_buffered_files().await?;
                     return Err(ExtractError::PathCollision {
@@ -797,8 +754,7 @@ impl<E> ExtractionRoot<E> {
                         parent,
                         path: current.to_path_buf(),
                     });
-                    self.entries
-                        .set_state(entry, ExtractedEntry::PendingDirectory);
+                    self.entries.set_state(entry, ExtractedEntry::Directory);
                     if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS {
                         self.flush_buffered_files().await?;
                     }
@@ -880,7 +836,7 @@ impl<E> ExtractionRoot<E> {
         purpose: DirectoryPurpose,
     ) -> Result<(), ExtractError<E>> {
         if let Some(state) = self.entries.state(entry) {
-            if state.is_directory() {
+            if state == ExtractedEntry::Directory {
                 return Ok(());
             }
             if purpose == DirectoryPurpose::ImplicitParent {
@@ -895,7 +851,7 @@ impl<E> ExtractionRoot<E> {
             |source| ExtractError::filesystem("create directory", path.to_path_buf(), source);
         let collision = match self.try_create_directory(path, parent).await? {
             Ok(directory) => {
-                self.record_directory(entry, parent, directory, ExtractedEntry::CreatedDirectory);
+                self.record_directory(entry, parent, directory);
                 return Ok(());
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => source,
@@ -911,7 +867,7 @@ impl<E> ExtractionRoot<E> {
                     directory.open_dir(path)
                 })
                 .await?;
-            self.record_directory(entry, parent, directory, ExtractedEntry::AmbientDirectory);
+            self.record_directory(entry, parent, directory);
             return Ok(());
         }
 
@@ -925,20 +881,14 @@ impl<E> ExtractionRoot<E> {
             .try_create_directory(path, parent)
             .await?
             .map_err(create_error)?;
-        self.record_directory(entry, parent, directory, ExtractedEntry::CreatedDirectory);
+        self.record_directory(entry, parent, directory);
         Ok(())
     }
 
-    fn record_directory(
-        &mut self,
-        entry: EntryId,
-        parent: EntryId,
-        directory: Dir,
-        state: ExtractedEntry,
-    ) {
+    fn record_directory(&mut self, entry: EntryId, parent: EntryId, directory: Dir) {
         self.directory_handles
             .insert(entry, parent, Arc::new(directory));
-        self.entries.set_state(entry, state);
+        self.entries.set_state(entry, ExtractedEntry::Directory);
     }
 
     async fn replace_leaf(
@@ -1016,56 +966,34 @@ impl<E> ExtractionRoot<E> {
             if let Some(rewritten) = rewritten {
                 path = Cow::Owned(rewritten);
             } else {
-                if path.is_empty() {
-                    return Ok(ResolvedTarget::Known(TerminalKind::Directory));
-                }
                 return Ok(match entry.and_then(|entry| self.entries.state(entry)) {
-                    Some(ExtractedEntry::CreatedDirectory) => {
+                    Some(ExtractedEntry::Directory) => {
                         ResolvedTarget::Known(TerminalKind::Directory)
                     }
                     Some(ExtractedEntry::File) => ResolvedTarget::Known(TerminalKind::NonDirectory),
                     Some(ExtractedEntry::Symlink { .. }) => continue,
-                    Some(ExtractedEntry::AmbientDirectory | ExtractedEntry::PendingDirectory)
-                    | None => ResolvedTarget::Unowned(path.into_owned()),
+                    None => ResolvedTarget::Filesystem(path.into_owned()),
                 });
             }
         }
         Err("symbolic-link target expansion limit exceeded")
     }
 
-    async fn inspect_ambient_target(
-        &self,
-        path: &NormalizedPath,
-    ) -> Result<(TerminalKind, bool), ExtractError<E>> {
-        self.with_root("inspect symbolic-link target", path, |directory, path| {
-            if path.as_os_str().is_empty() {
-                return Ok((TerminalKind::Directory, false));
-            }
-            match directory.metadata(path) {
-                Ok(metadata) if metadata.is_dir() => return Ok((TerminalKind::Directory, false)),
-                Ok(_) => return Ok((TerminalKind::NonDirectory, false)),
+    async fn inspect_target(&self, path: &NormalizedPath) -> Result<TerminalKind, ExtractError<E>> {
+        self.with_root(
+            "inspect symbolic-link target",
+            path,
+            |directory, path| match directory.metadata(path) {
+                Ok(metadata) if metadata.is_dir() => Ok(TerminalKind::Directory),
+                Ok(_) => Ok(TerminalKind::NonDirectory),
                 Err(error) => match error.kind() {
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {}
-                    _ => return Err(error),
-                },
-            }
-
-            // A dangling target can still pass through an ambient symlink.
-            let mut prefix = PathBuf::new();
-            for component in path.components() {
-                prefix.push(component.as_os_str());
-                match directory.symlink_metadata(&prefix) {
-                    Ok(metadata) if metadata_is_link(&metadata) => {
-                        return Ok((TerminalKind::Dangling, true));
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
+                        Ok(TerminalKind::Dangling)
                     }
-                    Ok(metadata) if !metadata.is_dir() => break,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-                    Err(error) => return Err(error),
-                }
-            }
-            Ok((TerminalKind::Dangling, false))
-        })
+                    _ => Err(error),
+                },
+            },
+        )
         .await
     }
 

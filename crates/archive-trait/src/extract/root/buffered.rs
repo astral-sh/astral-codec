@@ -12,7 +12,7 @@ use std::{
 use cap_std::fs::{Dir, File as CapFile, Metadata};
 
 use super::{
-    DirectoryHandles, EntryId, ExtractedEntry, FileOpenMode, entry_capability, metadata_is_link,
+    DirectoryHandles, EntryId, FileOpenMode, entry_capability, metadata_is_link,
     remove_directory_error, remove_file_or_symlink,
 };
 use crate::ExtractError;
@@ -61,7 +61,6 @@ pub(super) enum BufferedOperation {
 /// The reusable buffers and first error produced by an ordered file batch.
 pub(super) struct BufferedBatchResult {
     pub(super) handles: DirectoryHandles,
-    pub(super) directories: Vec<(EntryId, ExtractedEntry)>,
     pub(super) buffers: Vec<Vec<u8>>,
     pub(super) error: Option<(PathBuf, BufferedError)>,
 }
@@ -90,7 +89,6 @@ pub(super) fn write_buffered_files(
     cancellation: &AtomicBool,
 ) -> BufferedBatchResult {
     let mut buffers = Vec::new();
-    let mut directories = Vec::new();
     let mut error = None;
     for operation in operations {
         let execute = error.is_none() && !cancellation.load(Ordering::Acquire);
@@ -104,9 +102,8 @@ pub(super) fn write_buffered_files(
                     let (directory, relative_path) =
                         entry_capability(&root, &handles, &path, parent);
                     match create_parent(&directory, &relative_path) {
-                        Ok((opened, state)) => {
+                        Ok(opened) => {
                             handles.insert(entry, parent, Arc::new(opened));
-                            directories.push((entry, state));
                         }
                         Err(source) => error = Some((path, source)),
                     }
@@ -133,7 +130,6 @@ pub(super) fn write_buffered_files(
     }
     BufferedBatchResult {
         handles,
-        directories,
         buffers,
         error,
     }
@@ -141,12 +137,11 @@ pub(super) fn write_buffered_files(
 
 /// Match implicit-parent creation: accept real ambient directories, and never
 /// follow or replace a symbolic link or another non-directory ancestor.
-fn create_parent(directory: &Dir, path: &Path) -> Result<(Dir, ExtractedEntry), BufferedError> {
+fn create_parent(directory: &Dir, path: &Path) -> Result<Dir, BufferedError> {
     let create_error = match directory.create_dir(path) {
         Ok(()) => {
             return directory
                 .open_dir(path)
-                .map(|opened| (opened, ExtractedEntry::CreatedDirectory))
                 .map_err(|source| BufferedError::filesystem("open directory", source));
         }
         Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
@@ -162,7 +157,6 @@ fn create_parent(directory: &Dir, path: &Path) -> Result<(Dir, ExtractedEntry), 
     }
     directory
         .open_dir(path)
-        .map(|opened| (opened, ExtractedEntry::AmbientDirectory))
         .map_err(|source| BufferedError::filesystem("open directory", source))
 }
 
