@@ -1,6 +1,6 @@
 # ZIP correctness review
 
-Reviewed `ww/zip-codec` at `ced194eb524480495526cf9d57294d5ffa4a277d`, including the shared builder and extractor used by the ZIP APIs. The priority for extraction is checking symlink target ownership after publishing deferred links. Finding 5 shows how a case-insensitive volume can bypass the default policy.
+Reviewed `ww/zip-codec` at `ced194eb524480495526cf9d57294d5ffa4a277d`, including the shared builder and extractor used by the ZIP APIs.
 
 A valid archive that fails closed is a compatibility problem. A successful interpretation can be a differential without qualifying as a vulnerability, particularly when APPNOTE supports that interpretation or the difference comes solely from the destination filesystem and stays inside the root. [Security model](SECURITY.md)
 
@@ -53,7 +53,7 @@ We accept this rejection. Both headers describe the same member, so we require t
 
 ## Extraction and member identity
 
-### 5. Deferred symlinks can reach pre-existing targets under the default policy
+### 5. Symlinks to pre-existing targets inside the extraction root (resolved)
 
 On a case-insensitive macOS volume, put a regular file named `ambient` in the extraction root. Create two ordinary ZIP symlink members (Unix creator, mode `0120777`, Stored target bytes) in this order.
 
@@ -62,11 +62,9 @@ On a case-insensitive macOS volume, put a regular file named `ambient` in the ex
 | `Gate` | `.` |
 | `link` | `gate/ambient` |
 
-Default extraction succeeds. Opening `link` reads the pre-existing `ambient` file. Change just the target to `Gate/ambient` or `ambient` and extraction rejects it with “ambient target is not allowed.” No concurrent filesystem mutation is involved.
+The archive graph compares path components by spelling, so it sees `gate/ambient` as missing before the extractor creates `Gate`. Once `Gate` exists, the filesystem resolves `link` to the pre-existing file. The former policy allowed this spelling but rejected `Gate/ambient` and `ambient`.
 
-The pre-publication graph compares archive path components by spelling. At that stage `gate` is absent on disk, so the target qualifies as missing, which defaults allow. Once `Gate` is published the filesystem resolves the alternate spelling. The final capability-relative check only asks whether the target exists. Repeat the ownership and target-kind check against the published graph or reject an alias whose provenance cannot be established. A regression needs a case-insensitive filesystem and a pre-existing file.
-
-The observed effect stays inside the extraction root and falls within the security model's filesystem-specific exclusion. In controls with the same capitalization trick, an ambient symlink leading outside the root failed the final capability check, and an ambient cycle produced a loop error. [Symlink validation and publication](crates/archive-trait/src/extract/root.rs#L562) · [Extraction guarantees](SECURITY.md#archive-trait)
+The extractor now permits all three targets. On successful extraction, every preserved symlink must resolve within the extraction root. Its target can predate extraction or, by default, be missing. After creating the deferred links, the extractor resolves them again relative to the root. In the same example, an `ambient` symlink pointing outside the root or forming a cycle fails that check. [Symlink validation and creation](crates/archive-trait/src/extract/root.rs) · [Extraction guarantees](SECURITY.md#archive-trait)
 
 ### 6. Builder collision tracking uses a different name from the ZIP writer
 
