@@ -74,7 +74,7 @@ Distinct archive names can also share an extraction destination. Add files `a/b`
 
 ## Metadata and resource limits
 
-### 7. Identical ownership values can fail the allowlisted extra-field check
+### 7. Identical ownership values can fail the allowlisted extra-field check (accepted)
 
 Use Info-ZIP field `0x7875` with these two version-1 bodies on an otherwise ordinary empty file. Hex bytes exclude the four-byte extra-field header.
 
@@ -83,7 +83,9 @@ Use Info-ZIP field `0x7875` with these two version-1 bodies on an otherwise ordi
 | Local | `01 01 01 01 02` | 1 | 2 |
 | Central | `01 02 01 00 02 02 00` | 1 | 2 |
 
-Under `ExtraFieldPolicy::AllowListed`, indexing succeeds and `validate_all` rejects the member because the local and central bytes differ. Info-ZIP and 7-Zip test it successfully, and seekable bsdtar reports UID 1 and GID 2. The integers are little-endian and each carries its own width. The parser already strips high zero bytes when comparing ownership across field types. Use the same value comparison across these two copies while retaining layout checks and rejecting genuinely different IDs. [Extra-field reconciliation](crates/zip-framing/src/extra.rs#L261) · [Supported layouts](crates/zip-codec/APPNOTE.md#member-extra-fields)
+Under `ExtraFieldPolicy::AllowListed`, indexing succeeds and `validate_all` rejects the member because the local and central copies of `0x7875` must match byte for byte. Both copies encode the same little-endian integers, using one byte per ID locally and two in the central directory. Info-ZIP and 7-Zip test this constructed archive successfully, and seekable bsdtar reports UID 1 and GID 2. [Extra-field reconciliation](crates/zip-framing/src/extra.rs#L303-L315)
+
+We accept this rejection. Both Info-ZIP and libarchive write the ownership field once and copy its bytes into the central directory. We found no producer that uses different widths for the same ID in the two headers. [Info-ZIP writer](https://github.com/LuaDist/zip/blob/f6cfe48f6bc5bf2d505a0e0eb265ce4cb238db89/unix/unix.c#L555-L559) · [libarchive writer](https://github.com/libarchive/libarchive/blob/4a5944b726d24c8e86589ad09cef958c6f1a6e9c/libarchive/archive_write_set_format_zip.c#L1246-L1249)
 
 ### 8. The same metadata limit admits writer output that the reader rejects
 
