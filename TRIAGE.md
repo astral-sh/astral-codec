@@ -68,7 +68,7 @@ The extractor now permits all three targets. On successful extraction, every pre
 
 ### 6. The ZIP builder could emit the same directory twice (fixed)
 
-The ZIP writer stores both `add_directory("d")` and `add_directory("d/")` as `d/`. The builder previously reserved the two spellings separately and could emit two identical directory names. They now reserve the same directory, so the second call returns `BuildError::PathCollision` in either order. Files under `d/` can still be added. [ZIP directory writer](crates/zip-codec/src/encode.rs) · [Builder reservations](crates/archive-trait/src/builder.rs)
+The ZIP writer stores both `add_directory("d")` and `add_directory("d/")` as `d/`. The builder previously reserved the two spellings separately and could emit two identical directory names. The shared builder now ignores trailing slashes when reserving a directory. The second call returns `BuildError::PathCollision` in either order for both tar and ZIP. Files under `d/` can still be added. [ZIP directory writer](crates/zip-codec/src/encode.rs) · [Builder reservations](crates/archive-trait/src/builder.rs)
 
 Distinct archive names can also share an extraction destination. Add files `a/b` containing `x` and `a/./b` containing `y`. Both names and payloads survive in the archive. Default extraction writes one file containing `y`. Whether the builder should reject such aliases is a separate policy question. The default builder also accepts `../x`, while the default extractor rejects its parent component. [Extraction path normalization](crates/archive-trait/src/extract/path.rs#L163)
 

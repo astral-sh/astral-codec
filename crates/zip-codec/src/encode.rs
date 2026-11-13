@@ -306,10 +306,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type Error = EncodeError;
     type FileOptions = ZipFileOptions;
 
-    fn directory_collision_key(path: &str) -> &str {
-        path.strip_suffix('/').unwrap_or(path)
-    }
-
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
         let (end, position) = self.prepare_end().map_err(BuildFailure::recoverable)?;
 
