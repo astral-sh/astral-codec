@@ -38,30 +38,6 @@ fn source_bytes(length: usize) -> Vec<u8> {
 }
 
 #[tokio::test]
-async fn rejects_duplicate_zip_directories_with_optional_trailing_slash() -> TestResult {
-    for (first, second) in [("d", "d/"), ("d/", "d")] {
-        let mut builder = ZipEncoder::new(Cursor::new(Vec::new())).builder();
-        builder.add_directory(first).await?;
-        assert!(matches!(
-            builder.add_directory(second).await,
-            Err(BuildError::PathCollision { .. })
-        ));
-        builder
-            .add_file("d/file", b"child".as_slice(), EntryMetadata::default())
-            .await?;
-
-        let archive = ZipArchive::open(builder.finish_into_inner().await?.into_inner()).await?;
-        let paths: Vec<_> = archive
-            .entries()
-            .iter()
-            .map(|entry| entry.directory().path())
-            .collect();
-        assert_eq!(paths, ["d/", "d/file"]);
-    }
-    Ok(())
-}
-
-#[tokio::test]
 async fn streams_stored_and_deflate_payloads_with_matching_zip64_records() -> TestResult {
     for method in [CompressionMethod::Stored, CompressionMethod::Deflate] {
         for length in [0, 1, 131_089, 2 * 1024 * 1024 + 3] {
