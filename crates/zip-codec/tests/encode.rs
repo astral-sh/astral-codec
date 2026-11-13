@@ -147,70 +147,60 @@ async fn per_file_compression_overrides_preserve_encoder_defaults() -> TestResul
 }
 
 #[tokio::test]
-async fn finalizes_empty_archives_at_the_metadata_limit() -> TestResult {
-    let mut output = Cursor::new(Vec::new());
-    let limits = Limits {
-        metadata_size: size::ZIP64_END as u64,
-        ..Limits::default()
-    };
-    let short_limits = Limits {
-        metadata_size: limits.metadata_size - 1,
-        ..limits
-    };
-    let builder = ZipEncoder::new(&mut output)
-        .with_limits(short_limits)
-        .builder();
-    assert!(matches!(
-        builder.finish().await,
-        Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
-            if limit == short_limits.metadata_size
-    ));
-    assert!(output.get_ref().is_empty());
+async fn enforces_the_metadata_limit_before_writing() -> TestResult {
+    let header = PendingMember::new("a/", CompressionMethod::Stored, EntryKind::Directory)?;
+    let headers = (header.local_header_size() + header.central_header_size()) as u64;
+    let end = size::ZIP64_END as u64;
+    for (metadata_size, paths) in [
+        (end - 1, &[][..]),
+        (end, &[]),
+        (end + headers - 1, &[]),
+        (end + headers, &["a/"]),
+        (end + 2 * headers, &["a/", "b/"]),
+    ] {
+        let limits = Limits {
+            metadata_size,
+            ..Limits::default()
+        };
+        let mut output = Cursor::new(Vec::new());
+        let mut builder = ZipEncoder::new(&mut output).with_limits(limits).builder();
+        if metadata_size < end {
+            assert!(matches!(
+                builder.finish().await,
+                Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
+                    if limit == metadata_size
+            ));
+            assert!(output.get_ref().is_empty());
+            continue;
+        }
 
-    ZipEncoder::new(&mut output)
-        .with_limits(limits)
-        .builder()
-        .finish()
-        .await?;
-    let archive = ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
-    assert!(archive.entries().is_empty());
+        for path in paths {
+            builder.add_directory(path).await?;
+        }
+        assert!(matches!(
+            builder.add_directory("c/").await,
+            Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
+                if limit == metadata_size
+        ));
+        builder.finish().await?;
+        let mut archive =
+            ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
+        archive.validate_all().await?;
+        assert_eq!(archive.entries().len(), paths.len());
+    }
     Ok(())
 }
 
 #[tokio::test]
-async fn recovers_from_member_preflight_failures() -> TestResult {
-    let header = PendingMember::new(
-        "file",
-        CompressionMethod::Deflate,
-        EntryKind::File { executable: false },
-    )?;
-    let limits = Limits {
-        metadata_size: (header.local_header_size() + header.central_header_size() + size::ZIP64_END)
-            as u64,
-        ..Limits::default()
-    };
-    let short_limits = Limits {
-        metadata_size: limits.metadata_size - 1,
-        ..limits
-    };
-    let mut output = Cursor::new(Vec::new());
-    let mut builder = ZipEncoder::new(&mut output)
-        .with_limits(short_limits)
-        .builder();
-    assert!(matches!(
-        builder.add_file("file", &b"ok"[..], EntryMetadata::default()).await,
-        Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
-            if limit == short_limits.metadata_size
-    ));
-    assert!(output.get_ref().is_empty());
+async fn recovers_from_payload_size_limits() -> TestResult {
     for limits in [
         Limits {
             member_size: 3,
-            ..limits
+            ..Limits::default()
         },
         Limits {
             total_size: 3,
-            ..limits
+            ..Limits::default()
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
@@ -220,27 +210,13 @@ async fn recovers_from_member_preflight_failures() -> TestResult {
             builder
                 .add_file("file", &b"long"[..], EntryMetadata::default())
                 .await,
-            Err(BuildError::Encoder(_))
+            Err(BuildError::Encoder(EncodeError::Limit(_)))
         ));
-
         builder
             .add_file("file", &b"ok"[..], EntryMetadata::default())
             .await?;
-        assert!(matches!(
-            builder
-                .add_file("next", &b""[..], EntryMetadata::default())
-                .await,
-            Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::MetadataSize(limit))))
-                if limit == limits.metadata_size
-        ));
-        let output = builder.finish_into_inner().await?.into_inner();
-
-        let mut archive =
-            ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
-        archive.validate_all().await?;
-        assert_eq!(archive.entries().len(), 1);
+        builder.finish().await?;
     }
-
     Ok(())
 }
 

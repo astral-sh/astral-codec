@@ -129,10 +129,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             header.local_header_size() as u64 + header.central_header_size() as u64,
         )?;
         pending_budget.charge_member(size)?;
-
-        // Leave room for the archive's single ZIP64 end record after this member.
-        let mut final_budget = pending_budget;
-        final_budget.charge_metadata(size::ZIP64_END as u64)?;
+        check_end_metadata(pending_budget)?;
 
         Ok((header, pending_budget))
     }
@@ -279,8 +276,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             return Err(EncodeError::Finished);
         }
 
-        let mut final_budget = self.budget;
-        final_budget.charge_metadata(size::ZIP64_END as u64)?;
+        check_end_metadata(self.budget)?;
         let end = end_records(
             self.count as u64,
             self.position,
@@ -292,7 +288,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .checked_add(self.directory.len() as u64)
             .and_then(|position| position.checked_add(end.len() as u64))
             .ok_or(EncodeError::Overflow)?;
-        final_budget.check_archive_size(position)?;
+        self.budget.check_archive_size(position)?;
 
         Ok((end, position))
     }
@@ -380,6 +376,11 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         )
         .await
     }
+}
+
+/// Check a copy so successive members reserve the same end record.
+fn check_end_metadata(mut budget: Budget) -> Result<(), BudgetError> {
+    budget.charge_metadata(size::ZIP64_END as u64)
 }
 
 /// A failure while encoding ZIP records or payloads.
