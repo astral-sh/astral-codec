@@ -1,4 +1,16 @@
 //! Streaming ZIP64 encoding for the format-neutral archive builder.
+//!
+//! ## Compatibility notes
+//!
+//! zip-codec's encoder always produces valid ZIP64 ZIPs. However, you
+//! *can* configure it to produce ZIPs that zip-codec will itself reject,
+//! because zip-codec's decoder is conservative about control structures
+//! (like EOCD signatures) appearing in stored (uncompressed) ZIP members.
+//!
+//! For this reason, users are **strongly** encouraged to **not** use
+//! [`CompressionMethod::Stored`] as an archive-wide or per-member setting
+//! **unless** they can guarantee that member contents cannot be confused
+//! for ZIP control structures.
 
 use std::io::{self, SeekFrom};
 
@@ -65,7 +77,7 @@ impl<W> ZipEncoder<W> {
     pub fn new(writer: W) -> Self {
         Self {
             writer,
-            method: CompressionMethod::Deflate,
+            method: CompressionMethod::default(),
             budget: Budget::new(Limits::default()),
             position: 0,
             count: 0,

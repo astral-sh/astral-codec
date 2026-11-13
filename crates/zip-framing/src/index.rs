@@ -418,7 +418,9 @@ impl CentralDirectory {
             if disk_count != count {
                 return Err(invalid(position, "entry counts disagree"));
             }
-            if count == u16::MAX || size == u32::MAX || offset == u32::MAX {
+            // Without a ZIP64 locator, 0xffff is a literal entry count. The
+            // declared records must still fill the entire directory.
+            if size == u32::MAX || offset == u32::MAX {
                 return Err(invalid(position, "ZIP64 sentinel without locator"));
             }
 
