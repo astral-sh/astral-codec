@@ -274,7 +274,7 @@ impl From<SizeField> for u32 {
     }
 }
 
-/// Common fixed-length components of both local file and central directory entries.
+/// Fields that must agree verbatim between local and central headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Common {
     /// The minimum ZIP specification version needed to extract this member.
@@ -289,28 +289,65 @@ pub(crate) struct Common {
     /// The member's last-modified date, in MS-DOS format.
     /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
     pub(crate) date: u16,
-    /// The CRC-32 of the member's uncompressed data.
-    ///
-    /// This will be `0` for a local file entry whose [`Common::flags`] indicate that a data descriptor
-    /// conveys the CRC-32 instead.
-    pub(crate) crc: u32,
-    /// The member's size in the ZIP modulo any headers and (optional) data descriptor.
-    ///
-    /// [`SizeField::Zip64`] refers to the corresponding ZIP64 extra field.
-    /// A local descriptor placeholder is resolved when checking the local record.
-    pub(crate) compressed: SizeField,
-    /// The member's true (i.e. uncompressed) size.
-    ///
-    /// [`SizeField::Zip64`] refers to the corresponding ZIP64 extra field.
-    /// A local descriptor placeholder is resolved when checking the local record.
-    pub(crate) uncompressed: SizeField,
 }
 
-impl Common {
+/// The payload CRC and sizes. Header sizes use [`SizeField`], and resolved sizes use [`u64`].
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub(crate) struct PayloadFields<S = u64> {
+    /// CRC-32 of the uncompressed data, or zero in a local descriptor placeholder.
+    pub(crate) crc: u32,
+    pub(crate) compressed: S,
+    pub(crate) uncompressed: S,
+}
+
+/// Payload declarations checked against the compression method and the CRC of empty input.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct MemberPayload(PayloadFields);
+
+impl PayloadFields {
+    pub(crate) fn validate(
+        self,
+        method: CompressionMethod,
+        position: u64,
+    ) -> Result<MemberPayload, Error> {
+        match method {
+            CompressionMethod::Stored if self.compressed != self.uncompressed => {
+                return Err(invalid(position, "stored member sizes differ"));
+            }
+            CompressionMethod::Deflate if self.compressed == 0 && self.uncompressed != 0 => {
+                return Err(invalid(
+                    position,
+                    "nonempty DEFLATE member has zero compressed size",
+                ));
+            }
+            CompressionMethod::Stored | CompressionMethod::Deflate => {}
+        }
+        if self.uncompressed == 0 && self.crc != 0 {
+            return Err(invalid(position, "empty member has nonzero CRC"));
+        }
+
+        Ok(MemberPayload(self))
+    }
+}
+
+impl MemberPayload {
+    pub(crate) fn fields(self) -> PayloadFields {
+        self.0
+    }
+}
+
+/// The fixed fields shared by local and central headers, before resolving ZIP64 sizes.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub(crate) struct MemberHeader {
+    pub(crate) common: Common,
+    pub(crate) payload: PayloadFields<SizeField>,
+}
+
+impl MemberHeader {
     /// Size of the serialized common fields in bytes.
     pub(crate) const SIZE: usize = 22;
 
-    /// Parse a local file or central directory [`Common`] from the given bytes.
+    /// Parse the shared portion of a local or central header.
     #[inline]
     pub(crate) fn parse(bytes: &[u8; Self::SIZE], position: u64) -> Result<Self, Error> {
         let method =
@@ -340,33 +377,37 @@ impl Common {
         }
 
         Ok(Self {
-            version,
-            flags,
-            method,
-            time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
-            date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
-            crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
-            compressed: SizeField::from(u32::from_le_bytes(array_at::<14, 4, _>(bytes))),
-            uncompressed: SizeField::from(u32::from_le_bytes(array_at::<18, 4, _>(bytes))),
+            common: Common {
+                version,
+                flags,
+                method,
+                time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
+                date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
+            },
+            payload: PayloadFields {
+                crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
+                compressed: SizeField::from(u32::from_le_bytes(array_at::<14, 4, _>(bytes))),
+                uncompressed: SizeField::from(u32::from_le_bytes(array_at::<18, 4, _>(bytes))),
+            },
         })
     }
 
     /// Serializes the common header fields in little-endian order.
     pub(crate) fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut bytes = [0; Self::SIZE];
-        bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
-        bytes[2..4].copy_from_slice(&self.flags.bits().to_le_bytes());
-        bytes[4..6].copy_from_slice(&(self.method as u16).to_le_bytes());
-        bytes[6..8].copy_from_slice(&self.time.to_le_bytes());
-        bytes[8..10].copy_from_slice(&self.date.to_le_bytes());
-        bytes[10..14].copy_from_slice(&self.crc.to_le_bytes());
-        bytes[14..18].copy_from_slice(&u32::from(self.compressed).to_le_bytes());
-        bytes[18..22].copy_from_slice(&u32::from(self.uncompressed).to_le_bytes());
+        bytes[0..2].copy_from_slice(&self.common.version.to_le_bytes());
+        bytes[2..4].copy_from_slice(&self.common.flags.bits().to_le_bytes());
+        bytes[4..6].copy_from_slice(&(self.common.method as u16).to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.common.time.to_le_bytes());
+        bytes[8..10].copy_from_slice(&self.common.date.to_le_bytes());
+        bytes[10..14].copy_from_slice(&self.payload.crc.to_le_bytes());
+        bytes[14..18].copy_from_slice(&u32::from(self.payload.compressed).to_le_bytes());
+        bytes[18..22].copy_from_slice(&u32::from(self.payload.uncompressed).to_le_bytes());
         bytes
     }
 
     pub(crate) fn check_zip64(self, zip64: bool, position: u64) -> Result<(), Error> {
-        if zip64 && self.version < version::ZIP64 {
+        if zip64 && self.common.version < version::ZIP64 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
 
@@ -378,7 +419,10 @@ impl Common {
 mod tests {
     use std::io::Cursor;
 
-    use super::{Common, GeneralPurposeFlags, RecordReader, SizeField, array_at, bytes_at};
+    use super::{
+        Common, GeneralPurposeFlags, MemberHeader, PayloadFields, RecordReader, SizeField,
+        array_at, bytes_at,
+    };
     use crate::{CompressionMethod, Error};
 
     #[tokio::test]
@@ -411,18 +455,22 @@ mod tests {
             20, 0, 0x0a, 0x08, 8, 0, 0x34, 0x12, 0x78, 0x56, 0x11, 0x22, 0x33, 0x44, 0x55, 0x66,
             0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
         ];
-        let common = Common {
-            version: 20,
-            flags: GeneralPurposeFlags::parse(0x080a, CompressionMethod::Deflate, 42)?,
-            method: CompressionMethod::Deflate,
-            time: 0x1234,
-            date: 0x5678,
-            crc: 0x4433_2211,
-            compressed: SizeField::Value(0x8877_6655),
-            uncompressed: SizeField::Value(0xccbb_aa99),
+        let header = MemberHeader {
+            common: Common {
+                version: 20,
+                flags: GeneralPurposeFlags::parse(0x080a, CompressionMethod::Deflate, 42)?,
+                method: CompressionMethod::Deflate,
+                time: 0x1234,
+                date: 0x5678,
+            },
+            payload: PayloadFields {
+                crc: 0x4433_2211,
+                compressed: SizeField::Value(0x8877_6655),
+                uncompressed: SizeField::Value(0xccbb_aa99),
+            },
         };
-        assert_eq!(Common::parse(&bytes, 42)?, common);
-        assert_eq!(common.to_bytes(), bytes);
+        assert_eq!(MemberHeader::parse(&bytes, 42)?, header);
+        assert_eq!(header.to_bytes(), bytes);
 
         Ok(())
     }

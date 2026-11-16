@@ -572,6 +572,30 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
 }
 
 #[tokio::test]
+async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> TestResult {
+    let mut archive = Fixture {
+        zip64: true,
+        method: 8,
+        payload: Some(Vec::new()),
+        crc: Some(crc32(b"x")),
+        ..Fixture::default()
+    }
+    .build();
+
+    // Both ZIP64 extras end with the uncompressed size followed by the compressed size.
+    let end = archive.zip64_end.ok_or("missing ZIP64 end")?;
+    archive.bytes[archive.payload.start - 16] = 1;
+    archive.bytes[end - 16] = 1;
+
+    assert!(matches!(
+        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid { position, reason: "nonempty DEFLATE member has zero compressed size" })
+            if position == archive.central as u64
+    ));
+    Ok(())
+}
+
+#[tokio::test]
 async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult {
     for (method, minimum) in [(0, 10), (8, 20)] {
         for version in [minimum - 1, minimum, 45, 46, 0x0314] {

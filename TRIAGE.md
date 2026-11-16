@@ -93,9 +93,9 @@ The encoder previously wrote a 98-byte empty ZIP with `metadata_size: 0`. Openin
 
 The classic EOCD, its archive comment, and the ZIP64 locator count only toward `archive_size`. An empty classic ZIP with a 65,535-byte ASCII comment therefore still fits a zero-byte metadata budget. [Limit contract](crates/zip-framing/src/budget.rs#L17) · [Writer preflight](crates/zip-codec/src/encode.rs#L125) · [Reader accounting](crates/zip-framing/src/index.rs#L673)
 
-### 9. Low-level framing can serialize an impossible DEFLATE size pair
+### 9. Low-level framing could serialize an impossible DEFLATE size pair (fixed)
 
-For a regular DEFLATE member, `PendingMember::finish(crc32(b"x"), 0, 1, 0)` accepts a zero-byte compressed stream with a one-byte decoded length. Both headers can then be serialized. The index and full metadata validation accept that size tuple. Reading the payload fails with “truncated or stalled DEFLATE stream.” Compressed length zero cannot encode nonempty output, which is knowable from the headers alone. Reject the tuple in the framing writer and reader. The streaming encoder derives these lengths from the actual compressor, and a consumer that drains the payload already fails closed. [Writer size checks](crates/zip-framing/src/write.rs#L80) · [Central metadata checks](crates/zip-framing/src/index/entry.rs#L169)
+For a regular DEFLATE member, `PendingMember::finish(crc32(b"x"), 0, 1, 0)` previously accepted headers that claimed one byte of output from zero compressed bytes. Validation succeeded until a caller read the payload. The framing writer now rejects this size pair in `finish`, and the reader rejects it when indexing the central directory, after resolving any ZIP64 sizes. [Shared payload checks](crates/zip-framing/src/record.rs#L308)
 
 ## Previously documented differences and limits of the supported subset
 

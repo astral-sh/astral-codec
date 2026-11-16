@@ -8,7 +8,10 @@ use crate::{
     constants::{extra, signature, size, version},
     invalid,
     kind::{ExternalAttributes, UnixFileType},
-    record::{Common, GeneralPurposeFlags, SizeField, validate_name},
+    record::{
+        Common, GeneralPurposeFlags, MemberHeader, MemberPayload, PayloadFields, SizeField,
+        validate_name,
+    },
 };
 
 // APPNOTE 4.4.2: the high byte identifies the host system for external
@@ -84,12 +87,15 @@ impl<'a> PendingMember<'a> {
         uncompressed: u64,
         offset: u64,
     ) -> Result<CompletedMember<'a>, Error> {
-        if self.method == CompressionMethod::Stored && compressed != uncompressed {
-            return Err(invalid(offset, "stored member sizes differ"));
+        let payload = PayloadFields {
+            crc,
+            compressed,
+            uncompressed,
         }
+        .validate(self.method, offset)?;
 
-        if uncompressed == 0 && (compressed != 0 || crc != 0) {
-            return Err(invalid(offset, "empty member has file data or nonzero CRC"));
+        if uncompressed == 0 && compressed != 0 {
+            return Err(invalid(offset, "empty member has file data"));
         }
 
         if matches!(self.kind, EntryKind::Directory) && uncompressed != 0 {
@@ -102,9 +108,7 @@ impl<'a> PendingMember<'a> {
 
         Ok(CompletedMember {
             header: self,
-            crc,
-            compressed,
-            uncompressed,
+            payload,
             offset,
         })
     }
@@ -113,9 +117,7 @@ impl<'a> PendingMember<'a> {
 /// Final member metadata with a consistent method, CRC, and size tuple.
 pub struct CompletedMember<'a> {
     header: PendingMember<'a>,
-    crc: u32,
-    compressed: u64,
-    uncompressed: u64,
+    payload: MemberPayload,
     offset: u64,
 }
 
@@ -172,22 +174,26 @@ impl CompletedMember<'_> {
         bytes.extend_from_slice(self.header.path.as_bytes());
         push16(bytes, u16::from(ExtraHeaderId::Zip64));
         push16(bytes, zip64_size as u16);
-        push64(bytes, self.uncompressed);
-        push64(bytes, self.compressed);
+        push64(bytes, self.payload.fields().uncompressed);
+        push64(bytes, self.payload.fields().compressed);
     }
 
     fn append_common(&self, bytes: &mut Vec<u8>, zip64_size: usize) {
-        let common = Common {
-            version: version::ZIP64,
-            flags: GeneralPurposeFlags::UTF8,
-            method: self.header.method,
-            time: DEFAULT_TIME,
-            date: DEFAULT_DATE,
-            crc: self.crc,
-            compressed: SizeField::Zip64,
-            uncompressed: SizeField::Zip64,
+        let header = MemberHeader {
+            common: Common {
+                version: version::ZIP64,
+                flags: GeneralPurposeFlags::UTF8,
+                method: self.header.method,
+                time: DEFAULT_TIME,
+                date: DEFAULT_DATE,
+            },
+            payload: PayloadFields {
+                crc: self.payload.fields().crc,
+                compressed: SizeField::Zip64,
+                uncompressed: SizeField::Zip64,
+            },
         };
-        bytes.extend_from_slice(&common.to_bytes());
+        bytes.extend_from_slice(&header.to_bytes());
         push16(bytes, self.header.path.len() as u16);
         push16(bytes, (extra::HEADER_SIZE + zip64_size) as u16);
     }
