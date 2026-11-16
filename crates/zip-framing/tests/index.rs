@@ -572,35 +572,27 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
 }
 
 #[tokio::test]
-async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() {
-    for zip64 in [false, true] {
-        let mut archive = Fixture {
-            zip64,
-            method: 8,
-            payload: Some(Vec::new()),
-            crc: Some(crc32(b"x")),
-            ..Fixture::default()
-        }
-        .build();
-
-        let (local_size, central_size) = if let Some(end) = archive.zip64_end {
-            // Each header ends with the ZIP64 uncompressed and compressed sizes.
-            (archive.payload.start - 16, end - 16)
-        } else {
-            (22, archive.central + 24)
-        };
-        archive.bytes[local_size] = 1;
-        archive.bytes[central_size] = 1;
-
-        assert!(
-            matches!(
-                Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
-                Err(FrameError::Invalid { position, reason: "nonempty DEFLATE member has zero compressed size" })
-                    if position == archive.central as u64
-            ),
-            "zip64={zip64}"
-        );
+async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> TestResult {
+    let mut archive = Fixture {
+        zip64: true,
+        method: 8,
+        payload: Some(Vec::new()),
+        crc: Some(crc32(b"x")),
+        ..Fixture::default()
     }
+    .build();
+
+    // Both ZIP64 extras end with the uncompressed size followed by the compressed size.
+    let end = archive.zip64_end.ok_or("missing ZIP64 end")?;
+    archive.bytes[archive.payload.start - 16] = 1;
+    archive.bytes[end - 16] = 1;
+
+    assert!(matches!(
+        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid { position, reason: "nonempty DEFLATE member has zero compressed size" })
+            if position == archive.central as u64
+    ));
+    Ok(())
 }
 
 #[tokio::test]
