@@ -64,7 +64,7 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
             1,
             0,
             0,
-            "empty member has file data or nonzero CRC",
+            "empty member has nonzero CRC",
         ),
         (
             CompressionMethod::Deflate,
@@ -72,7 +72,7 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
             0,
             2,
             0,
-            "empty member has file data or nonzero CRC",
+            "empty member has file data",
         ),
         (
             CompressionMethod::Stored,

@@ -95,7 +95,7 @@ The classic EOCD, its archive comment, and the ZIP64 locator count only toward `
 
 ### 9. Low-level framing could serialize an impossible DEFLATE size pair (fixed)
 
-For a regular DEFLATE member, `PendingMember::finish(crc32(b"x"), 0, 1, 0)` previously accepted headers that claimed one byte of output from zero compressed bytes. Validation succeeded until a caller read the payload. The framing writer now rejects this size pair in `finish`, and the reader rejects it when indexing the central directory, after resolving any ZIP64 sizes. [Writer size checks](crates/zip-framing/src/write.rs#L80) · [Central metadata checks](crates/zip-framing/src/index/entry.rs#L219)
+For a regular DEFLATE member, `PendingMember::finish(crc32(b"x"), 0, 1, 0)` previously accepted headers that claimed one byte of output from zero compressed bytes. Validation succeeded until a caller read the payload. The framing writer now rejects this size pair in `finish`, and the reader rejects it when indexing the central directory, after resolving any ZIP64 sizes. [Shared payload checks](crates/zip-framing/src/record.rs#L308)
 
 ## Previously documented differences and limits of the supported subset
 

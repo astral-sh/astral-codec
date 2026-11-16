@@ -8,7 +8,10 @@ use crate::{
     extra::{Extras, Header},
     invalid,
     kind::{ExternalAttributes, UnixFileType},
-    record::{Common, GeneralPurposeFlags, RecordReader, array_at, bytes_at, parse_name},
+    record::{
+        Common, GeneralPurposeFlags, MemberHeader, MemberPayload, PayloadFields, RecordReader,
+        array_at, bytes_at, parse_name,
+    },
 };
 
 /// A member whose local file entry, extras, and optional data descriptor
@@ -75,16 +78,8 @@ pub struct CentralDirectoryEntry {
     path: Box<str>,
     /// Common (fixed size) metadata in a central directory entry.
     common: Common,
-    /// The effective compressed size declared by the central directory.
-    ///
-    /// If [`Common::compressed`] is a ZIP64 sentinel, this comes from the
-    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
-    compressed_size: u64,
-    /// The effective uncompressed size declared by the central directory.
-    ///
-    /// If [`Common::uncompressed`] is a ZIP64 sentinel, this comes from the
-    /// ZIP64 extra field; otherwise it is the inline value widened to `u64`.
-    size: u64,
+    /// The CRC and final sizes after resolving ZIP64 sentinels.
+    payload: MemberPayload,
     /// An absolute offset to the central directory entry's corresponding
     /// local file entry.
     ///
@@ -128,17 +123,17 @@ impl CentralDirectoryEntry {
 
     /// Returns the expected CRC-32 of the decoded payload.
     pub fn crc32(&self) -> u32 {
-        self.common.crc
+        self.payload.fields().crc
     }
 
     /// Returns the decoded payload length.
     pub fn size(&self) -> u64 {
-        self.size
+        self.payload.fields().uncompressed
     }
 
     /// Returns the encoded payload length, excluding headers and descriptors.
     pub fn compressed_size(&self) -> u64 {
-        self.compressed_size
+        self.payload.fields().compressed
     }
 
     /// Returns the absolute position of the local header.
@@ -186,7 +181,9 @@ impl CentralDirectoryEntry {
             return Ok(BufferedEntry::Incomplete(size::CENTRAL + length));
         };
 
-        let common = Common::parse(&array_at::<6, { Common::SIZE }, _>(header), position)?;
+        let header_fields =
+            MemberHeader::parse(&array_at::<6, { MemberHeader::SIZE }, _>(header), position)?;
+        let common = header_fields.common;
         if common.method == CompressionMethod::Stored
             && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
             && !options.allow_stored_data_descriptors
@@ -206,7 +203,8 @@ impl CentralDirectoryEntry {
         } else {
             Extras::parse(raw_extra, Header::Central, position, options.extra_fields)?
         };
-        let (sizes, local_offset) = extras.central_sizes(common, offset, disk, position)?;
+        let (payload, local_offset) =
+            extras.central_payload(header_fields, offset, disk, position)?;
         options
             .comments
             .per_member
@@ -216,20 +214,11 @@ impl CentralDirectoryEntry {
             extras.comment(comment, position)?;
         }
 
-        common
-            .method
-            .check_sizes(sizes.compressed, sizes.uncompressed, position)?;
-
-        if sizes.uncompressed == 0 && common.crc != 0 {
-            return Err(invalid(position, "empty member has nonzero CRC"));
-        }
-
-        budget.charge_member(sizes.uncompressed)?;
+        budget.charge_member(payload.fields().uncompressed)?;
         let entry = Self {
             path: path.into(),
             common,
-            compressed_size: sizes.compressed,
-            size: sizes.uncompressed,
+            payload,
             local_offset,
             made_by: u16::from_le_bytes(array_at::<4, 2, _>(header)),
             attributes: u32::from_le_bytes(array_at::<38, 4, _>(header)),
@@ -238,7 +227,7 @@ impl CentralDirectoryEntry {
             } else {
                 Box::default()
             },
-            has_zip64_extra: sizes.zip64,
+            has_zip64_extra: extras.has_zip64(),
         };
 
         let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
@@ -343,7 +332,8 @@ impl IndexedEntry {
             return Err(invalid(position, "invalid local header signature"));
         }
 
-        let common = Common::parse(&array_at::<4, { Common::SIZE }, _>(&header), position)?;
+        let header_fields =
+            MemberHeader::parse(&array_at::<4, { MemberHeader::SIZE }, _>(&header), position)?;
         let name_length = usize::from(u16::from_le_bytes(array_at::<26, 2, _>(&header)));
         let extra_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(&header)));
         budget.charge_metadata((size::LOCAL + name_length + extra_length) as u64)?;
@@ -362,7 +352,8 @@ impl IndexedEntry {
             position,
             extra_fields,
         )?;
-        let sizes = extras.local_sizes(common, position)?;
+        let fields = extras.local_payload(header_fields, position)?;
+        let zip64 = extras.has_zip64() || directory.has_zip64_extra;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
         // Header agreement below also requires identical encoding flags.
         if &variable[..name_length] != directory.path.as_bytes() {
@@ -375,39 +366,33 @@ impl IndexedEntry {
             position,
         )?;
 
-        if (Common {
-            crc: directory.common.crc,
-            compressed: directory.common.compressed,
-            uncompressed: directory.common.uncompressed,
-            ..common
-        }) != directory.common
-        {
+        if header_fields.common != directory.common {
             return Err(invalid(position, "local and central headers disagree"));
         }
 
-        if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
-            if common.crc != 0 || sizes.compressed != 0 || sizes.uncompressed != 0 {
+        let has_descriptor = directory
+            .common
+            .flags
+            .contains(GeneralPurposeFlags::DATA_DESCRIPTOR);
+        if has_descriptor {
+            if fields != PayloadFields::default() {
                 return Err(invalid(
                     position,
                     "descriptor member has nonzero local CRC or sizes",
                 ));
             }
-        } else if common.crc != directory.common.crc
-            || sizes.compressed != directory.compressed_size
-            || sizes.uncompressed != directory.size
-        {
+        } else if fields != directory.payload.fields() {
             return Err(invalid(position, "local and central CRC or sizes disagree"));
         }
 
         let data_offset = add(position, size::LOCAL as u64 + variable.len() as u64)?;
-        let data_end = add(data_offset, directory.compressed_size)?;
+        let data_end = add(data_offset, directory.compressed_size())?;
         if data_end > boundary {
             return Err(invalid(position, "payload overlaps the next record"));
         }
 
-        if common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR) {
-            self.check_descriptor(reader, data_end, sizes.zip64 || directory.has_zip64_extra)
-                .await?;
+        if has_descriptor {
+            self.check_descriptor(reader, data_end, zip64).await?;
         } else if data_end != boundary {
             return Err(invalid(data_end, "unaccounted bytes after payload"));
         }
@@ -462,21 +447,23 @@ impl IndexedEntry {
         };
 
         let crc = u32::from_le_bytes(bytes_at(&bytes, offset, position)?);
-        let compressed = if zip64 {
-            u64::from_le_bytes(bytes_at(&bytes, offset + 4, position)?)
+        let (compressed, uncompressed) = if zip64 {
+            (
+                u64::from_le_bytes(bytes_at(&bytes, offset + 4, position)?),
+                u64::from_le_bytes(bytes_at(&bytes, offset + 12, position)?),
+            )
         } else {
-            u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 4, position)?))
+            (
+                u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 4, position)?)),
+                u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?)),
+            )
         };
-        let uncompressed = if zip64 {
-            u64::from_le_bytes(bytes_at(&bytes, offset + 12, position)?)
-        } else {
-            u64::from(u32::from_le_bytes(bytes_at(&bytes, offset + 8, position)?))
+        let fields = PayloadFields {
+            crc,
+            compressed,
+            uncompressed,
         };
-
-        if crc != directory.common.crc
-            || compressed != directory.compressed_size
-            || uncompressed != directory.size
-        {
+        if fields != directory.payload.fields() {
             return Err(invalid(
                 position,
                 "data descriptor disagrees with central header",
