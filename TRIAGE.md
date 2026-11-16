@@ -87,11 +87,11 @@ Under `ExtraFieldPolicy::AllowListed`, indexing succeeds and `validate_all` reje
 
 We accept this rejection. Both Info-ZIP and libarchive write the ownership field once and copy its bytes into the central directory. We found no producer that uses different widths for the same ID in the two headers. [Info-ZIP writer](https://github.com/LuaDist/zip/blob/f6cfe48f6bc5bf2d505a0e0eb265ce4cb238db89/unix/unix.c#L555-L559) · [libarchive writer](https://github.com/libarchive/libarchive/blob/4a5944b726d24c8e86589ad09cef958c6f1a6e9c/libarchive/archive_write_set_format_zip.c#L1246-L1249)
 
-### 8. The same metadata limit admits writer output that the reader rejects
+### 8. The encoder omitted the ZIP64 end record from its metadata budget (fixed)
 
-With `Limits { metadata_size: 0, ..Limits::default() }`, finish an empty ZIP encoder. It succeeds and produces 98 bytes. Opening those bytes with the same limits fails. The encoder charges only local and central headers. The reader also charges the 56-byte ZIP64 end record. The discrepancy is constant for this encoder and matters at any tight boundary. The behavior is documented on `Limits`, but shared limits cannot currently guarantee a round trip.
+The encoder previously wrote a 98-byte empty ZIP with `metadata_size: 0`. Opening it with the same limit failed because the reader charged the 56-byte ZIP64 end record. The encoder now reserves those 56 bytes before writing a member and checks the limit when finishing an empty archive. An empty ZIP64 archive fits a metadata budget of exactly 56 bytes.
 
-The classic EOCD, its archive comment, and the ZIP64 locator are outside the reader's metadata charge. An empty classic ZIP with a 65,535-byte ASCII comment opens at a zero metadata limit. The archive-length limit still applies. If round trips are intended, charge the ZIP64 end consistently on both sides. Independently specify whether a caller's metadata budget should include archive comments. [Limit contract](crates/zip-framing/src/budget.rs#L12) · [Writer finalization](crates/zip-codec/src/encode.rs#L260) · [Reader accounting](crates/zip-framing/src/index.rs#L594)
+The classic EOCD, its archive comment, and the ZIP64 locator count only toward `archive_size`. An empty classic ZIP with a 65,535-byte ASCII comment therefore still fits a zero-byte metadata budget. [Limit contract](crates/zip-framing/src/budget.rs#L17) · [Writer preflight](crates/zip-codec/src/encode.rs#L125) · [Reader accounting](crates/zip-framing/src/index.rs#L673)
 
 ### 9. Low-level framing can serialize an impossible DEFLATE size pair
 
