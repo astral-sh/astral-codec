@@ -79,6 +79,24 @@ impl CompressionMethod {
             }),
         }
     }
+
+    pub(crate) fn check_sizes(
+        self,
+        compressed: u64,
+        uncompressed: u64,
+        position: u64,
+    ) -> Result<(), Error> {
+        match self {
+            Self::Stored if compressed != uncompressed => {
+                Err(invalid(position, "stored member sizes differ"))
+            }
+            Self::Deflate if compressed == 0 && uncompressed > 0 => Err(invalid(
+                position,
+                "nonempty DEFLATE member has zero compressed size",
+            )),
+            _ => Ok(()),
+        }
+    }
 }
 
 /// A malformed, unsupported, or over-budget ZIP archive.

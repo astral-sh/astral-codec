@@ -84,9 +84,7 @@ impl<'a> PendingMember<'a> {
         uncompressed: u64,
         offset: u64,
     ) -> Result<CompletedMember<'a>, Error> {
-        if self.method == CompressionMethod::Stored && compressed != uncompressed {
-            return Err(invalid(offset, "stored member sizes differ"));
-        }
+        self.method.check_sizes(compressed, uncompressed, offset)?;
 
         if uncompressed == 0 && (compressed != 0 || crc != 0) {
             return Err(invalid(offset, "empty member has file data or nonzero CRC"));

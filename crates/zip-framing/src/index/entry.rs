@@ -216,9 +216,9 @@ impl CentralDirectoryEntry {
             extras.comment(comment, position)?;
         }
 
-        if common.method == CompressionMethod::Stored && sizes.compressed != sizes.uncompressed {
-            return Err(invalid(position, "stored member sizes differ"));
-        }
+        common
+            .method
+            .check_sizes(sizes.compressed, sizes.uncompressed, position)?;
 
         if sizes.uncompressed == 0 && common.crc != 0 {
             return Err(invalid(position, "empty member has nonzero CRC"));

@@ -51,6 +51,14 @@ fn rejects_inconsistent_completed_metadata() -> TestResult {
             "stored member sizes differ",
         ),
         (
+            CompressionMethod::Deflate,
+            file,
+            crc32(b"x"),
+            0,
+            1,
+            "nonempty DEFLATE member has zero compressed size",
+        ),
+        (
             CompressionMethod::Stored,
             file,
             1,
