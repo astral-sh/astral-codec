@@ -537,7 +537,7 @@ async fn rejects_archive_extra_data_records() {
 }
 
 #[tokio::test]
-async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
+async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestResult {
     for (label, offset, value) in [
         ("version", 4, 10),
         ("flags", 7, 0),
@@ -569,6 +569,21 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
             "flags {flags:#x}"
         );
     }
+
+    // One length-prefixed record containing "x" (APPNOTE 4.4.14.2).
+    let mut archive = Fixture::member("file", 0, b"\x01\0\0\0x").build();
+    set16(&mut archive.bytes, archive.central + 36, 0x0001); // Text only.
+    Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+    for attributes in [0x0002, 0x0003] {
+        set16(&mut archive.bytes, archive.central + 36, attributes);
+        assert!(matches!(
+            Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+            Err(FrameError::Unsupported { position, feature: "record-oriented member" })
+                if position == archive.central as u64
+        ));
+    }
+
+    Ok(())
 }
 
 #[tokio::test]

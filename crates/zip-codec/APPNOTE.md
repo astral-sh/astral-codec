@@ -24,6 +24,10 @@ stream after checking its boundary, CRC, and zero decoded size. Our encoder
 stores empty members uncompressed.
 [Python fixtures](tests/fixtures/generate.py)
 
+**Record-oriented files.** Internal file attribute `0x0002` declares a four-byte
+length before each logical record (§4.4.14.2). The reader rejects the archive
+when it encounters this bit in a central directory entry.
+
 **Streaming ZIP64.** Python can put a member's sizes in a 64-bit data
 descriptor and finish the archive with a classic end record. We accept this
 when the descriptor agrees with the central directory and the directory's
@@ -73,10 +77,6 @@ newer Info-ZIP timestamp or ownership field, and reject `0x7855` alongside
 DOS directory bit set is a directory to `zip-codec` and a file to Python.
 Our encoder adds the slash, as do all 90 directories in the four
 [benchmark wheels](benches/wheels/corpus.json). [Python's directory test][is-dir]
-
-**Reject record-oriented files?** Internal attribute `0x0002` means each
-record starts with a four-byte length (§4.4.14.2). We currently return those
-lengths as part of the file contents.
 
 **Tighten extraction versions?** Framing accepts unlisted versions such as
 1.9 and volume labels below the 1.1 minimum (§4.4.3.2).
