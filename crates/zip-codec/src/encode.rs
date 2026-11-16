@@ -2,15 +2,12 @@
 //!
 //! ## Compatibility notes
 //!
-//! zip-codec's encoder always produces valid ZIP64 ZIPs. However, you
-//! *can* configure it to produce ZIPs that zip-codec will itself reject,
-//! because zip-codec's decoder is conservative about control structures
-//! (like EOCD signatures) appearing in stored (uncompressed) ZIP members.
-//!
-//! For this reason, users are **strongly** encouraged to **not** use
-//! [`CompressionMethod::Stored`] as an archive-wide or per-member setting
-//! **unless** they can guarantee that member contents cannot be confused
-//! for ZIP control structures.
+//! The decoder rejects archives with multiple apparent end-of-central-directory
+//! records. Encoding can finish successfully and still produce an archive that
+//! [`ZipArchive::open`](crate::ZipArchive::open) rejects if bytes in a member look
+//! like a second end record. [`CompressionMethod::Stored`] copies member bytes
+//! verbatim, and the default DEFLATE encoder can also preserve those bytes in
+//! uncompressed blocks.
 
 use std::io::{self, SeekFrom};
 
