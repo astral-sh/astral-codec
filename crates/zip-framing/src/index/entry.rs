@@ -111,6 +111,9 @@ pub(super) enum BufferedEntry {
 }
 
 impl CentralDirectoryEntry {
+    /// Internal file attribute for length-prefixed records (APPNOTE 4.4.14.2).
+    const RECORD_ORIENTED: u16 = 0x0002;
+
     /// Returns the exact UTF-8 archive path, without filesystem normalization.
     pub fn path(&self) -> &str {
         &self.path
@@ -191,6 +194,13 @@ impl CentralDirectoryEntry {
             return Err(Error::Unsupported {
                 position,
                 feature: "data descriptor for Stored member",
+            });
+        }
+        let internal_attributes = u16::from_le_bytes(array_at::<36, 2, _>(header));
+        if internal_attributes & Self::RECORD_ORIENTED != 0 {
+            return Err(Error::Unsupported {
+                position,
+                feature: "record-oriented member",
             });
         }
         let offset = u32::from_le_bytes(array_at::<42, 4, _>(header));
