@@ -46,8 +46,12 @@ pub struct PendingMember<'a> {
 
 impl<'a> PendingMember<'a> {
     /// Checks the path and method before any output is written.
+    ///
+    /// Enforces the APPNOTE 4.4.10 through 4.4.12 recommendation of at most
+    /// 65,535 bytes per central-directory entry.
     pub fn new(path: &'a str, method: CompressionMethod, kind: EntryKind) -> Result<Self, Error> {
-        if path.is_empty() || path.len() > usize::from(u16::MAX) {
+        let member = Self { path, method, kind };
+        if path.is_empty() || member.central_header_size() > usize::from(u16::MAX) {
             return Err(invalid(0, "empty or oversized filename"));
         }
 
@@ -60,7 +64,7 @@ impl<'a> PendingMember<'a> {
             return Err(invalid(0, "directories must be stored without file data"));
         }
 
-        Ok(Self { path, method, kind })
+        Ok(member)
     }
 
     /// Returns the payload compression method.
