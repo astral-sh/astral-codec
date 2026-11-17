@@ -121,6 +121,16 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     let data_offset = header.local_header_size();
     let member = header.finish(checksum, payload.len() as u64, payload.len() as u64, 0)?;
     let mut bytes = member.local_header();
+    let pending = PendingMember::new(
+        "café",
+        CompressionMethod::Stored,
+        EntryKind::File { executable: false },
+    )?
+    .prepare_headers(0);
+    assert_eq!(pending.local().len(), data_offset);
+    assert_eq!(pending.central_len(), central_header_size);
+    let backpatched = pending.finish(checksum, payload.len() as u64, payload.len() as u64)?;
+    assert_eq!(backpatched.local.as_ref(), bytes.as_slice());
     assert_eq!(bytes.len(), data_offset);
     // Keep wire values independent of the constants shared by reader and writer.
     assert_eq!(
@@ -133,6 +143,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
 
     let directory_offset = bytes.len() as u64;
     let central = member.central_header();
+    assert_eq!(backpatched.central.as_ref(), central.as_slice());
     let directory_size = central.len() as u64;
     assert_eq!(central_header_size, central.len());
     assert_eq!(
