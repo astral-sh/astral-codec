@@ -10,7 +10,7 @@ use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
 
 #[derive(Default)]
 pub(super) struct Fixture {
-    pub(super) name: Vec<u8>,
+    pub(super) name: Option<Vec<u8>>,
     pub(super) payload: Option<Vec<u8>>,
     pub(super) local_extra: Vec<u8>,
     pub(super) central_extra: Vec<u8>,
@@ -70,7 +70,7 @@ pub(super) fn end_record(count: u16, offset: u32, size: u32, comment: &[u8]) -> 
 impl Fixture {
     pub(super) fn member(name: &str, external_attributes: u32, payload: &[u8]) -> Self {
         Self {
-            name: name.as_bytes().to_vec(),
+            name: Some(name.as_bytes().to_vec()),
             external_attributes,
             payload: Some(payload.to_vec()),
             ..Self::default()
@@ -94,11 +94,7 @@ impl Fixture {
     }
 
     pub(super) fn build(self) -> Archive {
-        let name = if self.name.is_empty() {
-            b"file".to_vec()
-        } else {
-            self.name
-        };
+        let name = self.name.unwrap_or_else(|| b"file".to_vec());
 
         let payload = self.payload.unwrap_or_else(|| b"payload".to_vec());
         let checksum = self.crc.unwrap_or_else(|| crc32(&payload));
