@@ -1,13 +1,13 @@
-//! Streaming ZIP64 encoding for the format-neutral archive builder.
+//! Streaming ZIP64 encoding.
 //!
 //! ## Compatibility notes
 //!
-//! The decoder rejects archives with multiple apparent end-of-central-directory
-//! records. Encoding can finish successfully and still produce an archive that
-//! [`ZipArchive::open`](crate::ZipArchive::open) rejects if bytes in a member look
-//! like a second end record. [`CompressionMethod::Stored`] copies member bytes
-//! verbatim, and the default DEFLATE encoder can also preserve those bytes in
-//! uncompressed blocks.
+//! - The decoder rejects archives with multiple apparent end-of-central-directory
+//!   records. Encoding can finish successfully and still produce an archive that
+//!   [`ZipArchive::open`](crate::ZipArchive::open) rejects if bytes in a member look
+//!   like a second end record. [`CompressionMethod::Stored`] copies member bytes
+//!   verbatim, and the default DEFLATE encoder can also preserve those bytes in
+//!   uncompressed blocks.
 
 use std::io::{self, SeekFrom};
 

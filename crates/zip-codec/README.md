@@ -12,17 +12,19 @@ This crate is a component of [astral-codec](https://github.com/astral-sh/astral-
 
 - Read classic ZIP and ZIP64 archives with indexed access to individual members
 - Write ZIP64 archives with Stored or DEFLATE members, streaming each payload
+- Support for a subset the ZIP format defined in PKWARE's
+  [APPNOTE-6.3.3.TXT](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
 
 **Anti-goals**
 
 - Reading or writing archives on non-seekable streams
 - Supporting encrypted or multi-volume archives
 
-See the [ZIP compatibility notes](APPNOTE.md) and the [security model](../../SECURITY.md#zip-codec).
+See the [security model](../../SECURITY.md#zip-codec) as well.
 
 ## Usage
 
-To write an archive, start with an empty, seekable writer positioned at byte zero.
+### Writing
 
 ```rust
 use zip_codec::{ArchiveBuilder as _, EntryMetadata, FilePayload, ZipEncoder};
@@ -35,13 +37,10 @@ encoder
 encoder.finish().await?;
 ```
 
-Use `add_directory` to add a directory entry or `add_directory_all` to add a
-directory and its contents recursively. Nonempty regular files use DEFLATE by default.
-Use `ZipEncoder::with_compression` to set the default or
-`ZipFileOptions::with_compression` to override it for one file.
+zip-codec implements [archive-trait](../archive-trait/README.md), so you can use
+`add_directory` and other APIs as well.
 
-To extract an archive, pass a seekable reader. Its contents must stay unchanged
-while the archive is open.
+### Extraction
 
 ```rust
 use zip_codec::{Archive as _, ZipArchive, extract::ExtractPolicy};

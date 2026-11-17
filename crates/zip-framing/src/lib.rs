@@ -28,6 +28,13 @@
 //! - By default, zip-framing does not honor symlink mode bits unless the host
 //!   system indicated by the "version made by" field indicates a UNIX host (3).
 //!   See [`ReadOptions::allow_ambiguous_symlink_modes`].
+//!
+//! - zip-framing rejects members that have the "record-oriented" bit set in their
+//!   internal file attributes (APPNOTE 4.4.14.2).
+//!
+//! - zip-framing is conservative about which ZIP extras it accepts. By default,
+//!   it only accepts the ZIP64 indicator extra (`0x0001`). Users can opt into
+//!   a larger subset of "well-known" extras with [`ExtraFieldPolicy::AllowListed`].
 
 #![forbid(unsafe_code)]
 
