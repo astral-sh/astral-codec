@@ -7,13 +7,16 @@ specification. [PKWARE APPNOTE 6.3.9]
 
 Sections 4.4.10–12 recommend keeping the entire central-directory entry within
 65,535 bytes, including its fixed header, filename, extra fields, and comment.
-The writer allows a 65,535-byte filename and adds a 46-byte fixed header and a
-28-byte ZIP64 extra, producing a 65,609-byte entry. The largest filename
-that meets the recommendation with our current writer is 65,461 bytes.
-
+Before the cap, the writer accepted a 65,535-byte filename. With the 46-byte
+fixed header and 28-byte ZIP64 extra, that produced a 65,609-byte entry.
 The larger entry fits the wire format because each variable-length field has
-its own 16-bit length. The combined limit is an interoperability
-recommendation. [Writer sizing](crates/zip-framing/src/write.rs#L76)
+its own 16-bit length.
+
+**Decision.** The writer caps the complete central-directory entry at 65,535
+bytes in `PendingMember::new`, before any output. The current layout leaves
+65,461 UTF-8 bytes for the filename, including any trailing slash.
+[PR #358](https://github.com/astral-sh/astral-codec/pull/358) ·
+[Writer check](crates/zip-framing/src/write.rs#L52)
 
 ## 2. Unicode path and comment extras
 
