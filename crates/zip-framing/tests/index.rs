@@ -262,7 +262,7 @@ async fn reads_entry_header_fields_with_multibyte_lengths() -> TestResult {
     let name = vec![b'n'; 258];
     let extra = field(0x7075, &unicode_data(&name));
     let archive = Fixture {
-        name,
+        name: Some(name),
         local_extra: extra.clone(),
         central_extra: extra,
         member_comment: vec![b'c'; 259],
@@ -338,7 +338,7 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
         ),
     ] {
         let archive = Fixture {
-            name: name.as_bytes().to_vec(),
+            name: Some(name.as_bytes().to_vec()),
             payload: Some(if matches!(expected, EntryKind::SymbolicLink { .. }) {
                 b"target".to_vec()
             } else {
@@ -733,11 +733,23 @@ async fn rejects_unsupported_extras_in_either_header() {
 }
 
 #[tokio::test]
+async fn rejects_empty_filename_when_indexing() {
+    let archive = Fixture::member("", 0, b"payload").build();
+    assert!(matches!(
+        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "empty filename",
+        }) if position == archive.central as u64
+    ));
+}
+
+#[tokio::test]
 async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     let name = "café".as_bytes();
     let unicode = unicode_data(name);
     let fixture = Fixture {
-        name: name.to_vec(),
+        name: Some(name.to_vec()),
         local_extra: field(0x7075, &unicode),
         central_extra: field(0x7075, &unicode),
         ..Fixture::default()
@@ -761,7 +773,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         assert!(
             read_validated(
                 &Fixture {
-                    name,
+                    name: Some(name),
                     ..Fixture::default()
                 }
                 .build()
@@ -789,7 +801,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     for value in invalid {
         for local in [false, true] {
             let fixture = Fixture {
-                name: name.to_vec(),
+                name: Some(name.to_vec()),
                 ..Fixture::default()
             }
             .with_extra(local, field(0x7075, &value));
@@ -813,7 +825,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
             .concat(),
         );
         let archive = Fixture {
-            name: original.to_vec(),
+            name: Some(original.to_vec()),
             flags: Some(0),
             local_extra: extra.clone(),
             central_extra: extra,
@@ -834,7 +846,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
     for zip64 in [false, true] {
         for change in [None, Some(0), Some(0xff), Some(b'/')] {
             let mut archive = Fixture {
-                name: name.to_vec(),
+                name: Some(name.to_vec()),
                 zip64,
                 ..Fixture::default()
             }
@@ -1594,7 +1606,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let first = Fixture::default().build();
     let unix_data = [vec![0; 12], b"target".to_vec()].concat();
     let second = Fixture {
-        name: b"next".to_vec(),
+        name: Some(b"next".to_vec()),
         external_attributes: 0o120777 << 16,
         payload: Some(Vec::new()),
         local_extra: field(0x000d, &unix_data),
@@ -1979,7 +1991,7 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     let mut positions = Vec::new();
     for ordinal in 0..2000 {
         let fixture = Fixture {
-            name: format!("file-{ordinal}").into_bytes(),
+            name: Some(format!("file-{ordinal}").into_bytes()),
             local_offset: bytes.len() as u32,
             ..Fixture::default()
         }
@@ -2041,7 +2053,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     let mut directory = Vec::new();
     for name in &names {
         let fixture = Fixture {
-            name: name.as_bytes().to_vec(),
+            name: Some(name.as_bytes().to_vec()),
             local_extra: extra.clone(),
             central_extra: extra.clone(),
             member_comment: comment.clone(),
@@ -2098,7 +2110,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
     let name = vec![b'n'; 5000];
     let extra = field(0x7075, &unicode_data(&name));
     let archive = Fixture {
-        name,
+        name: Some(name),
         local_extra: extra.clone(),
         central_extra: extra,
         ..Fixture::default()

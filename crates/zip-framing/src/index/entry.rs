@@ -177,6 +177,9 @@ impl CentralDirectoryEntry {
             return Err(invalid(position, "invalid central header signature"));
         }
         let name_length = usize::from(u16::from_le_bytes(array_at::<28, 2, _>(header)));
+        if name_length == 0 {
+            return Err(invalid(position, "empty filename"));
+        }
         let extra_length = usize::from(u16::from_le_bytes(array_at::<30, 2, _>(header)));
         let comment_length = usize::from(u16::from_le_bytes(array_at::<32, 2, _>(header)));
         let length = name_length + extra_length + comment_length;

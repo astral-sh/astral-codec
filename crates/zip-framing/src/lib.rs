@@ -21,6 +21,9 @@
 //!
 //! ## ZIP compatibility
 //!
+//! - zip-framing rejects empty filenames, including unnamed members from
+//!   standard input (APPNOTE 4.4.17.1).
+//!
 //! - Directory member names must end in `/` so readers can identify their type
 //!   from the filename alone.
 //!
