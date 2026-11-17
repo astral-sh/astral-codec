@@ -11,8 +11,8 @@ use std::{
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
     Archive, ArchiveBuilder, BuildError, CompressionMethod, DecodePolicy, EncodeError,
-    EntryMetadata, FilePayload, LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
-    ZipEncoder, ZipFileOptions,
+    EncodeLimits, EntryMetadata, FilePayload, LimitExceeded, Limits, Member, MemberPayload,
+    ZipArchive, ZipEncoder, ZipFileOptions,
 };
 use zip_framing::{
     constants::size,
@@ -158,9 +158,9 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
         (end + headers, &["a/"]),
         (end + 2 * headers, &["a/", "b/"]),
     ] {
-        let limits = Limits {
+        let limits = EncodeLimits {
             metadata_size,
-            ..Limits::default()
+            ..EncodeLimits::default()
         };
         let mut output = Cursor::new(Vec::new());
         let mut builder = ZipEncoder::new(&mut output).with_limits(limits).builder();
@@ -183,8 +183,11 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
                 if limit == metadata_size
         ));
         builder.finish().await?;
-        let mut archive =
-            ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
+        let policy = DecodePolicy::default().limits(Limits {
+            metadata_size,
+            ..Limits::default()
+        });
+        let mut archive = ZipArchive::with_policy(output, policy).await?;
         archive.validate_all().await?;
         assert_eq!(archive.entries().len(), paths.len());
     }
@@ -194,13 +197,13 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
 #[tokio::test]
 async fn recovers_from_payload_size_limits() -> TestResult {
     for limits in [
-        Limits {
+        EncodeLimits {
             member_size: 3,
-            ..Limits::default()
+            ..EncodeLimits::default()
         },
-        Limits {
+        EncodeLimits {
             total_size: 3,
-            ..Limits::default()
+            ..EncodeLimits::default()
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
@@ -216,110 +219,6 @@ async fn recovers_from_payload_size_limits() -> TestResult {
             .add_file("file", &b"ok"[..], EntryMetadata::default())
             .await?;
         builder.finish().await?;
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn reserves_the_complete_archive_before_writing_stored_members() -> TestResult {
-    let end = (size::ZIP64_END + size::ZIP64_LOCATOR + size::END) as u64;
-    let header = PendingMember::new(
-        "a",
-        CompressionMethod::Stored,
-        EntryKind::File { executable: false },
-    )?;
-    for contents in [b"".as_slice(), b"payload"] {
-        let member_size =
-            (header.local_header_size() + contents.len() + header.central_header_size()) as u64;
-        for (archive_size, count) in [
-            (end - 1, 0),
-            (end, 0),
-            (end + member_size - 1, 0),
-            (end + member_size, 1),
-            (end + 2 * member_size - 1, 1),
-            (end + 2 * member_size, 2),
-        ] {
-            let limits = Limits {
-                archive_size,
-                ..Limits::default()
-            };
-            let mut output = Cursor::new(Vec::new());
-            let mut builder = ZipEncoder::new(&mut output)
-                .with_compression(CompressionMethod::Stored)
-                .with_limits(limits)
-                .builder();
-            for path in ["a", "b"].into_iter().take(count) {
-                builder
-                    .add_file(path, contents, EntryMetadata::default())
-                    .await?;
-            }
-            assert!(matches!(
-                builder.add_file("c", contents, EntryMetadata::default()).await,
-                Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::ArchiveSize(limit))))
-                    if limit == archive_size
-            ));
-
-            if archive_size < end {
-                assert!(matches!(
-                    builder.finish().await,
-                    Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::ArchiveSize(limit))))
-                        if limit == archive_size
-                ));
-                assert!(output.get_ref().is_empty());
-            } else {
-                builder.finish().await?;
-                assert_eq!(
-                    output.get_ref().len() as u64,
-                    end + count as u64 * member_size
-                );
-                let mut archive =
-                    ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
-                archive.validate_all().await?;
-                assert_eq!(archive.entries().len(), count);
-            }
-        }
-    }
-    Ok(())
-}
-
-#[tokio::test]
-async fn reserves_the_central_directory_while_streaming_deflate() -> TestResult {
-    let contents = source_bytes(192 * 1024);
-    let mut builder = ZipEncoder::new(Cursor::new(Vec::new())).builder();
-    builder.add_directory("dir").await?;
-    builder
-        .add_file("dir/file", contents.as_slice(), EntryMetadata::default())
-        .await?;
-    let expected = builder.finish_into_inner().await?.into_inner().into_inner();
-    let archive = ZipArchive::open(Cursor::new(&expected)).await?;
-    let member_end = archive.entries()[1].record_range().end;
-
-    let archive_size = expected.len() as u64;
-    for limit in [archive_size - 1, archive_size] {
-        let limits = Limits {
-            archive_size: limit,
-            ..Limits::default()
-        };
-        let mut output = Cursor::new(Vec::new());
-        let mut builder = ZipEncoder::new(&mut output).with_limits(limits).builder();
-        builder.add_directory("dir").await?;
-        let result = builder
-            .add_file("dir/file", contents.as_slice(), EntryMetadata::default())
-            .await;
-        if limit < archive_size {
-            assert!(matches!(
-                result,
-                Err(BuildError::Encoder(EncodeError::Limit(LimitExceeded::ArchiveSize(size))))
-                    if size == limit
-            ));
-            assert!(matches!(builder.finish().await, Err(BuildError::Poisoned)));
-            assert!(output.get_ref().len() > 64 * 1024);
-            assert!((output.get_ref().len() as u64) < member_end);
-        } else {
-            result?;
-            builder.finish().await?;
-            assert_eq!(output.into_inner(), expected);
-        }
     }
     Ok(())
 }
