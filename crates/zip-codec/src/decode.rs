@@ -60,7 +60,10 @@ impl DecodePolicy {
 
     /// [Rejects empty DEFLATE streams](ReadOptions::reject_empty_deflate_streams).
     ///
+    /// Enabling this option enforces the empty-member rule in [APPNOTE §4.3.8].
     /// The default accepts valid empty DEFLATE streams.
+    ///
+    /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
     pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
         self.framing.reject_empty_deflate_streams = reject;
         self
