@@ -6,7 +6,7 @@ use crate::{
     Error,
     constants::extra,
     invalid,
-    record::{Common, SizeField, bytes_at},
+    record::{MemberHeader, MemberPayload, PayloadFields, SizeField, bytes_at},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -142,25 +142,35 @@ impl<'a> Extras<'a> {
         !self.fields.is_empty()
     }
 
-    pub(crate) fn local_sizes(&self, common: Common, position: u64) -> Result<Sizes, Error> {
-        if (common.uncompressed == SizeField::Zip64) != (common.compressed == SizeField::Zip64) {
+    pub(crate) fn has_zip64(&self) -> bool {
+        self.zip64.is_some()
+    }
+
+    pub(crate) fn local_payload(
+        &self,
+        header: MemberHeader,
+        position: u64,
+    ) -> Result<PayloadFields, Error> {
+        if (header.payload.uncompressed == SizeField::Zip64)
+            != (header.payload.compressed == SizeField::Zip64)
+        {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
 
-        self.zip64_sizes(common, 0, position)
-            .map(|(sizes, _)| sizes)
+        self.resolve_payload(header, 0, position)
+            .map(|(payload, _)| payload)
     }
 
     #[inline]
-    pub(crate) fn central_sizes(
+    pub(crate) fn central_payload(
         &self,
-        common: Common,
+        header: MemberHeader,
         offset: u32,
         disk: u16,
         position: u64,
-    ) -> Result<(Sizes, u64), Error> {
-        let (sizes, bytes) = self.zip64_sizes(
-            common,
+    ) -> Result<(MemberPayload, u64), Error> {
+        let (payload, bytes) = self.resolve_payload(
+            header,
             usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
             position,
         )?;
@@ -184,24 +194,24 @@ impl<'a> Extras<'a> {
             });
         }
 
-        Ok((sizes, offset))
+        Ok((payload.validate(header.common.method, position)?, offset))
     }
 
     #[inline]
-    fn zip64_sizes(
+    fn resolve_payload(
         &self,
-        common: Common,
+        header: MemberHeader,
         location_size: usize,
         position: u64,
-    ) -> Result<(Sizes, &[u8]), Error> {
-        let expected = usize::from(common.uncompressed == SizeField::Zip64) * 8
-            + usize::from(common.compressed == SizeField::Zip64) * 8
+    ) -> Result<(PayloadFields, &[u8]), Error> {
+        let expected = usize::from(header.payload.uncompressed == SizeField::Zip64) * 8
+            + usize::from(header.payload.compressed == SizeField::Zip64) * 8
             + location_size;
         let field = self.zip64;
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
-        common.check_zip64(field.is_some(), position)?;
+        header.check_zip64(field.is_some(), position)?;
 
         let mut bytes = field.unwrap_or_default();
         let mut take_size = |size: SizeField| -> Result<u64, Error> {
@@ -217,13 +227,13 @@ impl<'a> Extras<'a> {
             }
         };
 
-        let uncompressed = take_size(common.uncompressed)?;
-        let compressed = take_size(common.compressed)?;
+        let uncompressed = take_size(header.payload.uncompressed)?;
+        let compressed = take_size(header.payload.compressed)?;
         Ok((
-            Sizes {
+            PayloadFields {
+                crc: header.payload.crc,
                 uncompressed,
                 compressed,
-                zip64: field.is_some(),
             },
             bytes,
         ))
@@ -441,10 +451,4 @@ fn unicode_field<'a>(field: &'a [u8], original: &[u8], position: u64) -> Result<
     }
 
     Ok(value)
-}
-
-pub(crate) struct Sizes {
-    pub(crate) uncompressed: u64,
-    pub(crate) compressed: u64,
-    pub(crate) zip64: bool,
 }

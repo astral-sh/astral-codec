@@ -62,9 +62,9 @@ pub use kind::{DeviceNumbers, EntryKind};
 #[repr(u16)]
 pub enum CompressionMethod {
     /// Uncompressed bytes (method 0).
-    #[default]
     Stored = 0,
-    /// Raw DEFLATE (method 8).
+    /// Raw DEFLATE (method 8, the default).
+    #[default]
     Deflate = 8,
 }
 

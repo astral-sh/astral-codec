@@ -24,11 +24,25 @@ stream after checking its boundary, CRC, and zero decoded size. Our encoder
 stores empty members uncompressed.
 [Python fixtures](tests/fixtures/generate.py)
 
+**Record-oriented files.** Internal file attribute `0x0002` declares a four-byte
+length before each logical record (§4.4.14.2). The reader rejects the archive
+when it encounters this bit in a central directory entry.
+
 **Streaming ZIP64.** Python can put a member's sizes in a 64-bit data
 descriptor and finish the archive with a classic end record. We accept this
 when the descriptor agrees with the central directory and the directory's
-entry count, size, and offset fit in the classic record. A sentinel in the end
-record still requires a ZIP64 locator (§§4.3.9.2, 4.4.3.3, 4.5.3).
+entry count, size, and offset fit in the classic record (§§4.3.9.2, 4.4.3.3,
+4.5.3). A classic directory can contain exactly 65,535 entries. We still require
+a ZIP64 locator when the directory size or offset is `0xffffffff` (§§4.4.21–24).
+
+**Extraction versions.** The local header and central directory entry must agree
+on the version needed to extract a member. A ZIP64 local-header offset requires
+4.5 in both headers (§§4.4.3, 4.5.3). Python can leave the local version at 2.0
+when only the offset uses ZIP64, so we reject those members.
+
+We accept supported versions above the feature minimum, including 4.5 without
+ZIP64. For ordinary Stored files, Python and `ditto` declare 2.0, and Info-ZIP
+`zip` declares 1.0 even with extra fields (§4.4.28).
 
 ## Member extra fields
 
@@ -64,14 +78,8 @@ DOS directory bit set is a directory to `zip-codec` and a file to Python.
 Our encoder adds the slash, as do all 90 directories in the four
 [benchmark wheels](benches/wheels/corpus.json). [Python's directory test][is-dir]
 
-**Reject record-oriented files?** Internal attribute `0x0002` means each
-record starts with a four-byte length (§4.4.14.2). We currently return those
-lengths as part of the file contents.
-
 **Tighten extraction versions?** Framing accepts unlisted versions such as
-1.9 and volume labels below the 1.1 minimum (§4.4.3.2). We also accept 4.5
-without ZIP64. For ordinary stored files, Python and `ditto` declare 2.0,
-and Info-ZIP `zip` declares 1.0 even with extra fields (§4.4.28).
+1.9 and volume labels below the 1.1 minimum (§4.4.3.2).
 
 [appnote]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
 [is-dir]: https://docs.python.org/3.14/library/zipfile.html#zipfile.ZipInfo.is_dir

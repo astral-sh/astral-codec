@@ -41,7 +41,8 @@ General properties:
   outside of the extraction root. A user must explicitly opt into a non-default extraction
   policy to allow this.
 - When extraction succeeds with the default policy, resolving the target of any extracted
-  symbolic link must stay within the extraction root. The target may be missing.
+  symbolic link must stay within the extraction root. The target may already exist in the
+  destination, come from the archive, or be missing.
 - If you drop an `Archive::extract_in` future, pending filesystem operations can still
   modify the extraction root. Retry a cancelled extraction in a fresh directory.
 

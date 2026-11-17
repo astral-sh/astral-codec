@@ -1,4 +1,13 @@
 //! Streaming ZIP64 encoding for the format-neutral archive builder.
+//!
+//! ## Compatibility notes
+//!
+//! The decoder rejects archives with multiple apparent end-of-central-directory
+//! records. Encoding can finish successfully and still produce an archive that
+//! [`ZipArchive::open`](crate::ZipArchive::open) rejects if bytes in a member look
+//! like a second end record. [`CompressionMethod::Stored`] copies member bytes
+//! verbatim, and the default DEFLATE encoder can also preserve those bytes in
+//! uncompressed blocks.
 
 use std::io::{self, SeekFrom};
 
@@ -11,6 +20,7 @@ use thiserror::Error;
 use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
     Budget, BudgetError, CompressionMethod, LimitExceeded, Limits,
+    constants::size,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -65,7 +75,7 @@ impl<W> ZipEncoder<W> {
     pub fn new(writer: W) -> Self {
         Self {
             writer,
-            method: CompressionMethod::Deflate,
+            method: CompressionMethod::default(),
             budget: Budget::new(Limits::default()),
             position: 0,
             count: 0,
@@ -116,6 +126,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             header.local_header_size() as u64 + header.central_header_size() as u64,
         )?;
         pending_budget.charge_member(size)?;
+        check_end_metadata(pending_budget)?;
 
         Ok((header, pending_budget))
     }
@@ -262,6 +273,7 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             return Err(EncodeError::Finished);
         }
 
+        check_end_metadata(self.budget)?;
         let end = end_records(
             self.count as u64,
             self.position,
@@ -361,6 +373,11 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
         )
         .await
     }
+}
+
+/// Check a copy so successive members reserve the same end record.
+fn check_end_metadata(mut budget: Budget) -> Result<(), BudgetError> {
+    budget.charge_metadata(size::ZIP64_END as u64)
 }
 
 /// A failure while encoding ZIP records or payloads.

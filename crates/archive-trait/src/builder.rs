@@ -478,7 +478,9 @@ impl<B: ArchiveBuilder> Builder<B> {
     ///
     /// This creates only the named directory member. It does not add any child
     /// members; use [`Self::add_directory_all`] to recursively add a filesystem
-    /// directory and its contents.
+    /// directory and its contents. Trailing slashes are ignored for directory
+    /// collision checks, so adding both `dir` and `dir/` returns a
+    /// [`BuildError::PathCollision`] on the second call.
     pub async fn add_directory<P: AsRef<Path>>(
         &mut self,
         path: P,
@@ -901,7 +903,7 @@ impl BuildEntries {
         entry: ArchivedEntry,
     ) -> Result<EntryReservation, BuildError<E>> {
         let mut parent = ROOT_NODE;
-        let mut components = archive_path_components(path).peekable();
+        let mut components = archive_path_components(path, entry).peekable();
         while let Some((component, prefix)) = components.next() {
             let Some(node) = self.0.child(parent, component) else {
                 return Ok(EntryReservation { entry });
@@ -930,7 +932,7 @@ impl BuildEntries {
         // The builder holds exclusive state access while the backend hook is
         // awaited, so a successful reservation remains valid until this commit.
         let mut parent = ROOT_NODE;
-        let mut components = archive_path_components(path).peekable();
+        let mut components = archive_path_components(path, reservation.entry).peekable();
         while let Some((component, _)) = components.next() {
             let node = self
                 .0
@@ -958,8 +960,12 @@ impl BuildEntries {
     }
 }
 
-/// Iterates the exact textual component and prefix at each `/` boundary.
-fn archive_path_components(path: &str) -> impl Iterator<Item = (&str, &str)> {
+/// Iterates literal components and prefixes, ignoring trailing slashes on directories.
+fn archive_path_components(path: &str, entry: ArchivedEntry) -> impl Iterator<Item = (&str, &str)> {
+    let path = match entry {
+        ArchivedEntry::Directory { .. } => path.trim_end_matches('/'),
+        ArchivedEntry::NonDirectory => path,
+    };
     let mut component_start = 0;
     path.split('/').map(move |component| {
         let prefix_end = component_start + component.len();

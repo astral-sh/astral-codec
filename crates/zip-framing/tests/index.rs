@@ -537,7 +537,7 @@ async fn rejects_archive_extra_data_records() {
 }
 
 #[tokio::test]
-async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
+async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestResult {
     for (label, offset, value) in [
         ("version", 4, 10),
         ("flags", 7, 0),
@@ -569,6 +569,45 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() {
             "flags {flags:#x}"
         );
     }
+
+    // One length-prefixed record containing "x" (APPNOTE 4.4.14.2).
+    let mut archive = Fixture::member("file", 0, b"\x01\0\0\0x").build();
+    set16(&mut archive.bytes, archive.central + 36, 0x0001); // Text only.
+    Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+    for attributes in [0x0002, 0x0003] {
+        set16(&mut archive.bytes, archive.central + 36, attributes);
+        assert!(matches!(
+            Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+            Err(FrameError::Unsupported { position, feature: "record-oriented member" })
+                if position == archive.central as u64
+        ));
+    }
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> TestResult {
+    let mut archive = Fixture {
+        zip64: true,
+        method: 8,
+        payload: Some(Vec::new()),
+        crc: Some(crc32(b"x")),
+        ..Fixture::default()
+    }
+    .build();
+
+    // Both ZIP64 extras end with the uncompressed size followed by the compressed size.
+    let end = archive.zip64_end.ok_or("missing ZIP64 end")?;
+    archive.bytes[archive.payload.start - 16] = 1;
+    archive.bytes[end - 16] = 1;
+
+    assert!(matches!(
+        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Err(FrameError::Invalid { position, reason: "nonempty DEFLATE member has zero compressed size" })
+            if position == archive.central as u64
+    ));
+    Ok(())
 }
 
 #[tokio::test]
@@ -1754,36 +1793,46 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
 }
 
 #[tokio::test]
-async fn indexes_zip64_counts_above_the_classic_limit() -> TestResult {
-    let count = u64::from(u16::MAX) + 2;
-    let mut bytes = Vec::new();
-    let mut directory = Vec::new();
-    for ordinal in 0..count {
-        let name = format!("{ordinal}.txt");
-        let member = PendingMember::new(
-            &name,
-            CompressionMethod::Stored,
-            WriteEntryKind::File { executable: false },
-        )?
-        .finish(0, 0, 0, bytes.len() as u64)?;
-        bytes.extend(member.local_header());
-        directory.extend(member.central_header());
-    }
-    let offset = bytes.len() as u64;
-    let size = directory.len() as u64;
-    bytes.extend(directory);
-    bytes.extend(end_records(count, offset, size)?);
-    let mut source = Cursor::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
-    assert_eq!(index.entries().len() as u64, count);
-    // Select both sides of the classic sentinel, in reverse directory order.
-    for ordinal in [count - 1, count - 2, count - 3, 0] {
-        let entry = index
-            .entry(&mut source, ordinal as usize)
-            .await?
-            .ok_or("missing entry")?;
-        assert_eq!(entry.directory().path(), format!("{ordinal}.txt"));
-        assert_eq!(entry.directory().size(), 0);
+async fn indexes_counts_at_and_above_the_classic_limit() -> TestResult {
+    for count in [u64::from(u16::MAX), u64::from(u16::MAX) + 2] {
+        let mut bytes = Vec::new();
+        let mut directory = Vec::new();
+        for ordinal in 0..count {
+            let name = format!("{ordinal}.txt");
+            let member = PendingMember::new(
+                &name,
+                CompressionMethod::Stored,
+                WriteEntryKind::File { executable: false },
+            )?
+            .finish(0, 0, 0, bytes.len() as u64)?;
+            bytes.extend(member.local_header());
+            directory.extend(member.central_header());
+        }
+        let offset = bytes.len() as u64;
+        let size = directory.len() as u64;
+        bytes.extend(directory);
+        if let Ok(classic_count) = u16::try_from(count) {
+            bytes.extend(end_record(
+                classic_count,
+                offset.try_into()?,
+                size.try_into()?,
+                &[],
+            ));
+        } else {
+            bytes.extend(end_records(count, offset, size)?);
+        }
+        let mut source = Cursor::new(bytes);
+        let mut index = Index::read(&mut source, Limits::default()).await?;
+        assert_eq!(index.entries().len() as u64, count);
+        // Include the entries across the classic count boundary in the ZIP64 case.
+        for ordinal in [count - 1, count - 2, count - 3, 0] {
+            let entry = index
+                .entry(&mut source, ordinal as usize)
+                .await?
+                .ok_or("missing entry")?;
+            assert_eq!(entry.directory().path(), format!("{ordinal}.txt"));
+            assert_eq!(entry.directory().size(), 0);
+        }
     }
 
     Ok(())

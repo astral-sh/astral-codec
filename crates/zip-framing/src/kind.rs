@@ -71,7 +71,7 @@ impl EntryKind {
                     | UnixFileType::Fifo
                     | UnixFileType::Socket
             ))
-            && (directory.size() != 0 || directory.crc32() != 0)
+            && directory.size() != 0
         {
             return Err(invalid(position, "non-file member has payload data"));
         }

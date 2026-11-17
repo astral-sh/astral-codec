@@ -24,13 +24,12 @@ pub struct ExtractPolicy {
 /// Controls how symbolic- and hard-link members are extracted.
 ///
 /// By default, symbolic links are preserved as native links, including links
-/// to missing targets. Hard links and ambient symbolic-link targets require
-/// explicit opt-in.
+/// to pre-existing entries and missing targets. Resolving a preserved link
+/// must stay within the extraction root. Hard links require explicit opt-in.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinkPolicy {
     pub(crate) symlink_policy: SymlinkPolicy,
     pub(crate) allow_hard_links: bool,
-    pub(crate) allow_ambient_targets: bool,
     pub(crate) allow_missing_targets: bool,
 }
 
@@ -61,7 +60,6 @@ impl Default for LinkPolicy {
         Self {
             symlink_policy: SymlinkPolicy::default(),
             allow_hard_links: false,
-            allow_ambient_targets: false,
             allow_missing_targets: true,
         }
     }
@@ -130,16 +128,6 @@ impl LinkPolicy {
     /// differentials. Enable them only for trusted archives.
     pub fn allow_hard_links(mut self, allow: bool) -> Self {
         self.allow_hard_links = allow;
-        self
-    }
-
-    /// Configures whether pre-existing symbolic-link targets may be used.
-    ///
-    /// Existing symbolic links are followed only when capability-relative
-    /// resolution remains beneath the extraction root. Ambient targets are
-    /// **forbidden by default**. This does not affect hard-link validation.
-    pub fn allow_ambient_targets(mut self, allow: bool) -> Self {
-        self.allow_ambient_targets = allow;
         self
     }
 
