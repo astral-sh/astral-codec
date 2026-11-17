@@ -31,6 +31,10 @@ UTF-8 with bit 11 set before inspecting the extra.
 [Name parsing](crates/zip-framing/src/record.rs#L145) ·
 [Unicode extra validation](crates/zip-framing/src/extra.rs#L242)
 
+**Decision.** Treat these rejections as an intentional compatibility
+restriction. Requiring agreement gives readers that use either representation
+the same filename or comment for entries we accept.
+
 ## 3. DEFLATE streams for empty members
 
 Section 4.3.8 requires zero bytes of file data for empty files and
