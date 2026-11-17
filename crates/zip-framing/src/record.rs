@@ -310,7 +310,7 @@ pub(crate) struct PayloadFields<S = u64> {
     pub(crate) uncompressed: S,
 }
 
-/// Payload declarations checked against the compression method and the CRC of empty input.
+/// Payload declarations checked against the compression method and empty-member requirements.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MemberPayload(PayloadFields);
 
@@ -334,6 +334,10 @@ impl PayloadFields {
         }
         if self.uncompressed == 0 && self.crc != 0 {
             return Err(invalid(position, "empty member has nonzero CRC"));
+        }
+        // APPNOTE 4.3.8 excludes file data for empty members.
+        if self.uncompressed == 0 && self.compressed != 0 {
+            return Err(invalid(position, "empty member has file data"));
         }
 
         Ok(MemberPayload(self))
