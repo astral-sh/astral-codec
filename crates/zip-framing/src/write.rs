@@ -23,6 +23,9 @@ const VERSION_MADE_BY: u16 = ((HostSystem::Unix.to_wire() as u16) << 8) | versio
 const DEFAULT_TIME: u16 = 0;
 const DEFAULT_DATE: u16 = 0x0021;
 
+/// The byte length of the records serialized by [`end_records`].
+pub const END_RECORDS_SIZE: usize = size::ZIP64_END + size::ZIP64_LOCATOR + size::END;
+
 /// A portable file type represented by the encoder's Unix attributes.
 #[derive(Clone, Copy, Debug)]
 pub enum EntryKind {
@@ -205,7 +208,7 @@ impl CompletedMember<'_> {
 /// sections 4.3.14 through 4.3.16 for the record layouts.
 pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
     let position = add(offset, size)?;
-    let mut bytes = Vec::with_capacity(size::ZIP64_END + size::ZIP64_LOCATOR + size::END);
+    let mut bytes = Vec::with_capacity(END_RECORDS_SIZE);
 
     // ZIP64 end of central directory record (APPNOTE 4.3.14): stores the
     // entry count and central directory size and offset as 64-bit values.
@@ -240,6 +243,7 @@ pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error>
     push32(&mut bytes, u32::MAX);
     push16(&mut bytes, 0); // No archive comment.
 
+    debug_assert_eq!(bytes.len(), END_RECORDS_SIZE);
     Ok(bytes)
 }
 

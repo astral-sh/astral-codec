@@ -21,7 +21,7 @@ use tokio::io::{AsyncSeek, AsyncSeekExt, AsyncWrite, AsyncWriteExt};
 use zip_framing::{
     Budget, BudgetError, CompressionMethod, LimitExceeded, Limits,
     constants::size,
-    write::{EntryKind, PendingMember, end_records},
+    write::{END_RECORDS_SIZE, EntryKind, PendingMember, end_records},
 };
 
 use crate::payload::CHUNK_SIZE;
@@ -93,6 +93,9 @@ impl<W> ZipEncoder<W> {
     }
 
     /// Sets archive, member, metadata, entry-count, and total-input budgets.
+    ///
+    /// The archive-size limit includes the central directory and end records.
+    /// For DEFLATE members, compressed bytes are checked as they are written.
     pub fn with_limits(mut self, limits: Limits) -> Self {
         self.budget.set_limits(limits);
         self
@@ -109,26 +112,50 @@ impl<W> ZipEncoder<W> {
 
 impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
     fn prepare_member<'a>(
-        &self,
+        &'a mut self,
         path: &'a str,
         method: CompressionMethod,
         kind: EntryKind,
         size: u64,
-    ) -> Result<(PendingMember<'a>, Budget), EncodeError> {
+    ) -> Result<MemberWriter<'a, W>, EncodeError> {
         let header = PendingMember::new(path, method, kind)?;
         if self.finished {
             return Err(EncodeError::Finished);
         }
 
-        let mut pending_budget = self.budget;
-        pending_budget.check_entry_count(self.count as u64 + 1)?;
-        pending_budget.charge_metadata(
-            header.local_header_size() as u64 + header.central_header_size() as u64,
-        )?;
-        pending_budget.charge_member(size)?;
-        check_end_metadata(pending_budget)?;
+        let local_header_size = header.local_header_size() as u64;
+        let central_header_size = header.central_header_size() as u64;
+        let mut budget = self.budget;
+        budget.check_entry_count(self.count as u64 + 1)?;
+        budget.charge_metadata(local_header_size + central_header_size)?;
+        budget.charge_member(size)?;
+        check_end_metadata(budget)?;
 
-        Ok((header, pending_budget))
+        let directory_size = (self.directory.len() as u64)
+            .checked_add(central_header_size)
+            .ok_or(EncodeError::Overflow)?;
+
+        // Stored data has a known encoded size. DEFLATE can use the remaining
+        // space after accounting for the headers and the end records.
+        let known_payload_size = if method == CompressionMethod::Stored {
+            size
+        } else {
+            0
+        };
+        let minimum_size = local_header_size
+            .checked_add(known_payload_size)
+            .ok_or(EncodeError::Overflow)?;
+        let output = MemberWriter {
+            header,
+            writer: &mut self.writer,
+            directory: &mut self.directory,
+            budget,
+            position: self.position,
+            directory_size,
+        };
+        output.check_append(minimum_size)?;
+
+        Ok(output)
     }
 
     async fn add_member(
@@ -138,25 +165,67 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
         kind: EntryKind,
         payload: &mut FilePayload<'_>,
     ) -> Result<(), BuildFailure<EncodeError>> {
-        let (header, pending_budget) = self
+        let (position, budget) = self
             .prepare_member(path, method, kind, payload.size())
-            .map_err(BuildFailure::recoverable)?;
-
-        self.write_member(header, payload)
+            .map_err(BuildFailure::recoverable)?
+            .write_member(payload)
             .await
             .map_err(BuildFailure::poisoned)?;
-        self.budget = pending_budget;
+
+        self.position = position;
+        self.count += 1;
+        self.budget = budget;
 
         Ok(())
     }
 
-    async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+    fn prepare_end(&self) -> Result<Vec<u8>, EncodeError> {
+        if self.finished {
+            return Err(EncodeError::Finished);
+        }
+
+        check_end_metadata(self.budget)?;
+        let directory_size = self.directory.len() as u64;
+        check_archive_size(&self.budget, self.position, directory_size)?;
+        Ok(end_records(
+            self.count as u64,
+            self.position,
+            directory_size,
+        )?)
+    }
+
+    async fn write_end(&mut self, end: &[u8]) -> Result<(), EncodeError> {
+        self.writer.write_all(&self.directory).await?;
+        self.writer.write_all(end).await?;
+        self.writer.flush().await?;
+        self.finished = true;
+
+        Ok(())
+    }
+}
+
+/// Writes one member with space reserved for the complete directory and end records.
+struct MemberWriter<'a, W> {
+    header: PendingMember<'a>,
+    writer: &'a mut W,
+    directory: &'a mut Vec<u8>,
+    budget: Budget,
+    position: u64,
+    directory_size: u64,
+}
+
+impl<W: AsyncWrite + AsyncSeek + Unpin> MemberWriter<'_, W> {
+    fn check_append(&self, length: u64) -> Result<u64, EncodeError> {
         let end = self
             .position
-            .checked_add(bytes.len() as u64)
+            .checked_add(length)
             .ok_or(EncodeError::Overflow)?;
-        self.budget.check_archive_size(end)?;
+        check_archive_size(&self.budget, end, self.directory_size)?;
+        Ok(end)
+    }
 
+    async fn write_bytes(&mut self, bytes: &[u8]) -> Result<(), EncodeError> {
+        let end = self.check_append(bytes.len() as u64)?;
         self.writer.write_all(bytes).await?;
         self.position = end;
 
@@ -203,18 +272,17 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
     }
 
     async fn write_member(
-        &mut self,
-        header: PendingMember<'_>,
+        mut self,
         payload: &mut FilePayload<'_>,
-    ) -> Result<(), BuildError<EncodeError>> {
+    ) -> Result<(u64, Budget), BuildError<EncodeError>> {
         let size = payload.size();
         let offset = self.position;
-        self.write_bytes(&vec![0; header.local_header_size()])
+        self.write_bytes(&vec![0; self.header.local_header_size()])
             .await?;
 
         let start = self.position;
         let mut crc = Hasher::new();
-        let mut compressor = match header.method() {
+        let mut compressor = match self.header.method() {
             CompressionMethod::Stored => None,
             CompressionMethod::Deflate => Some(Compress::new(Compression::default(), false)),
             _ => return Err(EncodeError::Compression.into()),
@@ -244,7 +312,8 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
                 .await?;
         }
 
-        let member = header
+        let member = self
+            .header
             .finish(crc.finalize(), self.position - start, size, offset)
             .map_err(EncodeError::Framing)?;
 
@@ -262,43 +331,9 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .await
             .map_err(EncodeError::Io)?;
 
-        member.append_central_header(&mut self.directory);
-        self.count += 1;
-
-        Ok(())
-    }
-
-    fn prepare_end(&self) -> Result<(Vec<u8>, u64), EncodeError> {
-        if self.finished {
-            return Err(EncodeError::Finished);
-        }
-
-        check_end_metadata(self.budget)?;
-        let end = end_records(
-            self.count as u64,
-            self.position,
-            self.directory.len() as u64,
-        )?;
-
-        let position = self
-            .position
-            .checked_add(self.directory.len() as u64)
-            .and_then(|position| position.checked_add(end.len() as u64))
-            .ok_or(EncodeError::Overflow)?;
-        self.budget.check_archive_size(position)?;
-
-        Ok((end, position))
-    }
-
-    async fn write_end(&mut self, end: &[u8], position: u64) -> Result<(), EncodeError> {
-        self.writer.write_all(&self.directory).await?;
-        self.writer.write_all(end).await?;
-        self.writer.flush().await?;
-
-        self.position = position;
-        self.finished = true;
-
-        Ok(())
+        member.append_central_header(self.directory);
+        debug_assert_eq!(self.directory.len() as u64, self.directory_size);
+        Ok((self.position, self.budget))
     }
 }
 
@@ -307,11 +342,9 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
     type FileOptions = ZipFileOptions;
 
     async fn finish_archive(&mut self) -> Result<(), BuildFailure<Self::Error>> {
-        let (end, position) = self.prepare_end().map_err(BuildFailure::recoverable)?;
+        let end = self.prepare_end().map_err(BuildFailure::recoverable)?;
 
-        self.write_end(&end, position)
-            .await
-            .map_err(BuildFailure::poisoned)
+        self.write_end(&end).await.map_err(BuildFailure::poisoned)
     }
 
     async fn write_file_member(
@@ -378,6 +411,18 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ArchiveBuilder for ZipEncoder<W> {
 /// Check a copy so successive members reserve the same end record.
 fn check_end_metadata(mut budget: Budget) -> Result<(), BudgetError> {
     budget.charge_metadata(size::ZIP64_END as u64)
+}
+
+fn check_archive_size(
+    budget: &Budget,
+    directory_offset: u64,
+    directory_size: u64,
+) -> Result<(), EncodeError> {
+    let archive_size = directory_offset
+        .checked_add(directory_size)
+        .and_then(|end| end.checked_add(END_RECORDS_SIZE as u64))
+        .ok_or(EncodeError::Overflow)?;
+    Ok(budget.check_archive_size(archive_size)?)
 }
 
 /// A failure while encoding ZIP records or payloads.
