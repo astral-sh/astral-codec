@@ -6,7 +6,7 @@ use crate::{
     Error,
     constants::extra,
     invalid,
-    record::{MemberHeader, MemberPayload, PayloadFields, SizeField, bytes_at},
+    record::{MemberHeader, PayloadFields, SizeField, bytes_at},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -168,7 +168,7 @@ impl<'a> Extras<'a> {
         offset: u32,
         disk: u16,
         position: u64,
-    ) -> Result<(MemberPayload, u64), Error> {
+    ) -> Result<(PayloadFields, u64), Error> {
         let (payload, bytes) = self.resolve_payload(
             header,
             usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
@@ -194,7 +194,7 @@ impl<'a> Extras<'a> {
             });
         }
 
-        Ok((payload.validate(header.common.method, position)?, offset))
+        Ok((payload, offset))
     }
 
     #[inline]

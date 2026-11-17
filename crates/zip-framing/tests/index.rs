@@ -32,6 +32,7 @@ const ALL_FEATURES: ReadOptions = ReadOptions {
         archive: AllowAll,
     },
     allow_stored_data_descriptors: true,
+    reject_empty_member_data: false,
     allow_ambiguous_symlink_modes: true,
     allow_backslashes: true,
 };

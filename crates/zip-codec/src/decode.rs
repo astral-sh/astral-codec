@@ -58,6 +58,14 @@ impl DecodePolicy {
         self
     }
 
+    /// [Rejects empty members with a nonzero compressed size](ReadOptions::reject_empty_member_data).
+    ///
+    /// The default accepts valid empty DEFLATE streams.
+    pub fn reject_empty_member_data(mut self, reject: bool) -> Self {
+        self.framing.reject_empty_member_data = reject;
+        self
+    }
+
     /// Allows [Unix symlink modes from non-Unix creators](ReadOptions::allow_ambiguous_symlink_modes).
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
         self.framing.allow_ambiguous_symlink_modes = allow;

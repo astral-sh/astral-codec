@@ -107,7 +107,6 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
         writer.set_raw_comment(comment.into())?;
         let member = FullFileOptions::default().with_file_comment("member");
         writer.start_file("file", member)?;
-        writer.write_all(b"payload")?;
         let bytes = writer.finish()?.into_inner();
 
         assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
@@ -325,19 +324,11 @@ async fn reads_python_archives_and_projects_members() -> TestResult {
 
 #[tokio::test]
 async fn bounds_payload_chunks_and_preserves_the_buffer_at_eof() -> TestResult {
-    let member = PendingMember::new(
-        "empty",
-        CompressionMethod::Deflate,
-        EntryKind::File { executable: false },
-    )?
-    .finish(0, 0, 0, 0)?;
-    let empty_deflate = single_member_archive(member.local_header(), b"", member.central_header())?;
-
     for (label, bytes, index) in [
         ("stored", STORED, 1),
         ("deflate", DEFLATE, 1),
         ("empty", STORED, 3),
-        ("DEFLATE with zero file data", &empty_deflate, 0),
+        ("empty DEFLATE stream", EMPTY_DEFLATE, 0),
     ] {
         for initial_length in [0, 16] {
             let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
@@ -404,23 +395,13 @@ async fn appends_remaining_payload_and_preserves_prefixes() -> TestResult {
         }
     }
 
-    // A stored DEFLATE block supplies one byte. Empty blocks put the final
-    // block beyond the first input window, so the final read produces no output.
-    let mut encoded = b"\x00\x01\x00\xfe\xffx".to_vec();
-    encoded.extend_from_slice(&b"\x00\x00\x00\xff\xff".repeat(14_000));
-    encoded.extend_from_slice(b"\x01\x00\x00\xff\xff");
-    let member = PendingMember::new(
-        "file",
-        CompressionMethod::Deflate,
-        EntryKind::File { executable: false },
-    )?
-    .finish(crc32(b"x"), encoded.len() as u64, 1, 0)?;
-    let bytes = single_member_archive(member.local_header(), &encoded, member.central_header())?;
-    let mut archive = ZipArchive::open(Cursor::new(bytes)).await?;
+    // A compressed empty stream still invokes the decoder, which must not
+    // expose scratch bytes appended while looking for output.
+    let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
     let mut payload = file_payload(archive.member(0).await?)?;
     let mut output = b"prefix".to_vec();
-    assert_eq!(payload.read_to_end(&mut output).await?, 1);
-    assert_eq!(output, b"prefixx");
+    assert_eq!(payload.read_to_end(&mut output).await?, 0);
+    assert_eq!(output, b"prefix");
     Ok(())
 }
 
@@ -816,14 +797,47 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
 }
 
 #[tokio::test]
-async fn rejects_empty_members_with_file_data_at_open() {
+async fn configures_empty_member_data_policy() -> TestResult {
+    let policy = DecodePolicy::default().reject_empty_member_data(true);
     assert!(matches!(
-        ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await,
+        ZipArchive::with_policy(Cursor::new(EMPTY_DEFLATE), policy).await,
         Err(DecodeError::Framing(FrameError::Invalid {
             reason: "empty member has file data",
             ..
         }))
     ));
+
+    let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
+
+    assert!(matches!(
+        archive.member(1).await?,
+        Some(Member::Directory { .. })
+    ));
+    assert!(archive.next_member().await?.is_none());
+
+    let position = archive.resolved(1).ok_or("unresolved entry")?.data_offset() as usize;
+    let mut corrupt = EMPTY_DEFLATE.to_vec();
+    corrupt[position] = 0xff;
+
+    let mut archive = ZipArchive::open(Cursor::new(&corrupt)).await?;
+
+    assert!(matches!(
+        archive.member(1).await,
+        Err(DecodeError::Integrity { .. })
+    ));
+
+    let member = PendingMember::new(
+        "empty",
+        CompressionMethod::Deflate,
+        EntryKind::File { executable: false },
+    )?
+    .finish(0, 0, 0, 0)?;
+    let bytes = single_member_archive(member.local_header(), b"", member.central_header())?;
+    let mut archive = ZipArchive::with_policy(Cursor::new(bytes), policy).await?;
+    let payload = file_payload(archive.member(0).await?)?;
+    assert!(contents(payload).await?.is_empty());
+
+    Ok(())
 }
 
 #[tokio::test]
