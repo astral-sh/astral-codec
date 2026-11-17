@@ -201,7 +201,7 @@ impl CompletedMember<'_> {
 
 /// Serializes the ZIP64 end record, locator, and classic end record.
 ///
-/// See [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT)
+/// See [PKWARE APPNOTE 6.3.9](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT)
 /// sections 4.3.14 through 4.3.16 for the record layouts.
 pub fn end_records(count: u64, offset: u64, size: u64) -> Result<Vec<u8>, Error> {
     let position = add(offset, size)?;

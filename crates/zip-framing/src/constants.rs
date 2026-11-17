@@ -1,7 +1,7 @@
 //! ZIP wire-format values shared by record parsing, serialization, and codecs.
 //!
 //! These identify fields and features; they do not imply support for them.
-//! See the [PKWARE APPNOTE](https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT).
+//! See the [PKWARE APPNOTE 6.3.9](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT).
 
 /// Record signatures (APPNOTE section 4.3).
 pub mod signature {

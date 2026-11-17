@@ -13,7 +13,7 @@ This crate is a component of [astral-codec](https://github.com/astral-sh/astral-
 - Read classic ZIP and ZIP64 archives with indexed access to individual members
 - Write ZIP64 archives with Stored or DEFLATE members, streaming each payload
 - Support for a subset the ZIP format defined in PKWARE's
-  [APPNOTE-6.3.3.TXT](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT)
+  [APPNOTE-6.3.9.TXT](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT)
 
 **Anti-goals**
 
