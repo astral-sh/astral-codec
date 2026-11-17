@@ -3,7 +3,7 @@ use thiserror::Error;
 const ONE_MIB: u64 = 1024 * 1024;
 const ONE_GIB: u64 = 1024 * ONE_MIB;
 
-/// Limits applied when reading or writing ZIP archives.
+/// Limits applied when reading ZIP archives.
 ///
 /// Raising these values permits correspondingly more memory, I/O, or CPU work.
 /// Compressed input and decoded output have independent bounds; no compression

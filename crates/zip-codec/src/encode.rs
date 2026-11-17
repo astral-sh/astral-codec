@@ -55,6 +55,50 @@ impl From<EntryMetadata> for ZipFileOptions {
     }
 }
 
+/// Resource limits for [`ZipEncoder`].
+#[derive(Clone, Copy, Debug)]
+pub struct EncodeLimits {
+    /// Maximum number of members (default: 100,000).
+    pub entries: usize,
+    /// Maximum bytes in local headers, central headers, and the ZIP64 end record
+    /// (default: 64 MiB).
+    pub metadata_size: u64,
+    /// Maximum uncompressed input size of one member (default: 8 GiB).
+    pub member_size: u64,
+    /// Maximum sum of uncompressed member sizes (default: 64 GiB).
+    pub total_size: u64,
+}
+
+impl Default for EncodeLimits {
+    fn default() -> Self {
+        let Limits {
+            entries,
+            metadata_size,
+            member_size,
+            total_size,
+            ..
+        } = Limits::default();
+        Self {
+            entries,
+            metadata_size,
+            member_size,
+            total_size,
+        }
+    }
+}
+
+impl EncodeLimits {
+    fn budget_limits(self) -> Limits {
+        Limits {
+            entries: self.entries,
+            metadata_size: self.metadata_size,
+            member_size: self.member_size,
+            total_size: self.total_size,
+            archive_size: u64::MAX,
+        }
+    }
+}
+
 /// A streaming UTF-8 ZIP64 writer for [`ArchiveBuilder::builder`].
 ///
 /// Output must be seekable, empty, and positioned at byte zero. Payloads are
@@ -76,7 +120,7 @@ impl<W> ZipEncoder<W> {
         Self {
             writer,
             method: CompressionMethod::default(),
-            budget: Budget::new(Limits::default()),
+            budget: Budget::new(EncodeLimits::default().budget_limits()),
             position: 0,
             count: 0,
             directory: Vec::new(),
@@ -92,9 +136,9 @@ impl<W> ZipEncoder<W> {
         self
     }
 
-    /// Sets archive, member, metadata, entry-count, and total-input budgets.
-    pub fn with_limits(mut self, limits: Limits) -> Self {
-        self.budget.set_limits(limits);
+    /// Sets entry-count, metadata, per-member input, and total input limits.
+    pub fn with_limits(mut self, limits: EncodeLimits) -> Self {
+        self.budget.set_limits(limits.budget_limits());
         self
     }
 
@@ -155,7 +199,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .position
             .checked_add(bytes.len() as u64)
             .ok_or(EncodeError::Overflow)?;
-        self.budget.check_archive_size(end)?;
 
         self.writer.write_all(bytes).await?;
         self.position = end;
@@ -285,8 +328,6 @@ impl<W: AsyncWrite + AsyncSeek + Unpin> ZipEncoder<W> {
             .checked_add(self.directory.len() as u64)
             .and_then(|position| position.checked_add(end.len() as u64))
             .ok_or(EncodeError::Overflow)?;
-        self.budget.check_archive_size(position)?;
-
         Ok((end, position))
     }
 

@@ -11,8 +11,8 @@ use std::{
 use tokio::io::{AsyncSeek, AsyncWrite};
 use zip_codec::{
     Archive, ArchiveBuilder, BuildError, CompressionMethod, DecodePolicy, EncodeError,
-    EntryMetadata, FilePayload, LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
-    ZipEncoder, ZipFileOptions,
+    EncodeLimits, EntryMetadata, FilePayload, LimitExceeded, Limits, Member, MemberPayload,
+    ZipArchive, ZipEncoder, ZipFileOptions,
 };
 use zip_framing::{
     constants::size,
@@ -158,9 +158,9 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
         (end + headers, &["a/"]),
         (end + 2 * headers, &["a/", "b/"]),
     ] {
-        let limits = Limits {
+        let limits = EncodeLimits {
             metadata_size,
-            ..Limits::default()
+            ..EncodeLimits::default()
         };
         let mut output = Cursor::new(Vec::new());
         let mut builder = ZipEncoder::new(&mut output).with_limits(limits).builder();
@@ -183,8 +183,11 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
                 if limit == metadata_size
         ));
         builder.finish().await?;
-        let mut archive =
-            ZipArchive::with_policy(output, DecodePolicy::default().limits(limits)).await?;
+        let policy = DecodePolicy::default().limits(Limits {
+            metadata_size,
+            ..Limits::default()
+        });
+        let mut archive = ZipArchive::with_policy(output, policy).await?;
         archive.validate_all().await?;
         assert_eq!(archive.entries().len(), paths.len());
     }
@@ -194,13 +197,13 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
 #[tokio::test]
 async fn recovers_from_payload_size_limits() -> TestResult {
     for limits in [
-        Limits {
+        EncodeLimits {
             member_size: 3,
-            ..Limits::default()
+            ..EncodeLimits::default()
         },
-        Limits {
+        EncodeLimits {
             total_size: 3,
-            ..Limits::default()
+            ..EncodeLimits::default()
         },
     ] {
         let mut builder = ZipEncoder::new(Cursor::new(Vec::new()))
