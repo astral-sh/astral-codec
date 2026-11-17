@@ -51,7 +51,7 @@ impl<'a> PendingMember<'a> {
             return Err(invalid(0, "empty or oversized filename"));
         }
 
-        validate_name(path, 0)?;
+        validate_name(path, 0, false)?;
         if path.ends_with('/') != matches!(kind, EntryKind::Directory) {
             return Err(invalid(0, "filename suffix disagrees with member kind"));
         }
