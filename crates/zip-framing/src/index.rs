@@ -121,9 +121,11 @@ pub struct ReadOptions {
     pub comments: CommentPolicy,
     /// Accept Stored members with data descriptors (bit 3). Disabled by default.
     pub allow_stored_data_descriptors: bool,
-    /// Reject empty members with a nonzero compressed size (APPNOTE 4.3.8).
-    /// Disabled by default for compatibility with writers that emit empty DEFLATE streams.
-    pub reject_empty_member_data: bool,
+    /// Reject empty DEFLATE streams (APPNOTE 4.3.8).
+    ///
+    /// When enabled, DEFLATE members with zero uncompressed size must also
+    /// have zero compressed size. Disabled by default.
+    pub reject_empty_deflate_streams: bool,
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
     pub allow_ambiguous_symlink_modes: bool,

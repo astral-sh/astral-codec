@@ -797,8 +797,8 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
 }
 
 #[tokio::test]
-async fn configures_empty_member_data_policy() -> TestResult {
-    let policy = DecodePolicy::default().reject_empty_member_data(true);
+async fn configures_empty_deflate_stream_policy() -> TestResult {
+    let policy = DecodePolicy::default().reject_empty_deflate_streams(true);
     assert!(matches!(
         ZipArchive::with_policy(Cursor::new(EMPTY_DEFLATE), policy).await,
         Err(DecodeError::Framing(FrameError::Invalid {

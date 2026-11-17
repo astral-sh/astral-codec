@@ -319,7 +319,7 @@ impl PayloadFields {
         self,
         method: CompressionMethod,
         position: u64,
-        reject_empty_member_data: bool,
+        reject_empty_deflate_streams: bool,
     ) -> Result<MemberPayload, Error> {
         match method {
             CompressionMethod::Stored if self.compressed != self.uncompressed => {
@@ -337,7 +337,7 @@ impl PayloadFields {
             return Err(invalid(position, "empty member has nonzero CRC"));
         }
         // APPNOTE 4.3.8 excludes file data for empty members.
-        if reject_empty_member_data && self.uncompressed == 0 && self.compressed != 0 {
+        if reject_empty_deflate_streams && self.uncompressed == 0 && self.compressed != 0 {
             return Err(invalid(position, "empty member has file data"));
         }
 

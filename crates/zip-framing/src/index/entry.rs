@@ -218,7 +218,11 @@ impl CentralDirectoryEntry {
         };
         let (fields, local_offset) =
             extras.central_payload(header_fields, offset, disk, position)?;
-        let payload = fields.validate(common.method, position, options.reject_empty_member_data)?;
+        let payload = fields.validate(
+            common.method,
+            position,
+            options.reject_empty_deflate_streams,
+        )?;
         options
             .comments
             .per_member

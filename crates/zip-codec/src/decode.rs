@@ -58,11 +58,11 @@ impl DecodePolicy {
         self
     }
 
-    /// [Rejects empty members with a nonzero compressed size](ReadOptions::reject_empty_member_data).
+    /// [Rejects empty DEFLATE streams](ReadOptions::reject_empty_deflate_streams).
     ///
     /// The default accepts valid empty DEFLATE streams.
-    pub fn reject_empty_member_data(mut self, reject: bool) -> Self {
-        self.framing.reject_empty_member_data = reject;
+    pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
+        self.framing.reject_empty_deflate_streams = reject;
         self
     }
 
