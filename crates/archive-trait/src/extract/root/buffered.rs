@@ -138,22 +138,18 @@ pub(super) fn write_buffered_files(
 /// Match implicit-parent creation: accept real ambient directories, and never
 /// follow or replace a symbolic link or another non-directory ancestor.
 fn create_parent(directory: &Dir, path: &Path) -> Result<Dir, BufferedError> {
-    let create_error = match directory.create_dir(path) {
-        Ok(()) => {
-            return directory
-                .open_dir(path)
-                .map_err(|source| BufferedError::filesystem("open directory", source));
-        }
-        Err(error) if error.kind() == io::ErrorKind::AlreadyExists => error,
-        Err(error) => return Err(BufferedError::filesystem("create directory", error)),
-    };
-    match directory.symlink_metadata(path) {
-        Ok(metadata) if metadata.is_dir() && !metadata_is_link(&metadata) => {}
-        Ok(_) => return Err(BufferedError::Collision),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => {
+    if let Err(create_error) = directory.create_dir(path) {
+        if create_error.kind() != io::ErrorKind::AlreadyExists {
             return Err(BufferedError::filesystem("create directory", create_error));
         }
-        Err(error) => return Err(BufferedError::filesystem("inspect", error)),
+        match directory.symlink_metadata(path) {
+            Ok(metadata) if metadata.is_dir() && !metadata_is_link(&metadata) => {}
+            Ok(_) => return Err(BufferedError::Collision),
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Err(BufferedError::filesystem("create directory", create_error));
+            }
+            Err(error) => return Err(BufferedError::filesystem("inspect", error)),
+        }
     }
     directory
         .open_dir(path)
