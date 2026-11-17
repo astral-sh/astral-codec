@@ -3,7 +3,7 @@ use std::{
     str,
 };
 
-use memchr::memchr2;
+use memchr::{memchr, memchr2};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
 use crate::{CompressionMethod, Error, add, constants::version, invalid};
@@ -146,21 +146,31 @@ pub(crate) fn parse_name(
     bytes: &[u8],
     flags: GeneralPurposeFlags,
     position: u64,
+    allow_backslashes: bool,
 ) -> Result<&str, Error> {
     let name = str::from_utf8(bytes).map_err(|_| invalid(position, "non-UTF-8 filename"))?;
     if !flags.contains(GeneralPurposeFlags::UTF8) && !name.is_ascii() {
         return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
     }
 
-    validate_name(name, position)?;
+    validate_name(name, position, allow_backslashes)?;
     Ok(name)
 }
 
 #[inline]
-pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
+pub(crate) fn validate_name(
+    name: &str,
+    position: u64,
+    allow_backslashes: bool,
+) -> Result<(), Error> {
     let bytes = name.as_bytes();
+    let forbidden_byte = if allow_backslashes {
+        memchr(0, bytes)
+    } else {
+        memchr2(0, b'\\', bytes)
+    };
     if name.starts_with('\u{feff}')
-        || memchr2(0, b'\\', bytes).is_some()
+        || forbidden_byte.is_some()
         || name.starts_with('/')
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
     {

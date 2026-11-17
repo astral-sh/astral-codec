@@ -124,6 +124,10 @@ pub struct ReadOptions {
     /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
     pub allow_ambiguous_symlink_modes: bool,
+    /// Accept literal backslashes in member names. Disabled by default.
+    ///
+    /// Member names are returned verbatim. Only `/` is a path separator.
+    pub allow_backslashes: bool,
 }
 
 /// A ZIP member index.

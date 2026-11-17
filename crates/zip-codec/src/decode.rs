@@ -63,6 +63,15 @@ impl DecodePolicy {
         self.framing.allow_ambiguous_symlink_modes = allow;
         self
     }
+
+    /// Allows [literal backslashes in member names](ReadOptions::allow_backslashes).
+    ///
+    /// Disabled by default. Member names are returned verbatim. The filesystem
+    /// extractor rejects paths containing backslashes.
+    pub fn allow_backslashes(mut self, allow: bool) -> Self {
+        self.framing.allow_backslashes = allow;
+        self
+    }
 }
 
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {

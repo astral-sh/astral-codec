@@ -16,7 +16,7 @@ use zip_codec::{
     Archive, CommentPolicy,
     CommentRule::{AllowAll, AllowAscii, AllowUtf8, Reject},
     CompressionMethod, DecodeError, DecodePolicy, EntryKind as DecodedEntryKind, ExtraFieldPolicy,
-    LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
+    ExtractError, LimitExceeded, Limits, Member, MemberPayload, ZipArchive,
     extract::ExtractPolicy,
 };
 use zip_framing::{
@@ -124,6 +124,49 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
             assert_eq!(result.is_ok(), accepted, "{archive:?}, comment={comment:?}");
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn opts_in_to_literal_backslashes_in_member_names() -> TestResult {
+    let name = r"nested\file";
+    let mut writer = ZipWriter::new(Cursor::new(Vec::new()));
+    writer.start_file(name, FullFileOptions::default())?;
+    writer.write_all(b"payload")?;
+    let bytes = writer.finish()?.into_inner();
+
+    assert!(matches!(
+        ZipArchive::open(Cursor::new(&bytes)).await,
+        Err(DecodeError::Framing(FrameError::Invalid {
+            reason: "invalid ZIP filename",
+            ..
+        }))
+    ));
+
+    let policy = DecodePolicy::default().allow_backslashes(true);
+    let mut archive = ZipArchive::with_policy(Cursor::new(&bytes), policy).await?;
+    assert_eq!(archive.entries()[0].directory().path(), name);
+    let Some(Member::File {
+        metadata, payload, ..
+    }) = archive.next_member().await?
+    else {
+        return Err("expected file member".into());
+    };
+    assert_eq!(metadata.path, name);
+    assert_eq!(contents(payload).await?, b"payload");
+
+    let destination = tempfile::tempdir()?;
+    assert!(matches!(
+        ZipArchive::with_policy(Cursor::new(&bytes), policy)
+            .await?
+            .extract_in(destination.path(), ExtractPolicy::default())
+            .await,
+        Err(ExtractError::UnsafePath {
+            reason: "contains a backslash separator",
+            ..
+        })
+    ));
+
     Ok(())
 }
 

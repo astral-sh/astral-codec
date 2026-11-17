@@ -27,6 +27,10 @@
 //! - Directory member names must end in `/` so readers can identify their type
 //!   from the filename alone.
 //!
+//! - APPNOTE 4.4.17.1 requires forward slashes as path separators. By default,
+//!   zip-framing rejects backslashes in member names. See
+//!   [`ReadOptions::allow_backslashes`].
+//!
 //! - By default, zip-framing rejects stored members that use a data descriptor,
 //!   since other streaming ZIP parsers frequently misinterpret them.
 //!   See [`ReadOptions::allow_stored_data_descriptors`].

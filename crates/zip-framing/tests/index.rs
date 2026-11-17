@@ -33,6 +33,7 @@ const ALL_FEATURES: ReadOptions = ReadOptions {
     },
     allow_stored_data_descriptors: true,
     allow_ambiguous_symlink_modes: true,
+    allow_backslashes: true,
 };
 
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
@@ -766,7 +767,6 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
         vec![0xff],
         b"/absolute".to_vec(),
         b"C:/drive".to_vec(),
-        b"back\\slash".to_vec(),
         b"nul\0name".to_vec(),
         "\u{feff}name".as_bytes().to_vec(),
     ] {
