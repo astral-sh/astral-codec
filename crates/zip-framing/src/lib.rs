@@ -21,6 +21,9 @@
 //!
 //! ## ZIP compatibility
 //!
+//! - Directory member names must end in `/` so readers can identify their type
+//!   from the filename alone.
+//!
 //! - By default, zip-framing rejects stored members that use a data descriptor,
 //!   since other streaming ZIP parsers frequently misinterpret them.
 //!   See [`ReadOptions::allow_stored_data_descriptors`].
