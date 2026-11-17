@@ -2,3 +2,4 @@
 /.venv/
 
 /reproducers
+__pycache__/
