@@ -63,6 +63,10 @@ impl DecodePolicy {
     /// Enabling this option enforces the empty-member rule in [APPNOTE §4.3.8].
     /// The default accepts valid empty DEFLATE streams.
     ///
+    /// This is **disabled by default** because many ZIP emitters ignore this rule
+    /// and emit an empty raw DEFLATE stream (2 bytes) or a final empty block
+    /// (5 bytes) despite the actual member being empty.
+    ///
     /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
     pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
         self.framing.reject_empty_deflate_streams = reject;
