@@ -50,9 +50,10 @@ impl EntryKind {
         attributes: &ExternalAttributes,
     ) -> Result<Self, Error> {
         let position = directory.position();
+        let has_directory_suffix = directory.path().ends_with('/');
         let file_type = match (
             UnixFileType::from_mode(attributes.unix_mode),
-            directory.path().ends_with('/') || attributes.dos_directory,
+            has_directory_suffix || attributes.dos_directory,
         ) {
             (UnixFileType::Unspecified | UnixFileType::Directory, true) => UnixFileType::Directory,
             (file_type, false) => file_type,
@@ -60,6 +61,9 @@ impl EntryKind {
         };
         if attributes.dos_volume_label && file_type != UnixFileType::Unspecified {
             return Err(invalid(position, "inconsistent file attributes"));
+        }
+        if file_type == UnixFileType::Directory && !has_directory_suffix {
+            return Err(invalid(position, "directory filename must end with '/'"));
         }
 
         if (attributes.dos_volume_label

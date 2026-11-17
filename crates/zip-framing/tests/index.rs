@@ -290,16 +290,16 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
         ("file", 2, 0o100666 << 16, EntryKind::File, 0),
         ("file", 255, (0o040755 << 16) | 0x18, EntryKind::File, 0),
         ("directory/", 3, 0, EntryKind::Directory, 0),
-        ("directory", 0, 0x10, EntryKind::Directory, 0),
+        ("directory/", 0, 0x10, EntryKind::Directory, 0),
         (
-            "directory",
+            "directory/",
             3,
             0o040755 << 16,
             EntryKind::Directory,
             0o040755,
         ),
         (
-            "directory",
+            "directory/",
             19,
             0o040755 << 16,
             EntryKind::Directory,
@@ -433,13 +433,24 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
     let fifo = |payload: &[u8]| member("fifo", 0o010600 << 16, payload);
     let volume = |payload: &[u8]| member("volume", 0x08, payload);
     let inconsistent = "inconsistent file attributes";
+    let missing_suffix = "directory filename must end with '/'";
     let non_file = "non-file member has payload data";
     let unexpected = "unexpected UNIX file-type data";
     let bad_device = "invalid UNIX device numbers";
 
     for (fixture, expected) in [
         (member("file", (0o100644 << 16) | 0x10, b""), inconsistent),
+        (member("file/", 0o100644 << 16, b""), inconsistent),
         (member("link/", 0o120777 << 16, b"target"), inconsistent),
+        (member("directory", 0o040755 << 16, b""), missing_suffix),
+        (member("directory", 0x10, b""), missing_suffix),
+        (
+            Fixture {
+                made_by: Some(20),
+                ..member("directory", 0x10, b"")
+            },
+            missing_suffix,
+        ),
         (member("volume/", 0x08, b""), inconsistent),
         (member("volume", (0o100644 << 16) | 0x08, b""), inconsistent),
         (directory(b"data"), non_file),
