@@ -85,14 +85,14 @@ Here, zip-codec refers to both the zip-codec and zip-framing crates.
 
 General properties:
 
-- zip-codec targets a subset of [PKWARE APPNOTE 6.3.3].
+- zip-codec targets a subset of [PKWARE APPNOTE 6.3.9].
 - If a ZIP is ambiguous (i.e. not well-formed), zip-codec should reject it rather than
   picking an arbitrary interpretation.
 - zip-codec should reject ZIPs that contain inconsistent states, e.g. where the local file headers
   and central directory disagree.
 - Encoding should always produce a valid, unambiguous ZIP.
 
-[PKWARE APPNOTE 6.3.3]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.3.TXT
+[PKWARE APPNOTE 6.3.9]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
 
 In addition, the following are *never* considered security vulnerabilities
 within zip-codec:
