@@ -287,8 +287,6 @@ impl From<SizeField> for u32 {
 /// Fields that must agree verbatim between local and central headers.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct Common {
-    /// The minimum ZIP specification version needed to extract this member.
-    pub(crate) version: u16,
     /// The member's general-purpose bit flags.
     pub(crate) flags: GeneralPurposeFlags,
     /// The member's compression method.
@@ -352,6 +350,9 @@ impl MemberPayload {
 /// The fixed fields shared by local and central headers, before resolving ZIP64 sizes.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct MemberHeader {
+    /// The extraction version declared by this header. For example, only the
+    /// central header needs version 4.5 for a ZIP64 local-header offset.
+    pub(crate) version: u16,
     pub(crate) common: Common,
     pub(crate) payload: PayloadFields<SizeField>,
 }
@@ -390,8 +391,8 @@ impl MemberHeader {
         }
 
         Ok(Self {
+            version,
             common: Common {
-                version,
                 flags,
                 method,
                 time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
@@ -408,7 +409,7 @@ impl MemberHeader {
     /// Serializes the common header fields in little-endian order.
     pub(crate) fn to_bytes(self) -> [u8; Self::SIZE] {
         let mut bytes = [0; Self::SIZE];
-        bytes[0..2].copy_from_slice(&self.common.version.to_le_bytes());
+        bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
         bytes[2..4].copy_from_slice(&self.common.flags.bits().to_le_bytes());
         bytes[4..6].copy_from_slice(&(self.common.method as u16).to_le_bytes());
         bytes[6..8].copy_from_slice(&self.common.time.to_le_bytes());
@@ -420,7 +421,7 @@ impl MemberHeader {
     }
 
     pub(crate) fn check_zip64(self, zip64: bool, position: u64) -> Result<(), Error> {
-        if zip64 && self.common.version < version::ZIP64 {
+        if zip64 && self.version < version::ZIP64 {
             return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
         }
 
@@ -469,8 +470,8 @@ mod tests {
             0x77, 0x88, 0x99, 0xaa, 0xbb, 0xcc,
         ];
         let header = MemberHeader {
+            version: 20,
             common: Common {
-                version: 20,
                 flags: GeneralPurposeFlags::parse(0x080a, CompressionMethod::Deflate, 42)?,
                 method: CompressionMethod::Deflate,
                 time: 0x1234,

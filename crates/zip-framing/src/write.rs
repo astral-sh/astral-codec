@@ -188,8 +188,8 @@ impl CompletedMember<'_> {
 
     fn append_common(&self, bytes: &mut Vec<u8>, zip64_size: usize) {
         let header = MemberHeader {
+            version: version::ZIP64,
             common: Common {
-                version: version::ZIP64,
                 flags: GeneralPurposeFlags::UTF8,
                 method: self.header.method,
                 time: DEFAULT_TIME,

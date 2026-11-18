@@ -118,6 +118,32 @@ async fn resolves_classic_zip64_and_all_descriptor_forms() -> TestResult {
 }
 
 #[tokio::test]
+async fn resolves_classic_local_header_with_zip64_central_offset() -> TestResult {
+    // CPython uses ZIP64 only in the central header when just the offset needs it.
+    let mut archive = Fixture {
+        local_offset: u32::MAX,
+        central_extra: field(1, &0_u64.to_le_bytes()),
+        ..Fixture::default()
+    }
+    .build();
+    assert!(matches!(
+        read_validated(&archive.bytes).await,
+        Err(FrameError::Invalid { position, reason: "ZIP64 requires extraction version 4.5" })
+            if position == archive.central as u64
+    ));
+
+    set16(&mut archive.bytes, archive.central + 6, 45);
+    let index = read_validated(&archive.bytes).await?;
+    let entry = index.resolved(0).ok_or("unresolved entry")?;
+    assert_eq!(entry.directory().version_needed(), 45);
+    assert_eq!(
+        &archive.bytes[entry.data_offset() as usize..archive.central],
+        b"payload"
+    );
+    Ok(())
+}
+
+#[tokio::test]
 async fn resolves_partial_zip64_extras_in_central_headers() -> TestResult {
     // Central ZIP64 values are present only for sentinel fields, in specification
     // order. Local ZIP64 extras must contain both sizes (APPNOTE 4.5.3).
@@ -562,7 +588,6 @@ async fn rejects_archive_extra_data_records() {
 #[tokio::test]
 async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestResult {
     for (label, offset, value) in [
-        ("version", 4, 10),
         ("flags", 7, 0),
         ("method", 8, 8),
         ("time", 10, 1),
@@ -634,35 +659,38 @@ async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> 
 }
 
 #[tokio::test]
-async fn checks_extraction_versions_even_when_both_headers_agree() -> TestResult {
+async fn checks_extraction_versions_independently() -> TestResult {
     for (method, minimum) in [(0, 10), (8, 20)] {
-        for version in [minimum - 1, minimum, 45, 46, 0x0314] {
-            let archive = Fixture {
-                method,
-                version: Some(version),
-                ..Fixture::default()
-            }
-            .build();
-            let result = read_validated(&archive.bytes).await;
-            if version < minimum {
-                assert!(matches!(
-                    result,
-                    Err(FrameError::Invalid {
-                        reason: "extraction version is too low",
-                        ..
-                    })
-                ));
-            } else if version > 45 {
-                // Unlike rs-async-zip, we do not discard a nonzero high byte.
-                assert!(matches!(
-                    result,
-                    Err(FrameError::Unsupported {
-                        feature: "extraction version",
-                        ..
-                    })
-                ));
-            } else {
-                result?;
+        let archive = Fixture {
+            method,
+            ..Fixture::default()
+        }
+        .build();
+        for (offset, position) in [(4, 0), (archive.central + 6, archive.central as u64)] {
+            for version in [minimum - 1, minimum, 45, 46, 0x0314] {
+                let mut bytes = archive.bytes.clone();
+                set16(&mut bytes, offset, version);
+                let result = read_validated(&bytes).await;
+                if version < minimum {
+                    assert!(matches!(
+                        result,
+                        Err(FrameError::Invalid {
+                            reason: "extraction version is too low",
+                            position: actual,
+                        }) if actual == position
+                    ));
+                } else if version > 45 {
+                    // Unlike rs-async-zip, we do not discard a nonzero high byte.
+                    assert!(matches!(
+                        result,
+                        Err(FrameError::Unsupported {
+                            feature: "extraction version",
+                            position: actual,
+                        }) if actual == position
+                    ));
+                } else {
+                    result?;
+                }
             }
         }
     }
