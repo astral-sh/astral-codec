@@ -62,12 +62,17 @@ Callers can reject those streams at archive open with
   rejects backslashes by default. `DecodePolicy::allow_backslashes(true)`
   preserves them literally for metadata and payload reads. Filesystem
   extraction returns `UnsafePath` for those names.
-  [Decode policy](crates/zip-codec/src/decode.rs#L67) ·
+  [Decode policy](crates/zip-codec/src/decode.rs#L81) ·
   [Extraction check](crates/archive-trait/src/extract/path.rs#L233)
 - The codec requires directory names to end in `/`. This makes the name
   agree with the type for readers that classify directories by suffix and
   readers that use external attributes.
   [Directory check](crates/zip-framing/src/kind.rs#L65)
+
+**Decision.** Adopt these rules as the ZIP filename policy.
+[Directory suffixes (#352)](https://github.com/astral-sh/astral-codec/pull/352) ·
+[Empty filenames (#353)](https://github.com/astral-sh/astral-codec/pull/353) ·
+[Backslash policy (#354)](https://github.com/astral-sh/astral-codec/pull/354)
 
 ## 5. DOS modification date and time
 
