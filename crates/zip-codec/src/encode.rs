@@ -40,7 +40,7 @@ impl ZipFileOptions {
     /// Selects the compression method for this file.
     ///
     /// Empty files are always stored, regardless of this setting.
-    pub fn with_compression(mut self, method: CompressionMethod) -> Self {
+    pub fn compression(mut self, method: CompressionMethod) -> Self {
         self.compression = Some(method);
         self
     }
@@ -130,7 +130,7 @@ impl<W> ZipEncoder<W> {
 
     /// Selects the default compression method for nonempty regular files.
     ///
-    /// Individual files can override this with [`ZipFileOptions::with_compression`].
+    /// Individual files can override this with [`ZipFileOptions::compression`].
     pub fn with_compression(mut self, method: CompressionMethod) -> Self {
         self.method = method;
         self
