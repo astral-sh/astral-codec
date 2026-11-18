@@ -181,16 +181,14 @@ pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
 }
 
 /// General-purpose header flags (APPNOTE 4.4.4).
-///
-/// Info-ZIP can leave the DEFLATE option bits set on Stored members. Preserve
-/// them so the local and central headers must still agree.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GeneralPurposeFlags(u16);
 
 impl GeneralPurposeFlags {
     /// Member encryption (bit 0).
     const ENCRYPTED: Self = Self(0x0001);
-    /// Compression-level bits for DEFLATE members (bits 1 and 2).
+    /// DEFLATE compression-level bits (1 and 2). Info-ZIP 3.0 can leave these
+    /// set on Stored members. Both headers must still agree on their values.
     const DEFLATE_OPTIONS: Self = Self(0x0006);
     /// A descriptor follows the payload; local CRC and sizes are placeholders (bit 3).
     pub(crate) const DATA_DESCRIPTOR: Self = Self(0x0008);
