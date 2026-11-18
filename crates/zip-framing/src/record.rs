@@ -356,7 +356,8 @@ impl MemberHeader {
         let flags =
             GeneralPurposeFlags::parse(u16::from_le_bytes(array_at::<2, 2, _>(bytes)), position)?;
 
-        let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
+        // p7zip 16.02 on Unix wrote the host system ID into the high byte.
+        let version = u16::from(bytes[0]);
         if version > version::ZIP64 {
             return Err(Error::Unsupported {
                 position,

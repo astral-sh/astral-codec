@@ -712,9 +712,17 @@ async fn checks_extraction_versions_independently() -> TestResult {
         }
         .build();
         for (offset, position) in [(4, 0), (archive.central + 6, archive.central as u64)] {
-            for version in [minimum - 1, minimum, 45, 46, 0x0314] {
+            for (version, high_byte) in [
+                (minimum - 1, 0),
+                (minimum, 0),
+                (45, 0),
+                (46, 0),
+                (19, 3),
+                (20, 3),
+                (46, 3),
+            ] {
                 let mut bytes = archive.bytes.clone();
-                set16(&mut bytes, offset, version);
+                bytes[offset..offset + 2].copy_from_slice(&[version, high_byte]);
                 let result = read_validated(&bytes).await;
                 if version < minimum {
                     assert!(matches!(
@@ -725,7 +733,6 @@ async fn checks_extraction_versions_independently() -> TestResult {
                         }) if actual == position
                     ));
                 } else if version > 45 {
-                    // Unlike rs-async-zip, we do not discard a nonzero high byte.
                     assert!(matches!(
                         result,
                         Err(FrameError::Unsupported {
