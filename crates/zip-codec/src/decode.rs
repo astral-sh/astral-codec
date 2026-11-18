@@ -7,7 +7,9 @@ use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use zip_framing::{Entry, EntryKind, Index, IndexPolicy, IndexedEntry, constants::attributes};
 
-pub use zip_framing::{CommentPolicy, CommentRule, ExtraFieldPolicy, Limits};
+pub use zip_framing::{
+    CommentPolicy, CommentRule, ExtraFieldPolicy, ExtraHeaderId, IndexPolicyViolation, Limits,
+};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -386,7 +388,7 @@ impl<'a> TryFrom<&'a Entry<'_>> for Kind<'a> {
 /// A ZIP framing, payload, or member-projection failure.
 #[derive(Debug, Error)]
 pub enum DecodeError {
-    /// ZIP record parsing failed.
+    /// ZIP framing failed, including rejections by the selected [`DecodePolicy`].
     #[error(transparent)]
     Framing(#[from] zip_framing::Error),
     /// Payload I/O failed.

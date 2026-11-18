@@ -6,10 +6,10 @@ use crc32fast::hash as crc32;
 use tokio::io::{AsyncRead, AsyncSeek};
 use zip_framing::{
     CentralDirectoryEntry, CommentPolicy,
-    CommentRule::{AllowAll, AllowUtf8},
+    CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexPolicy, IndexedEntry, LimitExceeded, Limits,
+    HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -696,8 +696,10 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         assert!(
             matches!(
                 Index::read(&mut reader).await,
-                Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
-                    if position == both.central as u64 && rejected == identifier
+                Err(FrameError::PolicyViolation {
+                    position,
+                    violation: IndexPolicyViolation::ExtraField { identifier: rejected },
+                }) if position == both.central as u64 && u16::from(rejected) == identifier
             ),
             "{identifier:#06x}"
         );
@@ -708,12 +710,25 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         assert!(
             matches!(
                 index.entry(&mut reader, 0).await,
-                Err(FrameError::UnsupportedExtraField { position: 0, identifier: rejected })
-                    if rejected == identifier
+                Err(FrameError::PolicyViolation {
+                    position: 0,
+                    violation: IndexPolicyViolation::ExtraField { identifier: rejected },
+                }) if u16::from(rejected) == identifier
             ),
             "{identifier:#06x}"
         );
     }
+
+    let malformed = Fixture::default()
+        .with_extra(false, field(0x000d, &[0; 11]))
+        .build();
+    assert!(matches!(
+        Index::read(&mut Cursor::new(malformed.bytes)).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "truncated UNIX extra field",
+        }) if position == malformed.central as u64
+    ));
     Ok(())
 }
 
@@ -732,14 +747,21 @@ async fn rejects_unsupported_extras_in_either_header() {
             }
             .build();
             let offset = if central { archive.central as u64 } else { 0 };
-            assert!(
-                matches!(
-                    read_validated(&archive.bytes).await,
-                    Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
-                        if position == offset && rejected == identifier
-                ),
-                "{identifier:#06x}, local={local}, central={central}"
-            );
+            for policy in [IndexPolicy::default(), all_features()] {
+                let mut source = Cursor::new(&archive.bytes);
+                let result = match Index::read_with_policy(&mut source, policy).await {
+                    Ok(mut index) => index.validate_all(&mut source).await,
+                    Err(error) => Err(error),
+                };
+                assert!(
+                    matches!(
+                        result,
+                        Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
+                            if position == offset && rejected == identifier
+                    ),
+                    "{identifier:#06x}, local={local}, central={central}: {result:?}"
+                );
+            }
         }
     }
 }
@@ -794,6 +816,15 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
             .is_err()
         );
     }
+
+    let malformed = Fixture::member("nul\0\\name", 0, b"payload").build();
+    assert!(matches!(
+        Index::read(&mut Cursor::new(malformed.bytes)).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "invalid ZIP filename",
+        }) if position == malformed.central as u64
+    ));
 
     let mut invalid = Vec::new();
     for change in [0, 1, 5] {
@@ -1089,6 +1120,7 @@ async fn checks_the_member_comment_encoding_flag() {
         (utf8, AllowUtf8, 0x0800, true),
         (b"\xff", AllowAll, 0, true),
         (b"\xff", AllowAll, 0x0800, false),
+        (b"\xff", Reject, 0x0800, false),
     ] {
         let archive = Fixture {
             flags: Some(flags),
@@ -1102,11 +1134,24 @@ async fn checks_the_member_comment_encoding_flag() {
         });
         let mut source = Cursor::new(archive.bytes);
         let result = Index::read_with_policy(&mut source, policy).await;
-        assert_eq!(
-            result.is_ok(),
-            accepted,
-            "{per_member:?}, flags={flags:#x}: {result:?}"
-        );
+        let expected = if accepted {
+            result.is_ok()
+        } else if flags == 0x0800 && str::from_utf8(comment).is_err() {
+            matches!(
+                result,
+                Err(FrameError::Invalid { position, reason: "non-UTF-8 comment" })
+                    if position == archive.central as u64
+            )
+        } else {
+            matches!(
+                result,
+                Err(FrameError::PolicyViolation {
+                    position,
+                    violation: IndexPolicyViolation::MemberComment { rule },
+                }) if position == archive.central as u64 && rule == per_member
+            )
+        };
+        assert!(expected, "{per_member:?}, flags={flags:#x}: {result:?}");
     }
 }
 
@@ -1696,8 +1741,10 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     // Even an unselected member with a Stored descriptor must fail at open.
     assert!(matches!(
         Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowListed)).await,
-        Err(FrameError::Unsupported { position, feature: "data descriptor for Stored member" })
-            if position == (central + first.end - first.central) as u64
+        Err(FrameError::PolicyViolation {
+            position,
+            violation: IndexPolicyViolation::StoredDataDescriptor,
+        }) if position == (central + first.end - first.central) as u64
     ));
     let mut ordered = Index::read_with_policy(&mut source, all_features()).await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);

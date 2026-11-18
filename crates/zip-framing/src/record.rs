@@ -3,10 +3,13 @@ use std::{
     str,
 };
 
-use memchr::{memchr, memchr2};
+use memchr::memchr;
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncSeek, AsyncSeekExt};
 
-use crate::{CompressionMethod, Error, add, constants::version, invalid};
+use crate::{
+    CompressionMethod, Error, IndexPolicyViolation, add, constants::version, invalid,
+    policy_violation,
+};
 
 /// A bounded read-ahead window that survives absolute seeks within the window.
 /// Ordinary buffered readers discard their buffer on those seeks.
@@ -153,24 +156,21 @@ pub(crate) fn parse_name(
         return Err(invalid(position, "non-ASCII filename without UTF-8 flag"));
     }
 
-    validate_name(name, position, allow_backslashes)?;
+    validate_name(name, position)?;
+    if !allow_backslashes && memchr(b'\\', bytes).is_some() {
+        return Err(policy_violation(
+            position,
+            IndexPolicyViolation::BackslashInName,
+        ));
+    }
     Ok(name)
 }
 
 #[inline]
-pub(crate) fn validate_name(
-    name: &str,
-    position: u64,
-    allow_backslashes: bool,
-) -> Result<(), Error> {
+pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
     let bytes = name.as_bytes();
-    let forbidden_byte = if allow_backslashes {
-        memchr(0, bytes)
-    } else {
-        memchr2(0, b'\\', bytes)
-    };
     if name.starts_with('\u{feff}')
-        || forbidden_byte.is_some()
+        || memchr(0, bytes).is_some()
         || name.starts_with('/')
         || (bytes.len() >= 2 && bytes[0].is_ascii_alphabetic() && bytes[1] == b':')
     {
@@ -310,7 +310,7 @@ pub(crate) struct PayloadFields<S = u64> {
     pub(crate) uncompressed: S,
 }
 
-/// Payload declarations checked against the compression method and empty-member requirements.
+/// Payload declarations checked against the compression method and empty-member CRC.
 #[derive(Clone, Copy, Debug)]
 pub(crate) struct MemberPayload(PayloadFields);
 
@@ -319,7 +319,6 @@ impl PayloadFields {
         self,
         method: CompressionMethod,
         position: u64,
-        allow_empty_deflate_streams: bool,
     ) -> Result<MemberPayload, Error> {
         match method {
             CompressionMethod::Stored if self.compressed != self.uncompressed => {
@@ -336,16 +335,15 @@ impl PayloadFields {
         if self.uncompressed == 0 && self.crc != 0 {
             return Err(invalid(position, "empty member has nonzero CRC"));
         }
-        // APPNOTE 4.3.8 excludes file data for empty members.
-        if !allow_empty_deflate_streams && self.uncompressed == 0 && self.compressed != 0 {
-            return Err(invalid(position, "empty member has file data"));
-        }
-
         Ok(MemberPayload(self))
     }
 }
 
 impl MemberPayload {
+    pub(crate) fn has_empty_deflate_stream(self) -> bool {
+        self.0.uncompressed == 0 && self.0.compressed != 0
+    }
+
     pub(crate) fn fields(self) -> PayloadFields {
         self.0
     }

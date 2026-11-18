@@ -4,9 +4,9 @@ use memchr::memmem;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, Error, ExtraFieldPolicy, Limits, add,
+    Budget, Error, ExtraFieldPolicy, IndexPolicyViolation, Limits, add,
     constants::{extra, signature, size, version},
-    invalid,
+    invalid, policy_violation,
     record::{GeneralPurposeFlags, RecordReader, array_at},
 };
 
@@ -79,18 +79,26 @@ impl CommentRule {
             return Ok(());
         }
         let utf8 = member_flags.map(|flags| flags.contains(GeneralPurposeFlags::UTF8));
-        let unsupported = |feature| Error::Unsupported { position, feature };
-        match (self, utf8) {
-            (Self::Reject, _) => Err(unsupported("nonempty comment")),
-            (Self::AllowAscii, _) | (Self::AllowUtf8, Some(false)) => bytes
-                .is_ascii()
-                .then_some(())
-                .ok_or_else(|| unsupported("non-ASCII comment")),
-            (Self::AllowUtf8, _) | (Self::AllowAll, Some(true)) => str::from_utf8(bytes)
-                .map(|_| ())
-                .map_err(|_| invalid(position, "non-UTF-8 comment")),
-            (Self::AllowAll, _) => Ok(()),
+        if utf8 == Some(true) && str::from_utf8(bytes).is_err() {
+            return Err(invalid(position, "non-UTF-8 comment"));
         }
+
+        let accepted = match (self, utf8) {
+            (Self::Reject, _) => false,
+            (Self::AllowAscii, _) | (Self::AllowUtf8, Some(false)) => bytes.is_ascii(),
+            (Self::AllowUtf8, None) => str::from_utf8(bytes).is_ok(),
+            (Self::AllowUtf8, Some(true)) | (Self::AllowAll, _) => true,
+        };
+        if accepted {
+            return Ok(());
+        }
+
+        let violation = if member_flags.is_some() {
+            IndexPolicyViolation::MemberComment { rule: self }
+        } else {
+            IndexPolicyViolation::ArchiveComment { rule: self }
+        };
+        Err(policy_violation(position, violation))
     }
 }
 

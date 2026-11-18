@@ -3,11 +3,13 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy, add,
+    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy,
+    IndexPolicyViolation, add,
     constants::{signature, size},
     extra::{Extras, Header},
     invalid,
     kind::{ExternalAttributes, UnixFileType},
+    policy_violation,
     record::{
         Common, GeneralPurposeFlags, MemberHeader, MemberPayload, PayloadFields, RecordReader,
         array_at, bytes_at, parse_name,
@@ -190,15 +192,6 @@ impl CentralDirectoryEntry {
         let header_fields =
             MemberHeader::parse(&array_at::<6, { MemberHeader::SIZE }, _>(header), position)?;
         let common = header_fields.common;
-        if common.method == CompressionMethod::Stored
-            && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
-            && !policy.allow_stored_data_descriptors
-        {
-            return Err(Error::Unsupported {
-                position,
-                feature: "data descriptor for Stored member",
-            });
-        }
         let internal_attributes = u16::from_le_bytes(array_at::<36, 2, _>(header));
         if internal_attributes & Self::RECORD_ORIENTED != 0 {
             return Err(Error::Unsupported {
@@ -214,12 +207,26 @@ impl CentralDirectoryEntry {
         let extras = if raw_extra.is_empty() {
             Extras::default()
         } else {
-            Extras::parse(raw_extra, Header::Central, position, policy.extra_fields)?
+            Extras::parse(raw_extra, Header::Central, position)?
         };
         let (fields, local_offset) =
             extras.central_payload(header_fields, offset, disk, position)?;
-        let payload =
-            fields.validate(common.method, position, policy.allow_empty_deflate_streams)?;
+        let payload = fields.validate(common.method, position)?;
+        if common.method == CompressionMethod::Stored
+            && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
+            && !policy.allow_stored_data_descriptors
+        {
+            return Err(policy_violation(
+                position,
+                IndexPolicyViolation::StoredDataDescriptor,
+            ));
+        }
+        if !policy.allow_empty_deflate_streams && payload.has_empty_deflate_stream() {
+            return Err(policy_violation(
+                position,
+                IndexPolicyViolation::EmptyDeflateStream,
+            ));
+        }
         policy
             .comments
             .per_member
@@ -227,6 +234,7 @@ impl CentralDirectoryEntry {
         if extras.needs_reconciliation() {
             extras.check_name(path, position)?;
             extras.comment(comment, position)?;
+            extras.check_policy(policy.extra_fields, position)?;
         }
 
         budget.charge_member(payload.fields().uncompressed)?;
@@ -250,10 +258,10 @@ impl CentralDirectoryEntry {
             && entry.host_system() != HostSystem::Unix
             && !policy.allow_ambiguous_symlink_modes
         {
-            return Err(Error::Unsupported {
+            return Err(policy_violation(
                 position,
-                feature: "symlink mode from a non-Unix creator system",
-            });
+                IndexPolicyViolation::AmbiguousSymlinkMode,
+            ));
         }
 
         Ok(BufferedEntry::Complete(entry, size::CENTRAL + length))
@@ -361,12 +369,7 @@ impl IndexedEntry {
             )
             .await?;
 
-        let extras = Extras::parse(
-            &variable[name_length..],
-            Header::Local,
-            position,
-            extra_fields,
-        )?;
+        let extras = Extras::parse(&variable[name_length..], Header::Local, position)?;
         let fields = extras.local_payload(header_fields, position)?;
         let zip64 = extras.has_zip64() || directory.has_zip64_extra;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
@@ -375,9 +378,10 @@ impl IndexedEntry {
             return Err(invalid(position, "local and central filenames disagree"));
         }
         extras.check_name(&directory.path, position)?;
+        extras.check_policy(extra_fields, position)?;
 
         let unix_data = extras.resolve(
-            Extras::parse(&directory.extra, Header::Central, position, extra_fields)?,
+            Extras::parse(&directory.extra, Header::Central, position)?,
             position,
         )?;
 

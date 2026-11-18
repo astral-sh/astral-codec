@@ -21,8 +21,8 @@ pub use archive_trait::{
     Members, NameValidator, SpecialKind, TraversalError, builder, default_name_validator, extract,
 };
 pub use decode::{
-    CommentPolicy, CommentRule, DecodeError, DecodePolicy, ExtraFieldPolicy, Limits, ZipArchive,
-    ZipMemberPayload,
+    CommentPolicy, CommentRule, DecodeError, DecodePolicy, ExtraFieldPolicy, ExtraHeaderId,
+    IndexPolicyViolation, Limits, ZipArchive, ZipMemberPayload,
 };
 pub use encode::{EncodeError, EncodeLimits, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{
