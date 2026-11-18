@@ -101,9 +101,13 @@ impl EncodeLimits {
 
 /// A streaming UTF-8 ZIP64 writer for [`ArchiveBuilder::builder`].
 ///
-/// Output must be seekable, empty, and positioned at byte zero. Payloads are
-/// streamed; only bounded directory metadata is retained. Local headers are
-/// filled in after each payload, once its CRC and compressed size are known.
+/// Output must be seekable, empty, and positioned at byte zero. Writes after a
+/// seek must start at the selected position. Files opened in append mode
+/// (`O_APPEND`) are unsupported because every write goes to the end of the file.
+///
+/// The encoder streams each payload, then seeks back to overwrite its reserved
+/// local header with the final CRC and compressed size. It retains only bounded
+/// directory metadata.
 pub struct ZipEncoder<W> {
     writer: W,
     method: CompressionMethod,
