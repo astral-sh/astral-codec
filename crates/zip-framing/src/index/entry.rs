@@ -78,6 +78,8 @@ pub(super) struct ResolvedMember {
 pub struct CentralDirectoryEntry {
     /// The member's path.
     path: Box<str>,
+    /// The extraction version declared by the central directory entry.
+    version_needed: u16,
     /// Common (fixed size) metadata in a central directory entry.
     common: Common,
     /// The CRC and final sizes after resolving ZIP64 sentinels.
@@ -155,9 +157,9 @@ impl CentralDirectoryEntry {
         self.attributes
     }
 
-    /// Returns the version needed to extract this member.
+    /// Returns the extraction version declared by the central directory entry.
     pub fn version_needed(&self) -> u16 {
-        self.common.version
+        self.version_needed
     }
 
     /// Parses one complete record in the read-ahead window. If it straddles
@@ -232,6 +234,7 @@ impl CentralDirectoryEntry {
         budget.charge_member(payload.fields().uncompressed)?;
         let entry = Self {
             path: path.into(),
+            version_needed: header_fields.version,
             common,
             payload,
             local_offset,
