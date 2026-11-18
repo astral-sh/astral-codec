@@ -213,8 +213,6 @@ pub struct Index {
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
-    /// The same policy applies to the directory and all subsequent local reads.
-    extra_fields: ExtraFieldPolicy,
     /// Scratch space for local records, cleared between resolutions.
     buffer: Vec<u8>,
 }
@@ -320,7 +318,6 @@ impl Index {
             resolved: Vec::new(),
             entries,
             budget,
-            extra_fields: policy.extra_fields,
             buffer: Vec::new(),
         })
     }
@@ -357,7 +354,7 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(&mut buffered, &mut pending_budget, self.extra_fields)
+                    .read_local(&mut buffered, &mut pending_budget)
                     .await?;
                 self.budget = pending_budget;
                 slot.insert(resolved)
