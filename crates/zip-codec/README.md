@@ -51,7 +51,7 @@ ZipArchive::open(reader).await?
 ```
 
 - To configure resource limits and accepted ZIP features, pass a `DecodePolicy` to
-  `ZipArchive::with_policy(reader, policy).await?`.
+  `ZipArchive::open_with_policy(reader, policy).await?`.
 - Use `ExtractPolicy` to control how archive members are written to disk.
 
 For random access, `ZipArchive::entries` lists central-directory entries and

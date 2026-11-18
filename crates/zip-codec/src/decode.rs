@@ -5,10 +5,9 @@ use std::io::{self, SeekFrom};
 use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind};
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
-use zip_framing::{
-    CommentPolicy, Entry, EntryKind, ExtraFieldPolicy, Index, IndexPolicy, IndexedEntry, Limits,
-    constants::attributes,
-};
+use zip_framing::{Entry, EntryKind, Index, IndexPolicy, IndexedEntry, constants::attributes};
+
+pub use zip_framing::{CommentPolicy, CommentRule, ExtraFieldPolicy, Limits};
 
 use crate::payload::{CHUNK_SIZE, Payload};
 
@@ -18,7 +17,7 @@ pub struct ZipArchive<R> {
     poisoned: bool,
 }
 
-/// Controls resource limits and which ZIP features [`ZipArchive::with_policy`] accepts.
+/// Controls resource limits and which ZIP features [`ZipArchive::open_with_policy`] accepts.
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
 pub struct DecodePolicy {
@@ -57,18 +56,15 @@ impl DecodePolicy {
         self
     }
 
-    /// [Rejects empty DEFLATE streams](IndexPolicy::reject_empty_deflate_streams).
+    /// Allows [empty DEFLATE streams](IndexPolicy::allow_empty_deflate_streams).
     ///
-    /// Enabling this option enforces the empty-member rule in [APPNOTE §4.3.8].
-    /// The default accepts valid empty DEFLATE streams.
-    ///
-    /// This is **disabled by default** because many ZIP emitters ignore this rule
-    /// and emit an empty raw DEFLATE stream (2 bytes) or a final empty block
-    /// (5 bytes) despite the actual member being empty.
+    /// This is **enabled by default** for compatibility with ZIP emitters that
+    /// write a valid DEFLATE stream for an empty member. Disable it to require
+    /// zero compressed bytes for empty DEFLATE members under [APPNOTE §4.3.8].
     ///
     /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
-    pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
-        self.framing = self.framing.reject_empty_deflate_streams(reject);
+    pub fn allow_empty_deflate_streams(mut self, allow: bool) -> Self {
+        self.framing = self.framing.allow_empty_deflate_streams(allow);
         self
     }
 
@@ -91,12 +87,15 @@ impl DecodePolicy {
 impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// Opens the archive with the default [`DecodePolicy`].
     pub async fn open(reader: R) -> Result<Self, DecodeError> {
-        Self::with_policy(reader, DecodePolicy::default()).await
+        Self::open_with_policy(reader, DecodePolicy::default()).await
     }
 
     /// Opens the archive and validates its central directory under the supplied [`DecodePolicy`].
     /// Local headers are checked on member access or by [`Self::validate_all`].
-    pub async fn with_policy(mut reader: R, policy: DecodePolicy) -> Result<Self, DecodeError> {
+    pub async fn open_with_policy(
+        mut reader: R,
+        policy: DecodePolicy,
+    ) -> Result<Self, DecodeError> {
         let index = Index::read_with_policy(&mut reader, policy.framing).await?;
 
         Ok(Self {
