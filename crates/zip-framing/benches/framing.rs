@@ -3,7 +3,7 @@ use std::{fmt, hint::black_box, io::Cursor};
 use divan::{Bencher, counter::ItemsCount};
 use tokio::runtime::{Builder as RuntimeBuilder, Runtime};
 use zip_framing::{
-    CompressionMethod, Index, Limits,
+    CompressionMethod, Index,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -103,7 +103,7 @@ fn validate_fixture(fixture: &Fixture, archive: &Vec<u8>, runtime: &Runtime) {
     assert_eq!(archive.capacity(), fixture.archive_capacity);
     runtime.block_on(async {
         let mut reader = Cursor::new(archive.as_slice());
-        let mut index = Index::read(&mut reader, Limits::default())
+        let mut index = Index::read(&mut reader)
             .await
             .expect("fixture directory should index");
         assert_eq!(index.entries().len(), fixture.paths.len());
@@ -139,10 +139,7 @@ fn index_directory(bencher: Bencher, fixture: &Fixture) {
         .bench_local(|| {
             black_box(
                 runtime
-                    .block_on(Index::read(
-                        &mut Cursor::new(black_box(archive.as_slice())),
-                        Limits::default(),
-                    ))
+                    .block_on(Index::read(&mut Cursor::new(black_box(archive.as_slice()))))
                     .expect("fixture directory should index"),
             );
         });
@@ -159,7 +156,7 @@ fn validate_local_records(bencher: Bencher, fixture: &Fixture) {
         .with_inputs(|| {
             let mut reader = Cursor::new(archive.as_slice());
             let index = runtime
-                .block_on(Index::read(&mut reader, Limits::default()))
+                .block_on(Index::read(&mut reader))
                 .expect("fixture directory should index");
             (reader, index)
         })

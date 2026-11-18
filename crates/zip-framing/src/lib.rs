@@ -29,15 +29,15 @@
 //!
 //! - APPNOTE 4.4.17.1 requires forward slashes as path separators. By default,
 //!   zip-framing rejects backslashes in member names. See
-//!   [`ReadOptions::allow_backslashes`].
+//!   [`IndexPolicy::allow_backslashes`].
 //!
 //! - By default, zip-framing rejects stored members that use a data descriptor,
 //!   since other streaming ZIP parsers frequently misinterpret them.
-//!   See [`ReadOptions::allow_stored_data_descriptors`].
+//!   See [`IndexPolicy::allow_stored_data_descriptors`].
 //!
 //! - By default, zip-framing does not honor symlink mode bits unless the host
 //!   system indicated by the "version made by" field indicates a UNIX host (3).
-//!   See [`ReadOptions::allow_ambiguous_symlink_modes`].
+//!   See [`IndexPolicy::allow_ambiguous_symlink_modes`].
 //!
 //! - zip-framing rejects members that have the "record-oriented" bit set in their
 //!   internal file attributes (APPNOTE 4.4.14.2).
@@ -66,7 +66,7 @@ pub use budget::{Budget, BudgetError, LimitExceeded, Limits};
 pub use extra::{ExtraFieldPolicy, ExtraHeaderId};
 pub use host::HostSystem;
 pub use index::{
-    CentralDirectoryEntry, CommentPolicy, CommentRule, Entry, Index, IndexedEntry, ReadOptions,
+    CentralDirectoryEntry, CommentPolicy, CommentRule, Entry, Index, IndexPolicy, IndexedEntry,
 };
 pub use kind::{DeviceNumbers, EntryKind};
 
