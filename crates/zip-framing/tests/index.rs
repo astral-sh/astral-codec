@@ -603,14 +603,16 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
         assert!(read_validated(&archive.bytes).await.is_err(), "{label}");
     }
 
+    let mut archive = Fixture::default().build();
     for flags in [2, 4, 6] {
-        let mut archive = Fixture {
-            flags: Some(flags),
-            ..Fixture::default()
-        }
-        .build();
-        read_validated(&archive.bytes).await?;
-        set16(&mut archive.bytes, 6, 0);
+        set16(&mut archive.bytes, 6, flags);
+        set16(&mut archive.bytes, archive.central + 8, flags);
+        read_validated_with(&mut Cursor::new(&archive.bytes), IndexPolicy::default()).await?;
+    }
+
+    set16(&mut archive.bytes, 6, 0);
+    for flags in [2, 4] {
+        set16(&mut archive.bytes, archive.central + 8, flags);
         assert!(matches!(
             read_validated(&archive.bytes).await,
             Err(FrameError::Invalid {
