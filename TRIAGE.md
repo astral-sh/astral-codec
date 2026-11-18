@@ -42,11 +42,16 @@ the same filename or comment for entries we accept.
 
 Section 4.3.8 requires zero bytes of file data for empty files and
 directories. A valid DEFLATE stream such as `03 00` occupies two bytes and
-decodes to zero bytes. Our reader accepts and validates that representation
-for empty files and directories. The writer emits both as Stored with zero
-payload bytes.
-[Reader test](crates/zip-codec/tests/decode.rs#L800) ·
-[Writer](crates/zip-codec/src/encode.rs#L358)
+decodes to zero bytes. The writer emits empty files and directories as Stored
+with zero payload bytes. [Writer](crates/zip-codec/src/encode.rs#L358)
+
+**Decision.** Accept and validate empty DEFLATE streams by default for
+compatibility with writers such as Python's `zipfile` and Go's `archive/zip`.
+Callers can reject those streams at archive open with
+`DecodePolicy::reject_empty_deflate_streams(true)` or by setting
+`ReadOptions::reject_empty_deflate_streams` to `true`.
+[PR #359](https://github.com/astral-sh/astral-codec/pull/359) ·
+[Reader test](crates/zip-codec/tests/decode.rs#L800)
 
 ## 4. Filename policy
 
