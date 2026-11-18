@@ -181,17 +181,14 @@ pub(crate) fn validate_name(name: &str, position: u64) -> Result<(), Error> {
 }
 
 /// General-purpose header flags (APPNOTE 4.4.4).
-///
-/// [`Self::parse`] rejects unsupported flags and flags inapplicable to the
-/// compression method.
-/// DEFLATE option bits are preserved for local/central comparison and serialization.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct GeneralPurposeFlags(u16);
 
 impl GeneralPurposeFlags {
     /// Member encryption (bit 0).
     const ENCRYPTED: Self = Self(0x0001);
-    /// Compression-level bits for DEFLATE members (bits 1 and 2).
+    /// DEFLATE compression-level bits (1 and 2). Info-ZIP 3.0 can leave these
+    /// set on Stored members. Both headers must still agree on their values.
     const DEFLATE_OPTIONS: Self = Self(0x0006);
     /// A descriptor follows the payload; local CRC and sizes are placeholders (bit 3).
     pub(crate) const DATA_DESCRIPTOR: Self = Self(0x0008);
@@ -204,12 +201,8 @@ impl GeneralPurposeFlags {
     /// Local header values are masked for central directory encryption (bit 13).
     const MASKED_HEADER: Self = Self(0x2000);
 
-    /// Validates the flag bits for the member's compression method.
-    pub(crate) fn parse(
-        bits: u16,
-        method: CompressionMethod,
-        position: u64,
-    ) -> Result<Self, Error> {
+    /// Validates the flags for a Stored or DEFLATE member.
+    pub(crate) fn parse(bits: u16, position: u64) -> Result<Self, Error> {
         let flags = Self(bits);
         if flags.contains(Self::ENCRYPTED)
             || flags.contains(Self::STRONG_ENCRYPTION)
@@ -228,13 +221,7 @@ impl GeneralPurposeFlags {
             });
         }
 
-        let allowed = Self::UTF8.0
-            | Self::DATA_DESCRIPTOR.0
-            | if method == CompressionMethod::Deflate {
-                Self::DEFLATE_OPTIONS.0
-            } else {
-                0
-            };
+        let allowed = Self::UTF8.0 | Self::DATA_DESCRIPTOR.0 | Self::DEFLATE_OPTIONS.0;
         if bits & !allowed != 0 {
             return Err(invalid(
                 position,
@@ -366,11 +353,8 @@ impl MemberHeader {
     pub(crate) fn parse(bytes: &[u8; Self::SIZE], position: u64) -> Result<Self, Error> {
         let method =
             CompressionMethod::parse(u16::from_le_bytes(array_at::<4, 2, _>(bytes)), position)?;
-        let flags = GeneralPurposeFlags::parse(
-            u16::from_le_bytes(array_at::<2, 2, _>(bytes)),
-            method,
-            position,
-        )?;
+        let flags =
+            GeneralPurposeFlags::parse(u16::from_le_bytes(array_at::<2, 2, _>(bytes)), position)?;
 
         let version = u16::from_le_bytes(array_at::<0, 2, _>(bytes));
         if version > version::ZIP64 {
@@ -472,7 +456,7 @@ mod tests {
         let header = MemberHeader {
             version: 20,
             common: Common {
-                flags: GeneralPurposeFlags::parse(0x080a, CompressionMethod::Deflate, 42)?,
+                flags: GeneralPurposeFlags::parse(0x080a, 42)?,
                 method: CompressionMethod::Deflate,
                 time: 0x1234,
                 date: 0x5678,

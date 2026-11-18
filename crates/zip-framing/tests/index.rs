@@ -629,8 +629,27 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
         assert!(read_validated(&archive.bytes).await.is_err(), "{label}");
     }
 
+    let mut archive = Fixture::default().build();
+    for flags in [2, 4, 6] {
+        set16(&mut archive.bytes, 6, flags);
+        set16(&mut archive.bytes, archive.central + 8, flags);
+        read_validated_with(&mut Cursor::new(&archive.bytes), IndexPolicy::default()).await?;
+    }
+
+    set16(&mut archive.bytes, 6, 0);
+    for flags in [2, 4] {
+        set16(&mut archive.bytes, archive.central + 8, flags);
+        assert!(matches!(
+            read_validated(&archive.bytes).await,
+            Err(FrameError::Invalid {
+                reason: "local and central headers disagree",
+                ..
+            })
+        ));
+    }
+
     for flags in [
-        1, 2, 4, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x1000, 0x2000, 0x4000, 0x8000,
+        1, 0x10, 0x20, 0x40, 0x80, 0x100, 0x200, 0x400, 0x1000, 0x2000, 0x4000, 0x8000,
     ] {
         let archive = Fixture {
             flags: Some(flags),
