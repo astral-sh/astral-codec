@@ -14,6 +14,11 @@ pub use zip_framing::{
 use crate::payload::{CHUNK_SIZE, Payload};
 
 /// An indexed ZIP archive over an immutable, seekable source.
+///
+/// If a decoding operation returns an error or is cancelled while in progress,
+/// subsequent decoding operations return [`DecodeError::Poisoned`]. This applies
+/// to member iteration and selection, payload consumption, metadata validation,
+/// and [`Self::reader_mut`].
 pub struct ZipArchive<R> {
     state: DecoderState<R>,
     poisoned: bool,

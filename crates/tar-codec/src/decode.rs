@@ -32,8 +32,8 @@ pub use tar_framing::{
 /// By default, member iteration validates final record padding and waits for
 /// EOF before reporting the end of the archive. See [`DecodePolicy::trailing_data_policy`].
 ///
-/// Member iteration is fused. After reaching the end of the archive or
-/// returning a decoding error, every subsequent attempt returns end-of-archive.
+/// Member iteration is fused. After [`ArchiveTrait::next_member`] returns
+/// `Ok(None)` or an error, later calls return `Ok(None)`.
 pub struct TarArchive<R> {
     reader: TarReader<R>,
     policy: DecodePolicy,
