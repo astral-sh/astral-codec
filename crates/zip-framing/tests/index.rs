@@ -38,14 +38,14 @@ fn all_features() -> IndexPolicy {
 }
 
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
-    read_validated_with(&mut Cursor::new(bytes), Limits::default()).await
+    read_validated_with(&mut Cursor::new(bytes), all_features()).await
 }
 
 async fn read_validated_with<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
-    limits: Limits,
+    policy: IndexPolicy,
 ) -> Result<Index, FrameError> {
-    let mut index = Index::read_with_policy(reader, all_features().limits(limits)).await?;
+    let mut index = Index::read_with_policy(reader, policy).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -681,69 +681,64 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         (0x7855, vec![0; 4], Vec::new()),
         (0x7875, vec![1, 1, 2, 1, 3], vec![1, 1, 2, 1, 3]),
     ] {
-        let archive = |central_extra| {
-            Fixture {
+        for (central, central_extra) in [(true, field(identifier, &directory)), (false, vec![])] {
+            let archive = Fixture {
                 zip64: true,
                 local_extra: field(identifier, &local),
                 central_extra,
                 ..Fixture::default()
             }
-            .build()
-        };
-
-        let both = archive(field(identifier, &directory));
-        let mut reader = Cursor::new(both.bytes);
-        assert!(
-            matches!(
-                Index::read(&mut reader).await,
-                Err(FrameError::PolicyViolation {
-                    position,
-                    violation: IndexPolicyViolation::ExtraField { identifier: rejected },
-                }) if position == both.central as u64 && u16::from(rejected) == identifier
-            ),
-            "{identifier:#06x}"
-        );
-        read_validated_with(&mut reader, Limits::default()).await?;
-
-        let mut reader = Cursor::new(archive(Vec::new()).bytes);
-        let mut index = Index::read(&mut reader).await?;
-        assert!(
-            matches!(
-                index.entry(&mut reader, 0).await,
-                Err(FrameError::PolicyViolation {
-                    position: 0,
-                    violation: IndexPolicyViolation::ExtraField { identifier: rejected },
-                }) if u16::from(rejected) == identifier
-            ),
-            "{identifier:#06x}"
-        );
+            .build();
+            let offset = if central { archive.central as u64 } else { 0 };
+            let mut reader = Cursor::new(archive.bytes);
+            let result = if central {
+                Index::read(&mut reader).await.map(|_| ())
+            } else {
+                let mut index = Index::read(&mut reader).await?;
+                index.entry(&mut reader, 0).await.map(|_| ())
+            };
+            assert!(
+                matches!(
+                    result,
+                    Err(FrameError::PolicyViolation {
+                        position,
+                        violation: IndexPolicyViolation::ExtraField { identifier: rejected },
+                    }) if position == offset && u16::from(rejected) == identifier
+                ),
+                "{identifier:#06x}, central={central}: {result:?}"
+            );
+            if central {
+                read_validated_with(&mut reader, all_features()).await?;
+            }
+        }
     }
 
-    let malformed = Fixture::default()
-        .with_extra(false, field(0x000d, &[0; 11]))
-        .build();
-    assert!(matches!(
-        Index::read(&mut Cursor::new(malformed.bytes)).await,
-        Err(FrameError::Invalid {
-            position,
-            reason: "truncated UNIX extra field",
-        }) if position == malformed.central as u64
-    ));
-
-    let missing_offset = Fixture {
-        zip64: true,
-        local_offset: u32::MAX,
-        central_extra: field(0x000d, &[0; 12]),
-        ..Fixture::default()
+    for (fixture, expected) in [
+        (
+            Fixture::default().with_extra(false, field(0x000d, &[0; 11])),
+            "truncated UNIX extra field",
+        ),
+        (
+            Fixture {
+                zip64: true,
+                local_offset: u32::MAX,
+                central_extra: field(0x000d, &[0; 12]),
+                ..Fixture::default()
+            },
+            "missing or superfluous ZIP64 values",
+        ),
+    ] {
+        let archive = fixture.build();
+        let result = Index::read(&mut Cursor::new(archive.bytes)).await;
+        assert!(
+            matches!(
+                result,
+                Err(FrameError::Invalid { position, reason })
+                    if position == archive.central as u64 && reason == expected
+            ),
+            "expected {expected}: {result:?}"
+        );
     }
-    .build();
-    assert!(matches!(
-        Index::read(&mut Cursor::new(missing_offset.bytes)).await,
-        Err(FrameError::Invalid {
-            position,
-            reason: "missing or superfluous ZIP64 values",
-        }) if position == missing_offset.central as u64
-    ));
 
     let mut missing_size = Fixture {
         zip64: true,
@@ -780,11 +775,7 @@ async fn rejects_unsupported_extras_in_either_header() {
             .build();
             let offset = if central { archive.central as u64 } else { 0 };
             for policy in [IndexPolicy::default(), all_features()] {
-                let mut source = Cursor::new(&archive.bytes);
-                let result = match Index::read_with_policy(&mut source, policy).await {
-                    Ok(mut index) => index.validate_all(&mut source).await,
-                    Err(error) => Err(error),
-                };
+                let result = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await;
                 assert!(
                     matches!(
                         result,
@@ -984,7 +975,7 @@ async fn enforces_resource_budgets_before_exposing_members() {
         ),
     ] {
         assert!(matches!(
-            read_validated_with(&mut Cursor::new(&bytes), limits).await,
+            read_validated_with(&mut Cursor::new(&bytes), all_features().limits(limits)).await,
             Err(FrameError::Limit(limit)) if limit == expected
         ));
     }
@@ -1388,7 +1379,7 @@ async fn bounds_end_record_search_with_short_reads() -> TestResult {
         let mut source = Observed::new(end_record(0, 0, 0, &comment));
         source.max_read = 3;
         assert!(
-            read_validated_with(&mut source, Limits::default())
+            read_validated_with(&mut source, all_features())
                 .await?
                 .entries()
                 .is_empty()
