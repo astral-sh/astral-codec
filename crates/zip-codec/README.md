@@ -6,7 +6,9 @@ This crate is a component of [astral-codec](https://github.com/astral-sh/astral-
 
 > [!IMPORTANT]
 >
-> This crate is in **very early development**. Expect bugs and sharp edges.
+> This crate is in a **very early** state of development and is **not**
+> considered ready for production use. You will encounter bugs, sharp edges,
+> etc.
 
 **Goals**
 
