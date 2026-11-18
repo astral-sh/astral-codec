@@ -6,7 +6,7 @@ use crate::{
     Error, IndexPolicyViolation,
     constants::extra,
     invalid, policy_violation,
-    record::{MemberHeader, PayloadFields, SizeField, bytes_at},
+    record::{MemberHeader, MemberPayload, PayloadFields, SizeField, bytes_at},
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -72,23 +72,125 @@ impl From<ExtraHeaderId> for u16 {
     }
 }
 
-#[derive(Default)]
-pub(crate) struct Extras<'a> {
+struct ParsedExtras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
     unix: UnixMetadata<'a>,
 }
 
+/// Checked central extra fields retained for reconciliation with the local header.
+/// An empty slice represents a header with no fields apart from ZIP64.
+#[derive(Debug)]
+pub(crate) struct RetainedCentralExtras(Box<[u8]>);
+
+/// The checked, resolved extra fields of a central header.
+pub(crate) struct CentralExtras<'a> {
+    pub(crate) payload: MemberPayload,
+    pub(crate) local_offset: u64,
+    pub(crate) has_zip64: bool,
+    retained: &'a [u8],
+}
+
+impl<'a> CentralExtras<'a> {
+    pub(crate) fn parse(
+        bytes: &'a [u8],
+        header: MemberHeader,
+        location: (u32, u16),
+        path: &str,
+        comment: &[u8],
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<Self, Error> {
+        let extras = ParsedExtras::parse(bytes, Header::Central, position)?;
+        let (offset, disk) = location;
+        let (fields, local_offset) = extras.central_payload(header, offset, disk, position)?;
+        let payload = fields.validate(header.common.method, position)?;
+        extras.validate(path, Some(comment), policy, position)?;
+        Ok(Self {
+            payload,
+            local_offset,
+            has_zip64: extras.zip64.is_some(),
+            retained: if extras.fields.is_empty() { &[] } else { bytes },
+        })
+    }
+
+    pub(crate) fn retain(self) -> RetainedCentralExtras {
+        RetainedCentralExtras(self.retained.into())
+    }
+}
+
+/// The checked, resolved extra fields of a local header.
+pub(crate) struct LocalExtras<'a> {
+    pub(crate) payload: PayloadFields,
+    extras: ParsedExtras<'a>,
+}
+
+impl<'a> LocalExtras<'a> {
+    pub(crate) fn parse(
+        bytes: &'a [u8],
+        header: MemberHeader,
+        path: &str,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<Self, Error> {
+        let extras = ParsedExtras::parse(bytes, Header::Local, position)?;
+        let payload = extras.local_payload(header, position)?;
+        extras.validate(path, None, policy, position)?;
+        Ok(Self { payload, extras })
+    }
+
+    pub(crate) fn has_zip64(&self) -> bool {
+        self.extras.zip64.is_some()
+    }
+
+    /// Reconciles local and central extra fields and returns the UNIX file-type bytes.
+    pub(crate) fn resolve(
+        self,
+        central: &'a RetainedCentralExtras,
+        position: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        let central = ParsedExtras::parse(&central.0, Header::Central, position)?;
+        self.extras.resolve(central, position)
+    }
+}
+
 #[derive(Clone, Copy)]
-pub(crate) enum Header {
+enum Header {
     Local,
     Central,
 }
 
-impl<'a> Extras<'a> {
-    pub(crate) fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
-        let mut extras = Self::default();
+impl<'a> ParsedExtras<'a> {
+    fn validate(
+        &self,
+        path: &str,
+        comment: Option<&[u8]>,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<(), Error> {
+        let Some(&identifier) = self.fields.keys().next() else {
+            return Ok(());
+        };
+        self.check_name(path, position)?;
+        if let Some(comment) = comment {
+            self.check_comment(comment, position)?;
+        }
+        if policy == ExtraFieldPolicy::Zip64Only {
+            return Err(policy_violation(
+                position,
+                IndexPolicyViolation::ExtraField { identifier },
+            ));
+        }
+        Ok(())
+    }
+
+    fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
+        let mut extras = Self {
+            zip64: None,
+            fields: BTreeMap::new(),
+            unix: UnixMetadata::default(),
+        };
 
         while !bytes.is_empty() {
             let Some((prefix, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
@@ -129,36 +231,7 @@ impl<'a> Extras<'a> {
         Ok(extras)
     }
 
-    pub(crate) fn check_policy(
-        &self,
-        policy: ExtraFieldPolicy,
-        position: u64,
-    ) -> Result<(), Error> {
-        if policy == ExtraFieldPolicy::Zip64Only
-            && let Some(&identifier) = self.fields.keys().next()
-        {
-            return Err(policy_violation(
-                position,
-                IndexPolicyViolation::ExtraField { identifier },
-            ));
-        }
-        Ok(())
-    }
-
-    /// Whether any fields need comparison beyond the resolved ZIP64 sizes.
-    pub(crate) fn needs_reconciliation(&self) -> bool {
-        !self.fields.is_empty()
-    }
-
-    pub(crate) fn has_zip64(&self) -> bool {
-        self.zip64.is_some()
-    }
-
-    pub(crate) fn local_payload(
-        &self,
-        header: MemberHeader,
-        position: u64,
-    ) -> Result<PayloadFields, Error> {
+    fn local_payload(&self, header: MemberHeader, position: u64) -> Result<PayloadFields, Error> {
         if (header.payload.uncompressed == SizeField::Zip64)
             != (header.payload.compressed == SizeField::Zip64)
         {
@@ -170,7 +243,7 @@ impl<'a> Extras<'a> {
     }
 
     #[inline]
-    pub(crate) fn central_payload(
+    fn central_payload(
         &self,
         header: MemberHeader,
         offset: u32,
@@ -248,7 +321,7 @@ impl<'a> Extras<'a> {
     }
 
     /// Checks Unicode metadata against an already validated filename.
-    pub(crate) fn check_name(&self, name: &str, position: u64) -> Result<(), Error> {
+    fn check_name(&self, name: &str, position: u64) -> Result<(), Error> {
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodePath) {
             let unicode = unicode_field(field, name.as_bytes(), position)?;
             if unicode != name {
@@ -262,7 +335,7 @@ impl<'a> Extras<'a> {
         Ok(())
     }
 
-    pub(crate) fn comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
+    fn check_comment(&self, bytes: &[u8], position: u64) -> Result<(), Error> {
         if let Some(field) = self.fields.get(&ExtraHeaderId::UnicodeComment)
             && unicode_field(field, bytes, position)?.as_bytes() != bytes
         {
@@ -276,7 +349,7 @@ impl<'a> Extras<'a> {
     }
 
     /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
-    pub(crate) fn resolve(self, central: Self, position: u64) -> Result<Option<Vec<u8>>, Error> {
+    fn resolve(self, central: Self, position: u64) -> Result<Option<Vec<u8>>, Error> {
         if self.fields.is_empty() && central.fields.is_empty() {
             return Ok(None);
         }
