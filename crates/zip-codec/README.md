@@ -1,32 +1,19 @@
 # zip-codec
 
-zip-codec is a constrained, asynchronous ZIP encoder and decoder for Rust.
+An asynchronous ZIP reader and writer for Rust. Reads classic ZIP and ZIP64
+archives and writes ZIP64 archives with Stored or DEFLATE members.
 
 This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
 
 > [!IMPORTANT]
 >
-> This crate is in a **very early** state of development and is **not**
-> considered ready for production use. You will encounter bugs, sharp edges,
-> etc.
+> This crate is in early development and is not ready for production use.
 
-**Goals**
+Both reading and writing require seekable I/O. Encrypted and multi-volume
+archives are unsupported. See the [security model](../../SECURITY.md#zip-codec)
+and PKWARE's [ZIP specification](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT).
 
-- Read classic ZIP and ZIP64 archives with indexed access to individual members
-- Write ZIP64 archives with Stored or DEFLATE members, streaming each payload
-- Support for a subset the ZIP format defined in PKWARE's
-  [APPNOTE-6.3.9.TXT](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT)
-
-**Anti-goals**
-
-- Reading or writing archives on non-seekable streams
-- Supporting encrypted or multi-volume archives
-
-See the [security model](../../SECURITY.md#zip-codec) as well.
-
-## Usage
-
-### Writing
+## Writing
 
 ```rust
 use zip_codec::{ArchiveBuilder as _, EntryMetadata, FilePayload, ZipEncoder};
@@ -39,10 +26,13 @@ encoder
 encoder.finish().await?;
 ```
 
-zip-codec implements [archive-trait](../archive-trait/README.md), so you can use
-`add_directory` and other APIs as well.
+Start with an empty writer at byte zero. The encoder seeks back to overwrite
+each local header, so files opened in append mode are unsupported.
 
-### Extraction
+The builder also supports `add_directory` and `add_directory_all` through
+[archive-trait](../archive-trait).
+
+## Extraction
 
 ```rust
 use zip_codec::{Archive as _, ZipArchive, extract::ExtractPolicy};
@@ -52,12 +42,11 @@ ZipArchive::open(reader).await?
     .await?;
 ```
 
-- To configure resource limits and accepted ZIP features, pass a `DecodePolicy` to
-  `ZipArchive::open_with_policy(reader, policy).await?`.
-- Use `ExtractPolicy` to control how archive members are written to disk.
+`ZipArchive::entries` lists members in central directory order. To read one
+member, pass its index to `ZipArchive::member`.
 
-For random access, `ZipArchive::entries` lists central-directory entries and
-`ZipArchive::member(index)` selects one by index.
+Use `ZipArchive::open_with_policy` to set reader limits and enable optional ZIP
+features. `ExtractPolicy` controls how members are written to disk.
 
 ## Performance
 

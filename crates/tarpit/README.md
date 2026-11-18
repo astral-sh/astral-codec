@@ -1,28 +1,23 @@
 # tarpit
 
-A CLI for inspecting and extracting tar streams.
+A development CLI for inspecting tar streams and debugging [tar-codec](../tar-codec).
 
 This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
 
-## Inspection
+## Usage
 
-Use `frames` to inspect the lossless physical block stream:
+Use `frames` to inspect individual tar blocks, or `logical` to see members
+with their paths, headers, PAX or GNU extensions, and payload blocks.
 
 ```shell
 cargo run -p tarpit -- frames archive.tar
-```
-
-Use `logical` to inspect assembled members with their effective paths, attached
-PAX or GNU metadata, ordinary header fields, and payload blocks:
-
-```shell
 cargo run -p tarpit -- logical archive.tar.gz
 ```
 
-Archives whose names end in `.tar.gz` are decompressed automatically.
+To extract an archive into a directory:
 
-> [!IMPORTANT]
-> `tarpit` is **not** suitable for general-purpose use.
-> It is a low-level inspection tool that is primarily useful
-> for looking at the format of tar streams and for diagnosing
-> [tar-codec](https://github.com/astral-sh/astral-codec/tree/main/crates/tar-codec) itself.
+```shell
+cargo run -p tarpit -- extract archive.tar destination
+```
+
+All three commands decompress files whose names end in `.tar.gz`.
