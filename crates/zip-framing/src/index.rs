@@ -113,16 +113,30 @@ impl Default for CommentPolicy {
 }
 
 /// Controls resource limits and compatibility when indexing a ZIP archive.
-#[derive(Clone, Copy, Debug, Default)]
+#[derive(Clone, Copy, Debug)]
 #[must_use]
 pub struct IndexPolicy {
     limits: Limits,
     extra_fields: ExtraFieldPolicy,
     comments: CommentPolicy,
     allow_stored_data_descriptors: bool,
-    reject_empty_deflate_streams: bool,
+    allow_empty_deflate_streams: bool,
     allow_ambiguous_symlink_modes: bool,
     allow_backslashes: bool,
+}
+
+impl Default for IndexPolicy {
+    fn default() -> Self {
+        Self {
+            limits: Limits::default(),
+            extra_fields: ExtraFieldPolicy::default(),
+            comments: CommentPolicy::default(),
+            allow_stored_data_descriptors: false,
+            allow_empty_deflate_streams: true,
+            allow_ambiguous_symlink_modes: false,
+            allow_backslashes: false,
+        }
+    }
 }
 
 impl IndexPolicy {
@@ -150,14 +164,14 @@ impl IndexPolicy {
         self
     }
 
-    /// Rejects empty DEFLATE streams under [APPNOTE §4.3.8].
+    /// Allows empty DEFLATE streams. Enabled by default.
     ///
-    /// When enabled, DEFLATE members with zero uncompressed size must also
-    /// have zero compressed size. Disabled by default.
+    /// Disable to require zero compressed bytes for empty DEFLATE members
+    /// under [APPNOTE §4.3.8].
     ///
     /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
-    pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
-        self.reject_empty_deflate_streams = reject;
+    pub fn allow_empty_deflate_streams(mut self, allow: bool) -> Self {
+        self.allow_empty_deflate_streams = allow;
         self
     }
 

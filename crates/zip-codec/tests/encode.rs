@@ -187,7 +187,7 @@ async fn enforces_the_metadata_limit_before_writing() -> TestResult {
             metadata_size,
             ..Limits::default()
         });
-        let mut archive = ZipArchive::with_policy(output, policy).await?;
+        let mut archive = ZipArchive::open_with_policy(output, policy).await?;
         archive.validate_all().await?;
         assert_eq!(archive.entries().len(), paths.len());
     }
