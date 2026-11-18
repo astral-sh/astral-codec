@@ -253,12 +253,9 @@ pub trait Archive: Sized {
     /// wraps each payload in [`LentPayload`] to enforce the lending cursor
     /// contract even when a concrete payload type does not retain its lifetime.
     ///
-    /// In `tar-codec` and `zip-codec`, a member or payload error poisons the
-    /// archive. The failing call returns the original error and subsequent
-    /// decoding operations return `DecodeError::Poisoned`.
-    ///
-    /// Cancellation behavior depends on the format. Tar can retry cancelled
-    /// reads. ZIP poisons the archive if an in-progress operation is cancelled.
+    /// Returns `Ok(None)` at the end of the archive. See the implementation's
+    /// documentation for whether reads can continue after a decoding error or
+    /// cancellation.
     async fn next_member<'a>(
         &'a mut self,
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
