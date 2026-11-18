@@ -341,6 +341,7 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
     ] {
         let archive = Fixture {
             name: Some(name.as_bytes().to_vec()),
+            version: matches!(expected, EntryKind::VolumeLabel).then_some(11),
             payload: Some(if matches!(expected, EntryKind::SymbolicLink { .. }) {
                 b"target".to_vec()
             } else {
@@ -464,6 +465,14 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
                 ..directory(b"")
             },
             "directory requires extraction version 2.0",
+        ),
+        (
+            Fixture {
+                made_by: Some(20),
+                version: Some(10),
+                ..volume(b"")
+            },
+            "volume label requires extraction version 1.1",
         ),
         (link(b""), "empty symbolic-link target"),
         (
