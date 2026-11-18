@@ -75,8 +75,9 @@ impl DecodePolicy {
         self
     }
 
-    /// Allows [empty Stored directories with extraction version 1.0](IndexPolicy::allow_version_1_directories).
-    /// Disabled by default.
+    /// Allows empty Stored directories with extraction version 1.0. Disabled by default.
+    ///
+    /// See [`IndexPolicy::allow_version_1_directories`].
     pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
         self.framing = self.framing.allow_version_1_directories(allow);
         self

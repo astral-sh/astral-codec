@@ -186,7 +186,7 @@ impl IndexPolicy {
     }
 
     /// Allows empty Stored directories that declare extraction version 1.0.
-    /// Info-ZIP writes these even though APPNOTE 4.4.3.2 requires 2.0 for
+    /// Info-ZIP 3.0 writes these even though APPNOTE 4.4.3.2 requires 2.0 for
     /// directories. Disabled by default.
     pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
         self.allow_version_1_directories = allow;
@@ -367,12 +367,11 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(
-                        &mut buffered,
-                        &mut pending_budget,
-                        self.allow_version_1_directories,
-                    )
+                    .read_local(&mut buffered, &mut pending_budget)
                     .await?;
+                resolved
+                    .kind
+                    .check_version(indexed.directory(), self.allow_version_1_directories)?;
                 self.budget = pending_budget;
                 slot.insert(resolved)
             }

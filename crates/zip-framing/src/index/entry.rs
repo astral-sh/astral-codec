@@ -69,7 +69,7 @@ impl Entry<'_> {
 pub(super) struct ResolvedMember {
     data_offset: u64,
     has_unix_extra: bool,
-    kind: EntryKind,
+    pub(super) kind: EntryKind,
     unix_mode: u16,
 }
 
@@ -334,7 +334,6 @@ impl IndexedEntry {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        allow_version_1_directories: bool,
     ) -> Result<ResolvedMember, Error> {
         let directory = &self.directory;
         let boundary = self.boundary;
@@ -406,12 +405,7 @@ impl IndexedEntry {
         Ok(ResolvedMember {
             data_offset,
             has_unix_extra: unix_data.is_some(),
-            kind: EntryKind::resolve(
-                directory,
-                unix_data,
-                &attributes,
-                allow_version_1_directories,
-            )?,
+            kind: EntryKind::resolve(directory, unix_data, &attributes)?,
             unix_mode: attributes.unix_mode,
         })
     }

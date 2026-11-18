@@ -1,6 +1,6 @@
 use crate::{
-    CentralDirectoryEntry, CompressionMethod, Error, HostSystem, IndexPolicyViolation,
-    constants::version, invalid, policy_violation, record::array_at, wire::wire_enum,
+    CentralDirectoryEntry, Error, HostSystem, IndexPolicyViolation, constants::version, invalid,
+    policy_violation, record::array_at, wire::wire_enum,
 };
 
 /// A ZIP member's kind, determined from its reconciled metadata.
@@ -48,7 +48,6 @@ impl EntryKind {
         directory: &CentralDirectoryEntry,
         unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
-        allow_version_1_directories: bool,
     ) -> Result<Self, Error> {
         let position = directory.position();
         let has_directory_suffix = directory.path().ends_with('/');
@@ -79,29 +78,6 @@ impl EntryKind {
             && directory.size() != 0
         {
             return Err(invalid(position, "non-file member has payload data"));
-        }
-
-        if attributes.dos_volume_label && directory.version_needed() < version::V1_1 {
-            return Err(invalid(
-                position,
-                "volume label requires extraction version 1.1",
-            ));
-        }
-        if file_type == UnixFileType::Directory && directory.version_needed() < version::V2_0 {
-            if directory.version_needed() != version::BASE
-                || directory.method() != CompressionMethod::Stored
-            {
-                return Err(invalid(
-                    position,
-                    "directory requires extraction version 2.0",
-                ));
-            }
-            if !allow_version_1_directories {
-                return Err(policy_violation(
-                    position,
-                    IndexPolicyViolation::Version1Directory,
-                ));
-            }
         }
 
         if file_type == UnixFileType::SymbolicLink && directory.size() == 0 && unix_data.is_none() {
@@ -138,6 +114,32 @@ impl EntryKind {
             UnixFileType::Socket => Self::Socket,
             UnixFileType::Unknown(mode) => Self::Unknown { mode },
         })
+    }
+
+    /// Checks the extraction version requirements specific to the resolved kind.
+    pub(crate) fn check_version(
+        &self,
+        directory: &CentralDirectoryEntry,
+        allow_version_1_directories: bool,
+    ) -> Result<(), Error> {
+        let position = directory.position();
+        match (self, directory.version_needed()) {
+            (Self::VolumeLabel, ..version::V1_1) => Err(invalid(
+                position,
+                "volume label requires extraction version 1.1",
+            )),
+            // Header parsing already requires version 2.0 for DEFLATE.
+            (Self::Directory, version::BASE) if allow_version_1_directories => Ok(()),
+            (Self::Directory, version::BASE) => Err(policy_violation(
+                position,
+                IndexPolicyViolation::Version1Directory,
+            )),
+            (Self::Directory, ..version::V2_0) => Err(invalid(
+                position,
+                "directory requires extraction version 2.0",
+            )),
+            _ => Ok(()),
+        }
     }
 }
 

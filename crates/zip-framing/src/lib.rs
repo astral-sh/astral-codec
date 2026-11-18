@@ -25,7 +25,7 @@
 //!   standard input (APPNOTE 4.4.17.1).
 //!
 //! - Directory member names must end in `/` so readers can identify their type
-//!   from the filename alone. For empty Stored directories written by Info-ZIP
+//!   from the filename alone. For empty Stored directories written by Info-ZIP 3.0
 //!   with extraction version 1.0, see [`IndexPolicy::allow_version_1_directories`].
 //!
 //! - APPNOTE 4.4.17.1 requires forward slashes as path separators. By default,
