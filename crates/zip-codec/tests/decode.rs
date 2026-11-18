@@ -797,7 +797,16 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
 }
 
 #[tokio::test]
-async fn validates_empty_deflate_streams_in_directories() -> TestResult {
+async fn configures_empty_deflate_stream_policy() -> TestResult {
+    let policy = DecodePolicy::default().reject_empty_deflate_streams(true);
+    assert!(matches!(
+        ZipArchive::with_policy(Cursor::new(EMPTY_DEFLATE), policy).await,
+        Err(DecodeError::Framing(FrameError::Invalid {
+            reason: "empty member has file data",
+            ..
+        }))
+    ));
+
     let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
 
     assert!(matches!(
@@ -816,6 +825,17 @@ async fn validates_empty_deflate_streams_in_directories() -> TestResult {
         archive.member(1).await,
         Err(DecodeError::Integrity { .. })
     ));
+
+    let member = PendingMember::new(
+        "empty",
+        CompressionMethod::Deflate,
+        EntryKind::File { executable: false },
+    )?
+    .finish(0, 0, 0, 0)?;
+    let bytes = single_member_archive(member.local_header(), b"", member.central_header())?;
+    let mut archive = ZipArchive::with_policy(Cursor::new(bytes), policy).await?;
+    let payload = file_payload(archive.member(0).await?)?;
+    assert!(contents(payload).await?.is_empty());
 
     Ok(())
 }

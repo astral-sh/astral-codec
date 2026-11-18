@@ -23,8 +23,7 @@ that the member ranges cover the space before the central directory without
 gaps or overlaps. Payload decoding and CRC-32 verification belong to zip-codec.
 
 `Limits` bounds archive size, entry count, metadata, and declared output sizes.
-Pass `ReadOptions` to `Index::read_with_options` to enable features such as
-[member extra fields beyond ZIP64](../zip-codec/APPNOTE.md#member-extra-fields).
+Pass `ReadOptions` to `Index::read_with_options` for additional policy controls.
 
 ## Writing
 

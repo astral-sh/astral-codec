@@ -11,11 +11,9 @@ type TestResult = Result<(), Box<dyn Error>>;
 #[test]
 fn rejects_invalid_member_headers() {
     let file = EntryKind::File { executable: false };
-    let oversized = "x".repeat(usize::from(u16::MAX) + 1);
 
     for (path, method, kind) in [
         ("", CompressionMethod::Stored, file),
-        (oversized.as_str(), CompressionMethod::Stored, file),
         ("back\\slash", CompressionMethod::Stored, file),
         ("café\0file", CompressionMethod::Stored, file),
         ("café\\file", CompressionMethod::Stored, file),
@@ -35,6 +33,29 @@ fn rejects_invalid_member_headers() {
             Err(FrameError::Invalid { position: 0, .. })
         ));
     }
+}
+
+#[test]
+fn bounds_central_directory_entry_size() -> TestResult {
+    // The UTF-8 characters and trailing slash make a 65,461-byte filename.
+    let mut path = format!("{}/", "é".repeat(32_730));
+    let method = CompressionMethod::Stored;
+    let kind = EntryKind::Directory;
+
+    let member = PendingMember::new(&path, method, kind)?;
+    assert_eq!(member.central_header_size(), 65_535);
+    assert_eq!(member.finish(0, 0, 0, 0)?.central_header().len(), 65_535);
+
+    path.insert(0, 'x');
+    assert!(matches!(
+        PendingMember::new(&path, method, kind),
+        Err(FrameError::Invalid {
+            position: 0,
+            reason: "empty or oversized filename",
+        })
+    ));
+
+    Ok(())
 }
 
 #[test]
