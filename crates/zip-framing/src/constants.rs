@@ -67,6 +67,8 @@ pub mod extra {
 pub mod version {
     /// ZIP 1.0, the baseline extraction version.
     pub const BASE: u16 = 10;
+    /// ZIP 1.1, required for DOS volume labels.
+    pub const V1_1: u16 = 11;
     /// ZIP 2.0, required for DEFLATE and directory entries.
     pub const V2_0: u16 = 20;
     /// ZIP 4.5, required for ZIP64.

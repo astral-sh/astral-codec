@@ -80,6 +80,12 @@ impl EntryKind {
             return Err(invalid(position, "non-file member has payload data"));
         }
 
+        if attributes.dos_volume_label && directory.version_needed() < version::V1_1 {
+            return Err(invalid(
+                position,
+                "volume label requires extraction version 1.1",
+            ));
+        }
         if file_type == UnixFileType::Directory && directory.version_needed() < version::V2_0 {
             return Err(invalid(
                 position,
