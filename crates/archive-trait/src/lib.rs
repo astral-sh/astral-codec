@@ -220,6 +220,7 @@ impl<A: Archive> Members<A> {
     ///
     /// The returned payload borrows this cursor, so the cursor cannot advance
     /// until that member is dropped or consumed.
+    /// See [`Archive::next_member`] for behavior after an error or cancellation.
     pub async fn next<'a>(
         &'a mut self,
     ) -> Result<Option<Member<LentPayload<'a, A::Payload<'a>>>>, A::Error> {
@@ -251,6 +252,11 @@ pub trait Archive: Sized {
     /// [`Archive::members`] rather than call this hook directly: [`Members`]
     /// wraps each payload in [`LentPayload`] to enforce the lending cursor
     /// contract even when a concrete payload type does not retain its lifetime.
+    ///
+    /// The cursor's state after an error or cancellation depends on the format.
+    /// `tar-codec` returns `Ok(None)` on later calls to `next_member` after an
+    /// iteration error. `zip-codec` returns `DecodeError::Poisoned` on subsequent
+    /// decoding operations after a decoding error or cancellation.
     async fn next_member<'a>(
         &'a mut self,
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error>;
