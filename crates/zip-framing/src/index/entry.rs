@@ -3,10 +3,10 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy,
-    IndexPolicyViolation, add,
+    Budget, CompressionMethod, EntryKind, Error, HostSystem, IndexPolicy, IndexPolicyViolation,
+    add,
     constants::{signature, size},
-    extra::{CentralExtras, Extras},
+    extra::CentralExtras,
     invalid,
     kind::{ExternalAttributes, UnixFileType},
     policy_violation,
@@ -201,7 +201,7 @@ impl CentralDirectoryEntry {
         let (name, rest) = variable.split_at(name_length);
         let (raw_extra, comment) = rest.split_at(extra_length);
         let path = parse_name(name, common.flags, position, policy.allow_backslashes)?;
-        let (extra, payload, local_offset) = Extras::parse_central(
+        let (extra, payload, local_offset) = CentralExtras::parse(
             raw_extra,
             header_fields,
             (offset, disk),
@@ -331,7 +331,6 @@ impl IndexedEntry {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        extra_fields: ExtraFieldPolicy,
     ) -> Result<ResolvedMember, Error> {
         let directory = &self.directory;
         let boundary = self.boundary;
@@ -361,16 +360,12 @@ impl IndexedEntry {
         if &variable[..name_length] != directory.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
-        let (extras, fields) = Extras::parse_local(
+        let (fields, zip64, unix_data) = directory.extra.resolve_local(
             &variable[name_length..],
             header_fields,
             &directory.path,
-            extra_fields,
             position,
         )?;
-        let zip64 = extras.uses_zip64(&directory.extra);
-        let unix_data = extras.resolve(&directory.extra, position)?;
-
         if header_fields.common != directory.common {
             return Err(invalid(position, "local and central headers disagree"));
         }
