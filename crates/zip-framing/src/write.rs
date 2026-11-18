@@ -96,11 +96,7 @@ impl<'a> PendingMember<'a> {
             compressed,
             uncompressed,
         }
-        .validate(self.method, offset)?;
-
-        if uncompressed == 0 && compressed != 0 {
-            return Err(invalid(offset, "empty member has file data"));
-        }
+        .validate(self.method, offset, true)?;
 
         if matches!(self.kind, EntryKind::Directory) && uncompressed != 0 {
             return Err(invalid(offset, "directory has file data"));
