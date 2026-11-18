@@ -126,6 +126,9 @@ pub enum IndexPolicyViolation {
     /// A DEFLATE member with zero uncompressed size declares compressed bytes.
     #[error("empty DEFLATE stream")]
     EmptyDeflateStream,
+    /// An empty Stored directory declares extraction version 1.0.
+    #[error("directory declares extraction version 1.0")]
+    Version1Directory,
     /// A non-Unix creator supplied Unix symlink mode bits.
     #[error("symlink mode from a non-Unix creator system")]
     AmbiguousSymlinkMode,

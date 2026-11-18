@@ -69,7 +69,7 @@ impl Entry<'_> {
 pub(super) struct ResolvedMember {
     data_offset: u64,
     has_unix_extra: bool,
-    kind: EntryKind,
+    pub(super) kind: EntryKind,
     unix_mode: u16,
 }
 

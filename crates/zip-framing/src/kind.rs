@@ -1,6 +1,6 @@
 use crate::{
-    CentralDirectoryEntry, Error, HostSystem, constants::version, invalid, record::array_at,
-    wire::wire_enum,
+    CentralDirectoryEntry, Error, HostSystem, IndexPolicyViolation, constants::version, invalid,
+    policy_violation, record::array_at, wire::wire_enum,
 };
 
 /// A ZIP member's kind, determined from its reconciled metadata.
@@ -80,19 +80,6 @@ impl EntryKind {
             return Err(invalid(position, "non-file member has payload data"));
         }
 
-        if attributes.dos_volume_label && directory.version_needed() < version::V1_1 {
-            return Err(invalid(
-                position,
-                "volume label requires extraction version 1.1",
-            ));
-        }
-        if file_type == UnixFileType::Directory && directory.version_needed() < version::V2_0 {
-            return Err(invalid(
-                position,
-                "directory requires extraction version 2.0",
-            ));
-        }
-
         if file_type == UnixFileType::SymbolicLink && directory.size() == 0 && unix_data.is_none() {
             return Err(invalid(position, "empty symbolic-link target"));
         }
@@ -127,6 +114,32 @@ impl EntryKind {
             UnixFileType::Socket => Self::Socket,
             UnixFileType::Unknown(mode) => Self::Unknown { mode },
         })
+    }
+
+    /// Checks the extraction version requirements specific to the resolved kind.
+    pub(crate) fn check_version(
+        &self,
+        directory: &CentralDirectoryEntry,
+        allow_version_1_directories: bool,
+    ) -> Result<(), Error> {
+        let position = directory.position();
+        match (self, directory.version_needed()) {
+            (Self::VolumeLabel, ..version::V1_1) => Err(invalid(
+                position,
+                "volume label requires extraction version 1.1",
+            )),
+            // Header parsing already requires version 2.0 for DEFLATE.
+            (Self::Directory, version::BASE) if allow_version_1_directories => Ok(()),
+            (Self::Directory, version::BASE) => Err(policy_violation(
+                position,
+                IndexPolicyViolation::Version1Directory,
+            )),
+            (Self::Directory, ..version::V2_0) => Err(invalid(
+                position,
+                "directory requires extraction version 2.0",
+            )),
+            _ => Ok(()),
+        }
     }
 }
 
