@@ -61,6 +61,19 @@ fn file_payload<P>(member: Option<Member<P>>) -> io::Result<P> {
     }
 }
 
+#[track_caller]
+fn assert_policy_violation<T>(result: Result<T, DecodeError>, expected: IndexPolicyViolation) {
+    let result = result.map(|_| ());
+    assert!(
+        matches!(
+            result,
+            Err(DecodeError::Framing(FrameError::PolicyViolation { violation, .. }))
+                if violation == expected
+        ),
+        "expected policy rejection {expected:?}, got {result:?}"
+    );
+}
+
 async fn contents<P: MemberPayload<Error = DecodeError>>(
     mut payload: P,
 ) -> Result<Vec<u8>, DecodeError> {
@@ -118,11 +131,10 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
         } else {
             IndexPolicyViolation::ArchiveComment { rule: AllowAscii }
         };
-        assert!(matches!(
+        assert_policy_violation(
             ZipArchive::open(Cursor::new(&bytes)).await,
-            Err(DecodeError::Framing(FrameError::PolicyViolation { violation, .. }))
-                if violation == default_violation
-        ));
+            default_violation,
+        );
         for (archive, accepted) in [
             (Reject, comment.is_empty()),
             (AllowAscii, comment.is_ascii()),
@@ -133,21 +145,13 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
                 per_member: AllowAscii,
                 archive,
             });
-            let result = ZipArchive::open_with_policy(Cursor::new(&bytes), policy)
-                .await
-                .map(|_| ());
+            let result = ZipArchive::open_with_policy(Cursor::new(&bytes), policy).await;
             if accepted {
                 result?;
             } else {
-                assert!(
-                    matches!(
-                        &result,
-                        Err(DecodeError::Framing(FrameError::PolicyViolation {
-                            violation: IndexPolicyViolation::ArchiveComment { rule },
-                            ..
-                        })) if *rule == archive
-                    ),
-                    "{archive:?}, comment={comment:?}: {result:?}"
+                assert_policy_violation(
+                    result,
+                    IndexPolicyViolation::ArchiveComment { rule: archive },
                 );
             }
         }
@@ -163,13 +167,10 @@ async fn opts_in_to_literal_backslashes_in_member_names() -> TestResult {
     writer.write_all(b"payload")?;
     let bytes = writer.finish()?.into_inner();
 
-    assert!(matches!(
+    assert_policy_violation(
         ZipArchive::open(Cursor::new(&bytes)).await,
-        Err(DecodeError::Framing(FrameError::PolicyViolation {
-            violation: IndexPolicyViolation::BackslashInName,
-            ..
-        }))
-    ));
+        IndexPolicyViolation::BackslashInName,
+    );
 
     let policy = DecodePolicy::default().allow_backslashes(true);
     let mut archive = ZipArchive::open_with_policy(Cursor::new(&bytes), policy).await?;
@@ -737,13 +738,10 @@ async fn extracts_deflate_with_a_data_descriptor_by_default() -> TestResult {
 #[tokio::test]
 async fn rejects_stored_data_descriptors_at_open_by_default() {
     let bytes = include_bytes!("fixtures/stored-descriptor-ghost.zip");
-    assert!(matches!(
+    assert_policy_violation(
         ZipArchive::open(Cursor::new(bytes)).await,
-        Err(DecodeError::Framing(FrameError::PolicyViolation {
-            violation: IndexPolicyViolation::StoredDataDescriptor,
-            ..
-        }))
-    ));
+        IndexPolicyViolation::StoredDataDescriptor,
+    );
 }
 
 #[tokio::test]
@@ -755,13 +753,10 @@ async fn non_unix_symlink_modes_require_opt_in() -> TestResult {
         HostSystem::Unknown(30),
     ] {
         let bytes = member_with_attributes(b"target", host, 0o120666 << 16)?;
-        assert!(matches!(
+        assert_policy_violation(
             ZipArchive::open(Cursor::new(&bytes)).await,
-            Err(DecodeError::Framing(FrameError::PolicyViolation {
-                violation: IndexPolicyViolation::AmbiguousSymlinkMode,
-                ..
-            }))
-        ));
+            IndexPolicyViolation::AmbiguousSymlinkMode,
+        );
 
         let mut archive = ZipArchive::open_with_policy(Cursor::new(&bytes), policy).await?;
         let member = archive.next_member().await?;
@@ -779,15 +774,12 @@ async fn non_unix_symlink_modes_require_opt_in() -> TestResult {
 #[tokio::test]
 async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestResult {
     let bytes = include_bytes!("fixtures/unix-links.zip");
-    assert!(matches!(
+    assert_policy_violation(
         ZipArchive::open(Cursor::new(bytes)).await,
-        Err(DecodeError::Framing(FrameError::PolicyViolation {
-            violation: IndexPolicyViolation::ExtraField {
-                identifier: ExtraHeaderId::Unix,
-            },
-            ..
-        }))
-    ));
+        IndexPolicyViolation::ExtraField {
+            identifier: ExtraHeaderId::Unix,
+        },
+    );
     let policy = DecodePolicy::default().extra_field_policy(ExtraFieldPolicy::AllowListed);
     let limited = policy.limits(Limits {
         member_size: 0,
@@ -829,13 +821,10 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
 #[tokio::test]
 async fn configures_empty_deflate_stream_policy() -> TestResult {
     let policy = DecodePolicy::default().allow_empty_deflate_streams(false);
-    assert!(matches!(
+    assert_policy_violation(
         ZipArchive::open_with_policy(Cursor::new(EMPTY_DEFLATE), policy).await,
-        Err(DecodeError::Framing(FrameError::PolicyViolation {
-            violation: IndexPolicyViolation::EmptyDeflateStream,
-            ..
-        }))
-    ));
+        IndexPolicyViolation::EmptyDeflateStream,
+    );
 
     let mut archive = ZipArchive::open(Cursor::new(EMPTY_DEFLATE)).await?;
 
