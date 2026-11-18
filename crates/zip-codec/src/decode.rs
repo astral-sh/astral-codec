@@ -75,6 +75,13 @@ impl DecodePolicy {
         self
     }
 
+    /// Allows [empty Stored directories with extraction version 1.0](IndexPolicy::allow_version_1_directories).
+    /// Disabled by default.
+    pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
+        self.framing = self.framing.allow_version_1_directories(allow);
+        self
+    }
+
     /// Allows [Unix symlink modes from non-Unix creators](IndexPolicy::allow_ambiguous_symlink_modes).
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
         self.framing = self.framing.allow_ambiguous_symlink_modes(allow);

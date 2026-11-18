@@ -455,6 +455,31 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 }
 
 #[tokio::test]
+async fn version_1_directories_require_opt_in() -> TestResult {
+    let archive = Fixture {
+        version: Some(10),
+        ..Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
+    }
+    .build();
+    let mut source = Cursor::new(&archive.bytes);
+    let mut index = Index::read(&mut source).await?;
+    assert!(matches!(
+        index.entry(&mut source, 0).await,
+        Err(FrameError::PolicyViolation {
+            position: 0,
+            violation: IndexPolicyViolation::Version1Directory
+        })
+    ));
+
+    let policy = IndexPolicy::default().allow_version_1_directories(true);
+    let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
+    let entry = index.resolved(0).ok_or("unresolved entry")?;
+    assert_eq!(entry.kind(), &EntryKind::Directory);
+    assert_eq!(entry.directory().version_needed(), 10);
+    Ok(())
+}
+
+#[tokio::test]
 async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> TestResult {
     let member = Fixture::member;
     let link = |payload: &[u8]| member("link", 0o120777 << 16, payload);
@@ -487,7 +512,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         (volume(b"data"), non_file),
         (
             Fixture {
-                version: Some(10),
+                version: Some(11),
                 ..directory(b"")
             },
             "directory requires extraction version 2.0",
@@ -542,6 +567,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         let mut index = Index::read_with_policy(
             &mut source,
             IndexPolicy::default()
+                .allow_version_1_directories(true)
                 .limits(Limits {
                     metadata_size: (archive.end - archive.payload.len()) as u64,
                     ..Limits::default()

@@ -129,6 +129,7 @@ pub struct IndexPolicy {
     comments: CommentPolicy,
     allow_stored_data_descriptors: bool,
     allow_empty_deflate_streams: bool,
+    allow_version_1_directories: bool,
     allow_ambiguous_symlink_modes: bool,
     allow_backslashes: bool,
 }
@@ -141,6 +142,7 @@ impl Default for IndexPolicy {
             comments: CommentPolicy::default(),
             allow_stored_data_descriptors: false,
             allow_empty_deflate_streams: true,
+            allow_version_1_directories: false,
             allow_ambiguous_symlink_modes: false,
             allow_backslashes: false,
         }
@@ -183,6 +185,14 @@ impl IndexPolicy {
         self
     }
 
+    /// Allows empty Stored directories that declare extraction version 1.0.
+    /// Info-ZIP writes these even though APPNOTE 4.4.3.2 requires 2.0 for
+    /// directories. Disabled by default.
+    pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
+        self.allow_version_1_directories = allow;
+        self
+    }
+
     /// Allows Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
@@ -210,6 +220,8 @@ pub struct Index {
     entries: Vec<IndexedEntry>,
     /// Cached resolutions in directory order, allocated on first access.
     resolved: Vec<Option<ResolvedMember>>,
+    /// Whether local record validation accepts version 1.0 directories.
+    allow_version_1_directories: bool,
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
@@ -316,6 +328,7 @@ impl Index {
 
         Ok(Self {
             resolved: Vec::new(),
+            allow_version_1_directories: policy.allow_version_1_directories,
             entries,
             budget,
             buffer: Vec::new(),
@@ -354,7 +367,11 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(&mut buffered, &mut pending_budget)
+                    .read_local(
+                        &mut buffered,
+                        &mut pending_budget,
+                        self.allow_version_1_directories,
+                    )
                     .await?;
                 self.budget = pending_budget;
                 slot.insert(resolved)

@@ -25,7 +25,8 @@
 //!   standard input (APPNOTE 4.4.17.1).
 //!
 //! - Directory member names must end in `/` so readers can identify their type
-//!   from the filename alone.
+//!   from the filename alone. For empty Stored directories written by Info-ZIP
+//!   with extraction version 1.0, see [`IndexPolicy::allow_version_1_directories`].
 //!
 //! - APPNOTE 4.4.17.1 requires forward slashes as path separators. By default,
 //!   zip-framing rejects backslashes in member names. See
@@ -126,6 +127,9 @@ pub enum IndexPolicyViolation {
     /// A DEFLATE member with zero uncompressed size declares compressed bytes.
     #[error("empty DEFLATE stream")]
     EmptyDeflateStream,
+    /// An empty Stored directory declares extraction version 1.0.
+    #[error("directory declares extraction version 1.0")]
+    Version1Directory,
     /// A non-Unix creator supplied Unix symlink mode bits.
     #[error("symlink mode from a non-Unix creator system")]
     AmbiguousSymlinkMode,

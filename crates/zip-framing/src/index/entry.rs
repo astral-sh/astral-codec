@@ -334,6 +334,7 @@ impl IndexedEntry {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
+        allow_version_1_directories: bool,
     ) -> Result<ResolvedMember, Error> {
         let directory = &self.directory;
         let boundary = self.boundary;
@@ -405,7 +406,12 @@ impl IndexedEntry {
         Ok(ResolvedMember {
             data_offset,
             has_unix_extra: unix_data.is_some(),
-            kind: EntryKind::resolve(directory, unix_data, &attributes)?,
+            kind: EntryKind::resolve(
+                directory,
+                unix_data,
+                &attributes,
+                allow_version_1_directories,
+            )?,
             unix_mode: attributes.unix_mode,
         })
     }

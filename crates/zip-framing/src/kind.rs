@@ -1,6 +1,6 @@
 use crate::{
-    CentralDirectoryEntry, Error, HostSystem, constants::version, invalid, record::array_at,
-    wire::wire_enum,
+    CentralDirectoryEntry, CompressionMethod, Error, HostSystem, IndexPolicyViolation,
+    constants::version, invalid, policy_violation, record::array_at, wire::wire_enum,
 };
 
 /// A ZIP member's kind, determined from its reconciled metadata.
@@ -48,6 +48,7 @@ impl EntryKind {
         directory: &CentralDirectoryEntry,
         unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
+        allow_version_1_directories: bool,
     ) -> Result<Self, Error> {
         let position = directory.position();
         let has_directory_suffix = directory.path().ends_with('/');
@@ -87,10 +88,20 @@ impl EntryKind {
             ));
         }
         if file_type == UnixFileType::Directory && directory.version_needed() < version::V2_0 {
-            return Err(invalid(
-                position,
-                "directory requires extraction version 2.0",
-            ));
+            if directory.version_needed() != version::BASE
+                || directory.method() != CompressionMethod::Stored
+            {
+                return Err(invalid(
+                    position,
+                    "directory requires extraction version 2.0",
+                ));
+            }
+            if !allow_version_1_directories {
+                return Err(policy_violation(
+                    position,
+                    IndexPolicyViolation::Version1Directory,
+                ));
+            }
         }
 
         if file_type == UnixFileType::SymbolicLink && directory.size() == 0 && unix_data.is_none() {
