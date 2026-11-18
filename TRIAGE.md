@@ -81,8 +81,13 @@ The reader compares the packed fields in the local and central headers.
 Matching `0x0000` dates pass, even though they encode month and day zero.
 The decoded member model carries no timestamp. The writer emits midnight
 on January 1, 1980.
-[Header parsing](crates/zip-framing/src/record.rs#L394) ·
+[Header parsing](crates/zip-framing/src/record.rs#L399) ·
 [Writer defaults](crates/zip-framing/src/write.rs#L22)
+
+**Decision.** Treat the DOS timestamp as opaque metadata and require the two
+headers to agree. This preserves compatibility with Go's
+`archive/zip.Writer.Create`, which emits an all-zero date and time.
+[Go writer source](https://go.dev/src/archive/zip/writer.go)
 
 ## 6. DOS volume-label extraction version
 
