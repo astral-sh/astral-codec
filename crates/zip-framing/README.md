@@ -22,8 +22,9 @@ Use `Index::validate_all` to check every member's local records and verify
 that the member ranges cover the space before the central directory without
 gaps or overlaps. Payload decoding and CRC-32 verification belong to zip-codec.
 
-`Limits` bounds archive size, entry count, metadata, and declared output sizes.
-Pass `ReadOptions` to `Index::read_with_options` for additional policy controls.
+Pass an `IndexPolicy` to `Index::read_with_policy` to configure resource limits
+and which ZIP features the index accepts. `Limits` bounds archive size, entry
+count, metadata, and declared output sizes.
 
 ## Writing
 

@@ -2,7 +2,7 @@ use std::{error::Error, io::Cursor};
 
 use crc32fast::hash as crc32;
 use zip_framing::{
-    CompressionMethod, Error as FrameError, HostSystem, Index, Limits,
+    CompressionMethod, Error as FrameError, HostSystem, Index,
     write::{EntryKind, PendingMember, end_records},
 };
 
@@ -174,7 +174,7 @@ async fn serializes_consistent_zip64_records() -> TestResult {
     bytes.extend(end);
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read(&mut source).await?;
     assert_eq!(index.entries().len(), 1);
 
     let entry = index.entry(&mut source, 0).await?.ok_or("missing member")?;

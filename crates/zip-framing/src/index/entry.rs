@@ -3,7 +3,7 @@ use std::ops::Range;
 use tokio::io::{AsyncRead, AsyncSeek};
 
 use crate::{
-    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, ReadOptions, add,
+    Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy, add,
     constants::{signature, size},
     extra::{Extras, Header},
     invalid,
@@ -168,7 +168,7 @@ impl CentralDirectoryEntry {
         bytes: &[u8],
         position: u64,
         budget: &mut Budget,
-        options: ReadOptions,
+        policy: &IndexPolicy,
     ) -> Result<BufferedEntry, Error> {
         let Some((header, rest)) = bytes.split_first_chunk::<{ size::CENTRAL }>() else {
             return Ok(BufferedEntry::Incomplete(size::CENTRAL));
@@ -192,7 +192,7 @@ impl CentralDirectoryEntry {
         let common = header_fields.common;
         if common.method == CompressionMethod::Stored
             && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
-            && !options.allow_stored_data_descriptors
+            && !policy.allow_stored_data_descriptors
         {
             return Err(Error::Unsupported {
                 position,
@@ -210,20 +210,17 @@ impl CentralDirectoryEntry {
         let disk = u16::from_le_bytes(array_at::<34, 2, _>(header));
         let (name, rest) = variable.split_at(name_length);
         let (raw_extra, comment) = rest.split_at(extra_length);
-        let path = parse_name(name, common.flags, position, options.allow_backslashes)?;
+        let path = parse_name(name, common.flags, position, policy.allow_backslashes)?;
         let extras = if raw_extra.is_empty() {
             Extras::default()
         } else {
-            Extras::parse(raw_extra, Header::Central, position, options.extra_fields)?
+            Extras::parse(raw_extra, Header::Central, position, policy.extra_fields)?
         };
         let (fields, local_offset) =
             extras.central_payload(header_fields, offset, disk, position)?;
-        let payload = fields.validate(
-            common.method,
-            position,
-            options.reject_empty_deflate_streams,
-        )?;
-        options
+        let payload =
+            fields.validate(common.method, position, policy.reject_empty_deflate_streams)?;
+        policy
             .comments
             .per_member
             .check(comment, Some(common.flags), position)?;
@@ -251,7 +248,7 @@ impl CentralDirectoryEntry {
         let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
         if UnixFileType::from_mode(mode) == UnixFileType::SymbolicLink
             && entry.host_system() != HostSystem::Unix
-            && !options.allow_ambiguous_symlink_modes
+            && !policy.allow_ambiguous_symlink_modes
         {
             return Err(Error::Unsupported {
                 position,

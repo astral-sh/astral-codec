@@ -9,7 +9,7 @@ use zip_framing::{
     CommentRule::{AllowAll, AllowUtf8},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexedEntry, LimitExceeded, Limits, ReadOptions,
+    HostSystem, Index, IndexPolicy, IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -25,17 +25,17 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 }
 
 // Exercise the format checks for features that require an opt-in.
-const ALL_FEATURES: ReadOptions = ReadOptions {
-    extra_fields: AllowListed,
-    comments: CommentPolicy {
-        per_member: AllowAll,
-        archive: AllowAll,
-    },
-    allow_stored_data_descriptors: true,
-    reject_empty_deflate_streams: false,
-    allow_ambiguous_symlink_modes: true,
-    allow_backslashes: true,
-};
+fn all_features() -> IndexPolicy {
+    IndexPolicy::default()
+        .extra_field_policy(AllowListed)
+        .comment_policy(CommentPolicy {
+            per_member: AllowAll,
+            archive: AllowAll,
+        })
+        .allow_stored_data_descriptors(true)
+        .allow_ambiguous_symlink_modes(true)
+        .allow_backslashes(true)
+}
 
 async fn read_validated(bytes: &[u8]) -> Result<Index, FrameError> {
     read_validated_with(&mut Cursor::new(bytes), Limits::default()).await
@@ -45,7 +45,7 @@ async fn read_validated_with<R: AsyncRead + AsyncSeek + Unpin>(
     reader: &mut R,
     limits: Limits,
 ) -> Result<Index, FrameError> {
-    let mut index = Index::read_with_options(reader, limits, ALL_FEATURES).await?;
+    let mut index = Index::read_with_policy(reader, all_features().limits(limits)).await?;
     index.validate_all(reader).await?;
     Ok(index)
 }
@@ -241,7 +241,7 @@ async fn reconciles_each_concrete_zip64_end_field() -> TestResult {
             bytes[archive.end + 4..archive.end + 20].fill(0xff);
             bytes[archive.end + offset..archive.end + offset + width]
                 .copy_from_slice(&value.to_le_bytes()[..width]);
-            let result = Index::read(&mut Cursor::new(bytes), Limits::default()).await;
+            let result = Index::read(&mut Cursor::new(bytes)).await;
             if valid {
                 assert_eq!(result?.entries().len(), 1);
             } else {
@@ -353,7 +353,7 @@ async fn resolves_member_kinds_and_caches_them_with_local_metadata() -> TestResu
         }
         .build();
         let mut source = Observed::new(archive.bytes);
-        let mut index = Index::read(&mut source, Limits::default()).await?;
+        let mut index = Index::read(&mut source).await?;
         assert!(index.resolved(0).is_none());
 
         let entry = index.entry(&mut source, 0).await?.ok_or("missing entry")?;
@@ -515,11 +515,12 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         let mut source = Cursor::new(&archive.bytes);
         let mut index = Index::read_with_policy(
             &mut source,
-            Limits {
-                metadata_size: (archive.end - archive.payload.len()) as u64,
-                ..Limits::default()
-            },
-            AllowListed,
+            IndexPolicy::default()
+                .limits(Limits {
+                    metadata_size: (archive.end - archive.payload.len()) as u64,
+                    ..Limits::default()
+                })
+                .extra_field_policy(AllowListed),
         )
         .await?;
 
@@ -551,7 +552,7 @@ async fn rejects_archive_extra_data_records() {
         }
         .build();
         assert!(matches!(
-            Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(&archive.bytes)).await,
             Err(FrameError::Unsupported { position, feature: "archive extra data record" })
                 if position == archive.central as u64
         ));
@@ -595,11 +596,11 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
     // One length-prefixed record containing "x" (APPNOTE 4.4.14.2).
     let mut archive = Fixture::member("file", 0, b"\x01\0\0\0x").build();
     set16(&mut archive.bytes, archive.central + 36, 0x0001); // Text only.
-    Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await?;
+    Index::read(&mut Cursor::new(&archive.bytes)).await?;
     for attributes in [0x0002, 0x0003] {
         set16(&mut archive.bytes, archive.central + 36, attributes);
         assert!(matches!(
-            Index::read(&mut Cursor::new(&archive.bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(&archive.bytes)).await,
             Err(FrameError::Unsupported { position, feature: "record-oriented member" })
                 if position == archive.central as u64
         ));
@@ -625,7 +626,7 @@ async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> 
     archive.bytes[end - 16] = 1;
 
     assert!(matches!(
-        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Index::read(&mut Cursor::new(archive.bytes)).await,
         Err(FrameError::Invalid { position, reason: "nonempty DEFLATE member has zero compressed size" })
             if position == archive.central as u64
     ));
@@ -694,7 +695,7 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         let mut reader = Cursor::new(both.bytes);
         assert!(
             matches!(
-                Index::read(&mut reader, Limits::default()).await,
+                Index::read(&mut reader).await,
                 Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
                     if position == both.central as u64 && rejected == identifier
             ),
@@ -703,7 +704,7 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         read_validated_with(&mut reader, Limits::default()).await?;
 
         let mut reader = Cursor::new(archive(Vec::new()).bytes);
-        let mut index = Index::read(&mut reader, Limits::default()).await?;
+        let mut index = Index::read(&mut reader).await?;
         assert!(
             matches!(
                 index.entry(&mut reader, 0).await,
@@ -747,7 +748,7 @@ async fn rejects_unsupported_extras_in_either_header() {
 async fn rejects_empty_filename_when_indexing() {
     let archive = Fixture::member("", 0, b"payload").build();
     assert!(matches!(
-        Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+        Index::read(&mut Cursor::new(archive.bytes)).await,
         Err(FrameError::Invalid {
             position,
             reason: "empty filename",
@@ -867,7 +868,7 @@ async fn validates_utf8_and_unicode_path_extras() -> TestResult {
                 set16(&mut archive.bytes, 6, 0);
             }
             let mut source = Cursor::new(archive.bytes);
-            let mut index = Index::read(&mut source, Limits::default()).await?;
+            let mut index = Index::read(&mut source).await?;
             assert!(matches!(
                 index.entry(&mut source, 0).await,
                 Err(FrameError::Invalid { position: 0, .. })
@@ -958,7 +959,7 @@ async fn rejects_directory_limits_before_reading_entries() {
             // fail if parsing reaches that body before enforcing the limits.
             source.fail_at = Some(archive.central as u64);
             assert!(matches!(
-                Index::read(&mut source, limits).await,
+                Index::read_with_policy(&mut source, IndexPolicy::default().limits(limits)).await,
                 Err(FrameError::Limit(limit)) if limit == expected
             ));
             assert_eq!(source.fail_at, Some(archive.central as u64));
@@ -1034,8 +1035,7 @@ async fn rejects_missing_and_corrupt_descriptors_before_resolving_members() -> T
                 let mut bytes = archive.bytes.clone();
                 bytes[offset] ^= 1;
                 let mut source = Cursor::new(bytes);
-                let mut index =
-                    Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
+                let mut index = Index::read_with_policy(&mut source, all_features()).await?;
                 assert!(
                     matches!(
                         index.entry(&mut source, 0).await,
@@ -1096,10 +1096,12 @@ async fn checks_the_member_comment_encoding_flag() {
             ..Fixture::default()
         }
         .build();
-        let mut options = ReadOptions::default();
-        options.comments.per_member = per_member;
+        let policy = IndexPolicy::default().comment_policy(CommentPolicy {
+            per_member,
+            ..CommentPolicy::default()
+        });
         let mut source = Cursor::new(archive.bytes);
-        let result = Index::read_with_options(&mut source, Limits::default(), options).await;
+        let result = Index::read_with_policy(&mut source, policy).await;
         assert_eq!(
             result.is_ok(),
             accepted,
@@ -1122,7 +1124,7 @@ async fn reconciles_unicode_comment_extra_fields() -> TestResult {
         }
         .build();
         let mut source = Cursor::new(archive.bytes);
-        let result = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await;
+        let result = Index::read_with_policy(&mut source, all_features()).await;
         if length == unicode.len() {
             result?;
         } else {
@@ -1195,7 +1197,7 @@ async fn accepts_empty_archives_but_rejects_ambiguous_end_records() -> TestResul
         }
         .build();
         assert!(matches!(
-            Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(archive.bytes)).await,
             Err(FrameError::Invalid { position, reason: "ambiguous end records" })
                 if position == archive.end as u64 + shadow_offset
         ));
@@ -1228,7 +1230,7 @@ async fn rejects_prefixed_and_concatenated_archives_with_consistent_offsets() ->
             (prefix.len() + archive.central) as u32,
         );
         assert!(matches!(
-            Index::read(&mut Cursor::new(bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(bytes)).await,
             Err(FrameError::Invalid {
                 position: 0,
                 reason: "unaccounted bytes before the first member"
@@ -1245,7 +1247,7 @@ async fn rejects_prefixed_and_concatenated_archives_with_consistent_offsets() ->
         (first.bytes.len() + first.central) as u32,
     );
     let mut source = Cursor::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read(&mut source).await?;
     assert!(matches!(
         index.entry(&mut source, 0).await,
         Err(FrameError::Invalid { position, reason: "unaccounted bytes after payload" })
@@ -1270,7 +1272,7 @@ async fn finds_end_records_across_scan_groups() -> TestResult {
             }
             .build();
             assert_eq!(
-                Index::read(&mut Cursor::new(&archive.bytes), Limits::default())
+                Index::read(&mut Cursor::new(&archive.bytes))
                     .await?
                     .entries()
                     .len(),
@@ -1288,7 +1290,7 @@ async fn finds_end_records_across_scan_groups() -> TestResult {
             }
             .build();
             assert!(matches!(
-                Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+                Index::read(&mut Cursor::new(archive.bytes)).await,
                 Err(FrameError::Invalid {
                     reason: "ambiguous end records",
                     ..
@@ -1321,7 +1323,7 @@ async fn bounds_end_record_search_with_short_reads() -> TestResult {
     let mut source = Observed::new(vec![0; 2 * 1024 * 1024]);
     source.max_read = 3;
     assert!(matches!(
-        Index::read(&mut source, Limits::default()).await,
+        Index::read(&mut source).await,
         Err(FrameError::Invalid {
             reason: "missing end record or trailing bytes",
             ..
@@ -1359,7 +1361,7 @@ async fn rejects_unaccounted_records_inside_the_directory() {
         let directory_size = (bytes.len() - archive.central) as u32;
         bytes.extend(end_record(1, archive.central as u32, directory_size, &[]));
         assert!(matches!(
-            Index::read(&mut Cursor::new(bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(bytes)).await,
             Err(FrameError::Invalid { position, reason: "unaccounted directory bytes or digital signature" })
                 if position == archive.end as u64
         ));
@@ -1529,7 +1531,7 @@ async fn reconciles_unix_extra_fields() -> TestResult {
         let central = [times, field(0x5455, b"\x01oops")].concat();
         let archive = Fixture::default().with_extra(false, central).build();
         assert!(matches!(
-            Index::read_with_policy(&mut Cursor::new(archive.bytes), Limits::default(), AllowListed).await,
+            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowListed)).await,
             Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
         ));
     }
@@ -1637,7 +1639,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     bytes.extend(end_record(2, central as u32, (end - central) as u32, &[]));
 
     let mut source = Cursor::new(&bytes);
-    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
+    let mut index = Index::read_with_policy(&mut source, all_features()).await?;
 
     let entries: &[IndexedEntry] = index.entries();
     let directory: &CentralDirectoryEntry = entries[0].directory();
@@ -1693,12 +1695,11 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let mut source = Cursor::new(ordered);
     // Even an unselected member with a Stored descriptor must fail at open.
     assert!(matches!(
-        Index::read_with_policy(&mut source, Limits::default(), AllowListed).await,
+        Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowListed)).await,
         Err(FrameError::Unsupported { position, feature: "data descriptor for Stored member" })
             if position == (central + first.end - first.central) as u64
     ));
-    let mut ordered =
-        Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
+    let mut ordered = Index::read_with_policy(&mut source, all_features()).await?;
     assert_eq!(ordered.entries()[0].record_range(), 0..first.central as u64);
     assert_eq!(
         ordered.entries()[1].record_range(),
@@ -1715,7 +1716,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
 
     // Repeated offsets must fail during indexing, before any local resolution.
     assert!(
-        Index::read_with_options(&mut Cursor::new(shared), Limits::default(), ALL_FEATURES)
+        Index::read_with_policy(&mut Cursor::new(shared), all_features())
             .await
             .is_err()
     );
@@ -1775,7 +1776,7 @@ async fn duplicate_destinations_must_preserve_local_order() -> TestResult {
         )?);
 
         let mut source = Cursor::new(bytes);
-        let result = Index::read(&mut source, Limits::default()).await;
+        let result = Index::read(&mut source).await;
         if let Some(index) = backwards {
             assert!(
                 matches!(
@@ -1814,7 +1815,7 @@ async fn indexes_zip64_sizes_above_four_gib_without_reading_the_payload() -> Tes
         bytes_read: 0,
     };
 
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read(&mut source).await?;
     let opening_bytes = source.bytes_read;
     index.validate_all(&mut source).await?;
     assert_eq!(source.bytes_read - opening_bytes, source.prefix.len());
@@ -1855,7 +1856,7 @@ async fn indexes_counts_at_and_above_the_classic_limit() -> TestResult {
             bytes.extend(end_records(count, offset, size)?);
         }
         let mut source = Cursor::new(bytes);
-        let mut index = Index::read(&mut source, Limits::default()).await?;
+        let mut index = Index::read(&mut source).await?;
         assert_eq!(index.entries().len() as u64, count);
         // Include the entries across the classic count boundary in the ZIP64 case.
         for ordinal in [count - 1, count - 2, count - 3, 0] {
@@ -1939,7 +1940,7 @@ async fn rejects_nonempty_zip64_extensible_data_sectors() -> TestResult {
 
         let end = archive.zip64_end.ok_or("missing ZIP64 end")? as u64;
         assert!(matches!(
-            Index::read(&mut Cursor::new(archive.bytes), Limits::default()).await,
+            Index::read(&mut Cursor::new(archive.bytes)).await,
             Err(FrameError::Unsupported { position, feature: "ZIP64 extensible data sector" })
                 if position == end
         ));
@@ -1960,12 +1961,12 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
     // Directory, ZIP64 end, and local metadata share one cumulative budget.
     for metadata_size in [total_budget - 1, total_budget] {
         let mut source = Cursor::new(&archive.bytes);
-        let mut index = Index::read(
+        let mut index = Index::read_with_policy(
             &mut source,
-            Limits {
+            IndexPolicy::default().limits(Limits {
                 metadata_size,
                 ..Limits::default()
-            },
+            }),
         )
         .await?;
         let result = index.validate_all(&mut source).await;
@@ -1980,12 +1981,12 @@ async fn charges_zip64_end_records_to_metadata_budget() -> TestResult {
     }
 
     assert!(matches!(
-        Index::read(
+        Index::read_with_policy(
             &mut Cursor::new(archive.bytes),
-            Limits {
+            IndexPolicy::default().limits(Limits {
                 metadata_size: directory_budget - 1,
                 ..Limits::default()
-            },
+            }),
         )
         .await,
         Err(FrameError::Limit(LimitExceeded::MetadataSize(limit))) if limit == directory_budget - 1
@@ -2023,7 +2024,7 @@ async fn buffers_directory_and_resolves_only_selected_records() -> TestResult {
     bytes[30] = b'x';
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read(&mut source, Limits::default()).await?;
+    let mut index = Index::read(&mut source).await?;
     assert_eq!(index.entries().len(), 2000);
     assert!((0..index.entries().len()).all(|ordinal| index.resolved(ordinal).is_none()));
     assert!(
@@ -2084,7 +2085,7 @@ async fn preserves_variable_metadata_across_read_ahead_windows() -> TestResult {
     ));
 
     let mut source = Observed::new(bytes);
-    let mut index = Index::read_with_options(&mut source, Limits::default(), ALL_FEATURES).await?;
+    let mut index = Index::read_with_policy(&mut source, all_features()).await?;
     assert_eq!(index.entries().len(), names.len());
     for (entry, name) in index.entries().iter().zip(&names) {
         assert_eq!(entry.directory().path(), name);
@@ -2132,11 +2133,12 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
         let mut source = Observed::new(archive.bytes.clone());
         let mut index = Index::read_with_policy(
             &mut source,
-            Limits {
-                metadata_size: budget,
-                ..Limits::default()
-            },
-            AllowListed,
+            IndexPolicy::default()
+                .limits(Limits {
+                    metadata_size: budget,
+                    ..Limits::default()
+                })
+                .extra_field_policy(AllowListed),
         )
         .await?;
         if !valid {

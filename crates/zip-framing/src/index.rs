@@ -112,29 +112,69 @@ impl Default for CommentPolicy {
     }
 }
 
-/// Which optional ZIP features the reader accepts.
+/// Controls resource limits and compatibility when indexing a ZIP archive.
 #[derive(Clone, Copy, Debug, Default)]
-pub struct ReadOptions {
-    /// Extra fields accepted in both headers. Defaults to [`ExtraFieldPolicy::Zip64Only`].
-    pub extra_fields: ExtraFieldPolicy,
-    /// Rules for member and archive comments.
-    pub comments: CommentPolicy,
-    /// Accept Stored members with data descriptors (bit 3). Disabled by default.
-    pub allow_stored_data_descriptors: bool,
-    /// Reject empty DEFLATE streams under [APPNOTE §4.3.8].
+#[must_use]
+pub struct IndexPolicy {
+    limits: Limits,
+    extra_fields: ExtraFieldPolicy,
+    comments: CommentPolicy,
+    allow_stored_data_descriptors: bool,
+    reject_empty_deflate_streams: bool,
+    allow_ambiguous_symlink_modes: bool,
+    allow_backslashes: bool,
+}
+
+impl IndexPolicy {
+    /// Sets the resource limits for the archive.
+    pub fn limits(mut self, limits: Limits) -> Self {
+        self.limits = limits;
+        self
+    }
+
+    /// Sets the extra fields accepted in both headers. Defaults to [`ExtraFieldPolicy::Zip64Only`].
+    pub fn extra_field_policy(mut self, policy: ExtraFieldPolicy) -> Self {
+        self.extra_fields = policy;
+        self
+    }
+
+    /// Sets the rules for member and archive comments.
+    pub fn comment_policy(mut self, policy: CommentPolicy) -> Self {
+        self.comments = policy;
+        self
+    }
+
+    /// Allows Stored members with data descriptors (bit 3). Disabled by default.
+    pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
+        self.allow_stored_data_descriptors = allow;
+        self
+    }
+
+    /// Rejects empty DEFLATE streams under [APPNOTE §4.3.8].
     ///
     /// When enabled, DEFLATE members with zero uncompressed size must also
     /// have zero compressed size. Disabled by default.
     ///
     /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
-    pub reject_empty_deflate_streams: bool,
-    /// Accept Unix symlink mode bits from non-Unix creator systems. Disabled by default.
+    pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
+        self.reject_empty_deflate_streams = reject;
+        self
+    }
+
+    /// Allows Unix symlink mode bits from non-Unix creator systems. Disabled by default.
     /// When enabled, Darwin uses Unix modes. Other creators use their usual attributes.
-    pub allow_ambiguous_symlink_modes: bool,
-    /// Accept literal backslashes in member names. Disabled by default.
+    pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
+        self.allow_ambiguous_symlink_modes = allow;
+        self
+    }
+
+    /// Allows literal backslashes in member names. Disabled by default.
     ///
     /// Member names are returned verbatim. Only `/` is a path separator.
-    pub allow_backslashes: bool,
+    pub fn allow_backslashes(mut self, allow: bool) -> Self {
+        self.allow_backslashes = allow;
+        self
+    }
 }
 
 /// A ZIP member index.
@@ -173,52 +213,33 @@ impl Index {
         })
     }
 
-    /// Indexes the directory with default [`ReadOptions`] and checks bounds derivable from its records.
+    /// Indexes the directory with the default [`IndexPolicy`].
     ///
     /// Local headers and descriptors are checked by [`Self::entry`] on access,
     /// or by [`Self::validate_all`]. The source must remain unchanged and be the
     /// same source passed to subsequent operations. A cancelled read may leave
     /// its cursor anywhere; another call restarts from the end.
-    pub async fn read<R: AsyncRead + AsyncSeek + Unpin>(
-        reader: &mut R,
-        limits: Limits,
-    ) -> Result<Self, Error> {
-        Self::read_with_options(reader, limits, ReadOptions::default()).await
+    pub async fn read<R: AsyncRead + AsyncSeek + Unpin>(reader: &mut R) -> Result<Self, Error> {
+        Self::read_with_policy(reader, IndexPolicy::default()).await
     }
 
-    /// Indexes the directory with the given member extra-field policy.
-    /// The same policy applies when reading local headers.
+    /// Indexes the directory with the supplied policy and checks bounds derivable from its records.
+    ///
+    /// The policy also applies when checking local records. See [`Self::read`]
+    /// for requirements on the source.
     pub async fn read_with_policy<R: AsyncRead + AsyncSeek + Unpin>(
         reader: &mut R,
-        limits: Limits,
-        extra_fields: ExtraFieldPolicy,
-    ) -> Result<Self, Error> {
-        Self::read_with_options(
-            reader,
-            limits,
-            ReadOptions {
-                extra_fields,
-                ..ReadOptions::default()
-            },
-        )
-        .await
-    }
-
-    /// Indexes the directory with the supplied limits and feature options.
-    pub async fn read_with_options<R: AsyncRead + AsyncSeek + Unpin>(
-        reader: &mut R,
-        limits: Limits,
-        options: ReadOptions,
+        policy: IndexPolicy,
     ) -> Result<Self, Error> {
         // Opening owns this budget until the index is complete. Errors and
         // cancellation discard all charges made by the opening helpers.
-        let mut budget = Budget::new(limits);
+        let mut budget = Budget::new(policy.limits);
         let mut buffer = DirectoryWindow::take();
         let mut buffered = RecordReader::new(reader, 64 * 1024, &mut buffer.0);
         let end =
-            CentralDirectory::read(&mut buffered, &mut budget, options.comments.archive).await?;
+            CentralDirectory::read(&mut buffered, &mut budget, policy.comments.archive).await?;
         let mut entries = end
-            .read_entries(&mut buffered, &mut budget, options)
+            .read_entries(&mut buffered, &mut budget, &policy)
             .await?;
 
         if entries.is_sorted_by_key(|entry| entry.directory().position()) {
@@ -277,7 +298,7 @@ impl Index {
             resolved: Vec::new(),
             entries,
             budget,
-            extra_fields: options.extra_fields,
+            extra_fields: policy.extra_fields,
             buffer: Vec::new(),
         })
     }
@@ -467,7 +488,7 @@ impl CentralDirectory {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        options: ReadOptions,
+        policy: &IndexPolicy,
     ) -> Result<Vec<IndexedEntry>, Error> {
         let end = add(self.offset, self.size)?;
         let mut position = self.offset;
@@ -487,7 +508,7 @@ impl CentralDirectory {
 
         let mut bytes = reader.buffered(position, end);
         while entries.len() < self.count as usize {
-            match CentralDirectoryEntry::parse(bytes, position, budget, options)? {
+            match CentralDirectoryEntry::parse(bytes, position, budget, policy)? {
                 BufferedEntry::Complete(entry, length) => {
                     entries.push(IndexedEntry::new(entry, self.offset)?);
                     position += length as u64;

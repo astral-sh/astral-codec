@@ -6,7 +6,7 @@ use archive_trait::{Archive, Member, MemberMetadata, MemberPayload, SpecialKind}
 use thiserror::Error;
 use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use zip_framing::{
-    CommentPolicy, Entry, EntryKind, ExtraFieldPolicy, Index, IndexedEntry, Limits, ReadOptions,
+    CommentPolicy, Entry, EntryKind, ExtraFieldPolicy, Index, IndexPolicy, IndexedEntry, Limits,
     constants::attributes,
 };
 
@@ -22,8 +22,7 @@ pub struct ZipArchive<R> {
 #[derive(Clone, Copy, Debug, Default)]
 #[must_use]
 pub struct DecodePolicy {
-    limits: Limits,
-    framing: ReadOptions,
+    framing: IndexPolicy,
 }
 
 struct DecoderState<R> {
@@ -36,29 +35,29 @@ struct DecoderState<R> {
 impl DecodePolicy {
     /// Sets the resource limits for this archive.
     pub fn limits(mut self, limits: Limits) -> Self {
-        self.limits = limits;
+        self.framing = self.framing.limits(limits);
         self
     }
 
     /// Sets the extra-field policy for both central and local headers.
     pub fn extra_field_policy(mut self, policy: ExtraFieldPolicy) -> Self {
-        self.framing.extra_fields = policy;
+        self.framing = self.framing.extra_field_policy(policy);
         self
     }
 
     /// Sets the [`CommentPolicy`] for member and archive comments.
     pub fn comment_policy(mut self, policy: CommentPolicy) -> Self {
-        self.framing.comments = policy;
+        self.framing = self.framing.comment_policy(policy);
         self
     }
 
-    /// Allows [Stored members with data descriptors](ReadOptions::allow_stored_data_descriptors).
+    /// Allows [Stored members with data descriptors](IndexPolicy::allow_stored_data_descriptors).
     pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
-        self.framing.allow_stored_data_descriptors = allow;
+        self.framing = self.framing.allow_stored_data_descriptors(allow);
         self
     }
 
-    /// [Rejects empty DEFLATE streams](ReadOptions::reject_empty_deflate_streams).
+    /// [Rejects empty DEFLATE streams](IndexPolicy::reject_empty_deflate_streams).
     ///
     /// Enabling this option enforces the empty-member rule in [APPNOTE §4.3.8].
     /// The default accepts valid empty DEFLATE streams.
@@ -69,22 +68,22 @@ impl DecodePolicy {
     ///
     /// [APPNOTE §4.3.8]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
     pub fn reject_empty_deflate_streams(mut self, reject: bool) -> Self {
-        self.framing.reject_empty_deflate_streams = reject;
+        self.framing = self.framing.reject_empty_deflate_streams(reject);
         self
     }
 
-    /// Allows [Unix symlink modes from non-Unix creators](ReadOptions::allow_ambiguous_symlink_modes).
+    /// Allows [Unix symlink modes from non-Unix creators](IndexPolicy::allow_ambiguous_symlink_modes).
     pub fn allow_ambiguous_symlink_modes(mut self, allow: bool) -> Self {
-        self.framing.allow_ambiguous_symlink_modes = allow;
+        self.framing = self.framing.allow_ambiguous_symlink_modes(allow);
         self
     }
 
-    /// Allows [literal backslashes in member names](ReadOptions::allow_backslashes).
+    /// Allows [literal backslashes in member names](IndexPolicy::allow_backslashes).
     ///
     /// Disabled by default. Member names are returned verbatim. The filesystem
     /// extractor rejects paths containing backslashes.
     pub fn allow_backslashes(mut self, allow: bool) -> Self {
-        self.framing.allow_backslashes = allow;
+        self.framing = self.framing.allow_backslashes(allow);
         self
     }
 }
@@ -98,7 +97,7 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
     /// Opens the archive and validates its central directory under the supplied [`DecodePolicy`].
     /// Local headers are checked on member access or by [`Self::validate_all`].
     pub async fn with_policy(mut reader: R, policy: DecodePolicy) -> Result<Self, DecodeError> {
-        let index = Index::read_with_options(&mut reader, policy.limits, policy.framing).await?;
+        let index = Index::read_with_policy(&mut reader, policy.framing).await?;
 
         Ok(Self {
             state: DecoderState {
