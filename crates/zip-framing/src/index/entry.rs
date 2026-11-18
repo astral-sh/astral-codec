@@ -6,7 +6,7 @@ use crate::{
     Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy,
     IndexPolicyViolation, add,
     constants::{signature, size},
-    extra::{CentralExtras, LocalExtras, RetainedCentralExtras},
+    extra::{CentralExtras, Extras},
     invalid,
     kind::{ExternalAttributes, UnixFileType},
     policy_violation,
@@ -99,11 +99,8 @@ pub struct CentralDirectoryEntry {
     /// The semantics of this field depend on the system identifier
     /// within [`Self::made_by`].
     attributes: u32,
-    /// Extra data retained for local/central reconciliation. ZIP64-only extras
-    /// need no copy: their resolved values and presence are already retained.
-    extra: RetainedCentralExtras,
-    /// Whether the central directory entry contained a ZIP64 extra field.
-    has_zip64_extra: bool,
+    /// Extra data retained for local/central reconciliation.
+    extra: CentralExtras,
 }
 
 pub(super) enum BufferedEntry {
@@ -204,7 +201,7 @@ impl CentralDirectoryEntry {
         let (name, rest) = variable.split_at(name_length);
         let (raw_extra, comment) = rest.split_at(extra_length);
         let path = parse_name(name, common.flags, position, policy.allow_backslashes)?;
-        let extras = CentralExtras::parse(
+        let (extra, payload, local_offset) = Extras::parse_central(
             raw_extra,
             header_fields,
             (offset, disk),
@@ -213,7 +210,6 @@ impl CentralDirectoryEntry {
             policy.extra_fields,
             position,
         )?;
-        let payload = extras.payload;
         if common.method == CompressionMethod::Stored
             && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
             && !policy.allow_stored_data_descriptors
@@ -238,11 +234,10 @@ impl CentralDirectoryEntry {
             path: path.into(),
             common,
             payload,
-            local_offset: extras.local_offset,
+            local_offset,
             made_by: u16::from_le_bytes(array_at::<4, 2, _>(header)),
             attributes: u32::from_le_bytes(array_at::<38, 4, _>(header)),
-            has_zip64_extra: extras.has_zip64,
-            extra: extras.retain(),
+            extra,
         };
 
         let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
@@ -366,15 +361,14 @@ impl IndexedEntry {
         if &variable[..name_length] != directory.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
-        let extras = LocalExtras::parse(
+        let (extras, fields) = Extras::parse_local(
             &variable[name_length..],
             header_fields,
             &directory.path,
             extra_fields,
             position,
         )?;
-        let fields = extras.payload;
-        let zip64 = extras.has_zip64() || directory.has_zip64_extra;
+        let zip64 = extras.uses_zip64(&directory.extra);
         let unix_data = extras.resolve(&directory.extra, position)?;
 
         if header_fields.common != directory.common {

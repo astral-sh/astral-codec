@@ -72,7 +72,8 @@ impl From<ExtraHeaderId> for u16 {
     }
 }
 
-struct ParsedExtras<'a> {
+/// Extra fields accepted by the local header parser.
+pub(crate) struct Extras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
@@ -80,79 +81,11 @@ struct ParsedExtras<'a> {
 }
 
 /// Checked central extra fields retained for reconciliation with the local header.
-/// An empty slice represents a header with no fields apart from ZIP64.
 #[derive(Debug)]
-pub(crate) struct RetainedCentralExtras(Box<[u8]>);
-
-/// The checked, resolved extra fields of a central header.
-pub(crate) struct CentralExtras<'a> {
-    pub(crate) payload: MemberPayload,
-    pub(crate) local_offset: u64,
-    pub(crate) has_zip64: bool,
-    retained: &'a [u8],
-}
-
-impl<'a> CentralExtras<'a> {
-    pub(crate) fn parse(
-        bytes: &'a [u8],
-        header: MemberHeader,
-        location: (u32, u16),
-        path: &str,
-        comment: &[u8],
-        policy: ExtraFieldPolicy,
-        position: u64,
-    ) -> Result<Self, Error> {
-        let extras = ParsedExtras::parse(bytes, Header::Central, position)?;
-        let (offset, disk) = location;
-        let (fields, local_offset) = extras.central_payload(header, offset, disk, position)?;
-        let payload = fields.validate(header.common.method, position)?;
-        extras.validate(path, Some(comment), policy, position)?;
-        Ok(Self {
-            payload,
-            local_offset,
-            has_zip64: extras.zip64.is_some(),
-            retained: if extras.fields.is_empty() { &[] } else { bytes },
-        })
-    }
-
-    pub(crate) fn retain(self) -> RetainedCentralExtras {
-        RetainedCentralExtras(self.retained.into())
-    }
-}
-
-/// The checked, resolved extra fields of a local header.
-pub(crate) struct LocalExtras<'a> {
-    pub(crate) payload: PayloadFields,
-    extras: ParsedExtras<'a>,
-}
-
-impl<'a> LocalExtras<'a> {
-    pub(crate) fn parse(
-        bytes: &'a [u8],
-        header: MemberHeader,
-        path: &str,
-        policy: ExtraFieldPolicy,
-        position: u64,
-    ) -> Result<Self, Error> {
-        let extras = ParsedExtras::parse(bytes, Header::Local, position)?;
-        let payload = extras.local_payload(header, position)?;
-        extras.validate(path, None, policy, position)?;
-        Ok(Self { payload, extras })
-    }
-
-    pub(crate) fn has_zip64(&self) -> bool {
-        self.extras.zip64.is_some()
-    }
-
-    /// Reconciles local and central extra fields and returns the UNIX file-type bytes.
-    pub(crate) fn resolve(
-        self,
-        central: &'a RetainedCentralExtras,
-        position: u64,
-    ) -> Result<Option<Vec<u8>>, Error> {
-        let central = ParsedExtras::parse(&central.0, Header::Central, position)?;
-        self.extras.resolve(central, position)
-    }
+pub(crate) struct CentralExtras {
+    /// ZIP64 alone needs no copy once its values have been resolved.
+    bytes: Box<[u8]>,
+    has_zip64: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -161,7 +94,50 @@ enum Header {
     Central,
 }
 
-impl<'a> ParsedExtras<'a> {
+impl<'a> Extras<'a> {
+    pub(crate) fn parse_central(
+        bytes: &'a [u8],
+        header: MemberHeader,
+        location: (u32, u16),
+        path: &str,
+        comment: &[u8],
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<(CentralExtras, MemberPayload, u64), Error> {
+        let extras = Self::parse(bytes, Header::Central, position)?;
+        let (offset, disk) = location;
+        let (fields, local_offset) = extras.central_payload(header, offset, disk, position)?;
+        let payload = fields.validate(header.common.method, position)?;
+        extras.validate(path, Some(comment), policy, position)?;
+        let central = CentralExtras {
+            bytes: if extras.fields.is_empty() {
+                Box::default()
+            } else {
+                bytes.into()
+            },
+            has_zip64: extras.zip64.is_some(),
+        };
+        Ok((central, payload, local_offset))
+    }
+
+    pub(crate) fn parse_local(
+        bytes: &'a [u8],
+        header: MemberHeader,
+        path: &str,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<(Self, PayloadFields), Error> {
+        let extras = Self::parse(bytes, Header::Local, position)?;
+        let payload = extras.local_payload(header, position)?;
+        extras.validate(path, None, policy, position)?;
+        Ok((extras, payload))
+    }
+
+    /// A descriptor uses ZIP64 widths if either header has ZIP64 extra values.
+    pub(crate) fn uses_zip64(&self, central: &CentralExtras) -> bool {
+        self.zip64.is_some() || central.has_zip64
+    }
+
     fn validate(
         &self,
         path: &str,
@@ -349,10 +325,15 @@ impl<'a> ParsedExtras<'a> {
     }
 
     /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
-    fn resolve(self, central: Self, position: u64) -> Result<Option<Vec<u8>>, Error> {
-        if self.fields.is_empty() && central.fields.is_empty() {
+    pub(crate) fn resolve(
+        self,
+        central: &'a CentralExtras,
+        position: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
+        if self.fields.is_empty() && central.bytes.is_empty() {
             return Ok(None);
         }
+        let central = Self::parse(&central.bytes, Header::Central, position)?;
         let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
         let ownership = has(ExtraHeaderId::InfoZipOwnership);
         let ownership16 = has(ExtraHeaderId::InfoZipOwnership16);
