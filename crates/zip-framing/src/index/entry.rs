@@ -6,7 +6,7 @@ use crate::{
     Budget, CompressionMethod, EntryKind, Error, ExtraFieldPolicy, HostSystem, IndexPolicy,
     IndexPolicyViolation, add,
     constants::{signature, size},
-    extra::{Extras, Header},
+    extra::{CentralExtras, LocalExtras, RetainedCentralExtras},
     invalid,
     kind::{ExternalAttributes, UnixFileType},
     policy_violation,
@@ -101,7 +101,7 @@ pub struct CentralDirectoryEntry {
     attributes: u32,
     /// Extra data retained for local/central reconciliation. ZIP64-only extras
     /// need no copy: their resolved values and presence are already retained.
-    extra: Box<[u8]>,
+    extra: RetainedCentralExtras,
     /// Whether the central directory entry contained a ZIP64 extra field.
     has_zip64_extra: bool,
 }
@@ -204,14 +204,16 @@ impl CentralDirectoryEntry {
         let (name, rest) = variable.split_at(name_length);
         let (raw_extra, comment) = rest.split_at(extra_length);
         let path = parse_name(name, common.flags, position, policy.allow_backslashes)?;
-        let extras = if raw_extra.is_empty() {
-            Extras::default()
-        } else {
-            Extras::parse(raw_extra, Header::Central, position)?
-        };
-        let (fields, local_offset) =
-            extras.central_payload(header_fields, offset, disk, position)?;
-        let payload = fields.validate(common.method, position)?;
+        let extras = CentralExtras::parse(
+            raw_extra,
+            header_fields,
+            (offset, disk),
+            path,
+            comment,
+            policy.extra_fields,
+            position,
+        )?;
+        let payload = extras.payload;
         if common.method == CompressionMethod::Stored
             && common.flags.contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
             && !policy.allow_stored_data_descriptors
@@ -231,26 +233,16 @@ impl CentralDirectoryEntry {
             .comments
             .per_member
             .check(comment, Some(common.flags), position)?;
-        if extras.needs_reconciliation() {
-            extras.check_name(path, position)?;
-            extras.comment(comment, position)?;
-            extras.check_policy(policy.extra_fields, position)?;
-        }
-
         budget.charge_member(payload.fields().uncompressed)?;
         let entry = Self {
             path: path.into(),
             common,
             payload,
-            local_offset,
+            local_offset: extras.local_offset,
             made_by: u16::from_le_bytes(array_at::<4, 2, _>(header)),
             attributes: u32::from_le_bytes(array_at::<38, 4, _>(header)),
-            extra: if extras.needs_reconciliation() {
-                raw_extra.into()
-            } else {
-                Box::default()
-            },
-            has_zip64_extra: extras.has_zip64(),
+            has_zip64_extra: extras.has_zip64,
+            extra: extras.retain(),
         };
 
         let mode = (entry.attributes >> ExternalAttributes::UNIX_MODE_SHIFT) as u16;
@@ -369,21 +361,21 @@ impl IndexedEntry {
             )
             .await?;
 
-        let extras = Extras::parse(&variable[name_length..], Header::Local, position)?;
-        let fields = extras.local_payload(header_fields, position)?;
-        let zip64 = extras.has_zip64() || directory.has_zip64_extra;
         // Equal bytes inherit the directory's UTF-8 and filename validation.
         // Header agreement below also requires identical encoding flags.
         if &variable[..name_length] != directory.path.as_bytes() {
             return Err(invalid(position, "local and central filenames disagree"));
         }
-        extras.check_name(&directory.path, position)?;
-        extras.check_policy(extra_fields, position)?;
-
-        let unix_data = extras.resolve(
-            Extras::parse(&directory.extra, Header::Central, position)?,
+        let extras = LocalExtras::parse(
+            &variable[name_length..],
+            header_fields,
+            &directory.path,
+            extra_fields,
             position,
         )?;
+        let fields = extras.payload;
+        let zip64 = extras.has_zip64() || directory.has_zip64_extra;
+        let unix_data = extras.resolve(&directory.extra, position)?;
 
         if header_fields.common != directory.common {
             return Err(invalid(position, "local and central headers disagree"));

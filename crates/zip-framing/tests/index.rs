@@ -729,6 +729,38 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
             reason: "truncated UNIX extra field",
         }) if position == malformed.central as u64
     ));
+
+    let missing_offset = Fixture {
+        zip64: true,
+        local_offset: u32::MAX,
+        central_extra: field(0x000d, &[0; 12]),
+        ..Fixture::default()
+    }
+    .build();
+    assert!(matches!(
+        Index::read(&mut Cursor::new(missing_offset.bytes)).await,
+        Err(FrameError::Invalid {
+            position,
+            reason: "missing or superfluous ZIP64 values",
+        }) if position == missing_offset.central as u64
+    ));
+
+    let mut missing_size = Fixture {
+        zip64: true,
+        local_extra: field(0x000d, &[0; 12]),
+        ..Fixture::default()
+    }
+    .build();
+    set32(&mut missing_size.bytes, 18, 0);
+    let mut reader = Cursor::new(missing_size.bytes);
+    let mut index = Index::read(&mut reader).await?;
+    assert!(matches!(
+        index.entry(&mut reader, 0).await,
+        Err(FrameError::Invalid {
+            position: 0,
+            reason: "local ZIP64 must contain both sizes",
+        })
+    ));
     Ok(())
 }
 
