@@ -3,9 +3,9 @@ use std::{collections::BTreeMap, str};
 use crc32fast::hash as crc32;
 
 use crate::{
-    Error,
+    Error, IndexPolicyViolation,
     constants::extra,
-    invalid,
+    invalid, policy_violation,
     record::{MemberHeader, PayloadFields, SizeField, bytes_at},
 };
 
@@ -87,12 +87,7 @@ pub(crate) enum Header {
 }
 
 impl<'a> Extras<'a> {
-    pub(crate) fn parse(
-        mut bytes: &'a [u8],
-        header: Header,
-        position: u64,
-        policy: ExtraFieldPolicy,
-    ) -> Result<Self, Error> {
+    pub(crate) fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
         let mut extras = Self::default();
 
         while !bytes.is_empty() {
@@ -108,15 +103,12 @@ impl<'a> Extras<'a> {
             };
 
             let raw_id = u16::from_le_bytes([identifier_low, identifier_high]);
-            let identifier = ExtraHeaderId::try_from(raw_id)
-                .ok()
-                .filter(|&field| {
-                    field == ExtraHeaderId::Zip64 || policy == ExtraFieldPolicy::AllowListed
-                })
-                .ok_or(Error::UnsupportedExtraField {
+            let identifier = ExtraHeaderId::try_from(raw_id).map_err(|identifier| {
+                Error::UnsupportedExtraField {
                     position,
-                    identifier: raw_id,
-                })?;
+                    identifier,
+                }
+            })?;
 
             let previous = if identifier == ExtraHeaderId::Zip64 {
                 extras.zip64.replace(data)
@@ -135,6 +127,22 @@ impl<'a> Extras<'a> {
         }
 
         Ok(extras)
+    }
+
+    pub(crate) fn check_policy(
+        &self,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<(), Error> {
+        if policy == ExtraFieldPolicy::Zip64Only
+            && let Some(&identifier) = self.fields.keys().next()
+        {
+            return Err(policy_violation(
+                position,
+                IndexPolicyViolation::ExtraField { identifier },
+            ));
+        }
+        Ok(())
     }
 
     /// Whether any fields need comparison beyond the resolved ZIP64 sizes.

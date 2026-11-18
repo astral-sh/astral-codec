@@ -18,7 +18,8 @@ use zip_codec::{
     decode::{
         CommentPolicy,
         CommentRule::{AllowAll, AllowAscii, AllowUtf8, Reject},
-        DecodeError, DecodePolicy, ExtraFieldPolicy, Limits, ZipArchive,
+        DecodeError, DecodePolicy, ExtraFieldPolicy, ExtraHeaderId, IndexPolicyViolation, Limits,
+        ZipArchive,
     },
     extract::ExtractPolicy,
 };
@@ -112,7 +113,16 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
         writer.start_file("file", member)?;
         let bytes = writer.finish()?.into_inner();
 
-        assert!(ZipArchive::open(Cursor::new(&bytes)).await.is_err());
+        let default_violation = if comment.is_ascii() {
+            IndexPolicyViolation::MemberComment { rule: Reject }
+        } else {
+            IndexPolicyViolation::ArchiveComment { rule: AllowAscii }
+        };
+        assert!(matches!(
+            ZipArchive::open(Cursor::new(&bytes)).await,
+            Err(DecodeError::Framing(FrameError::PolicyViolation { violation, .. }))
+                if violation == default_violation
+        ));
         for (archive, accepted) in [
             (Reject, comment.is_empty()),
             (AllowAscii, comment.is_ascii()),
@@ -123,8 +133,23 @@ async fn configures_member_and_archive_comments_independently() -> TestResult {
                 per_member: AllowAscii,
                 archive,
             });
-            let result = ZipArchive::open_with_policy(Cursor::new(&bytes), policy).await;
-            assert_eq!(result.is_ok(), accepted, "{archive:?}, comment={comment:?}");
+            let result = ZipArchive::open_with_policy(Cursor::new(&bytes), policy)
+                .await
+                .map(|_| ());
+            if accepted {
+                result?;
+            } else {
+                assert!(
+                    matches!(
+                        &result,
+                        Err(DecodeError::Framing(FrameError::PolicyViolation {
+                            violation: IndexPolicyViolation::ArchiveComment { rule },
+                            ..
+                        })) if *rule == archive
+                    ),
+                    "{archive:?}, comment={comment:?}: {result:?}"
+                );
+            }
         }
     }
     Ok(())
@@ -140,8 +165,8 @@ async fn opts_in_to_literal_backslashes_in_member_names() -> TestResult {
 
     assert!(matches!(
         ZipArchive::open(Cursor::new(&bytes)).await,
-        Err(DecodeError::Framing(FrameError::Invalid {
-            reason: "invalid ZIP filename",
+        Err(DecodeError::Framing(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::BackslashInName,
             ..
         }))
     ));
@@ -714,8 +739,8 @@ async fn rejects_stored_data_descriptors_at_open_by_default() {
     let bytes = include_bytes!("fixtures/stored-descriptor-ghost.zip");
     assert!(matches!(
         ZipArchive::open(Cursor::new(bytes)).await,
-        Err(DecodeError::Framing(FrameError::Unsupported {
-            feature: "data descriptor for Stored member",
+        Err(DecodeError::Framing(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::StoredDataDescriptor,
             ..
         }))
     ));
@@ -732,8 +757,8 @@ async fn non_unix_symlink_modes_require_opt_in() -> TestResult {
         let bytes = member_with_attributes(b"target", host, 0o120666 << 16)?;
         assert!(matches!(
             ZipArchive::open(Cursor::new(&bytes)).await,
-            Err(DecodeError::Framing(FrameError::Unsupported {
-                feature: "symlink mode from a non-Unix creator system",
+            Err(DecodeError::Framing(FrameError::PolicyViolation {
+                violation: IndexPolicyViolation::AmbiguousSymlinkMode,
                 ..
             }))
         ));
@@ -756,8 +781,10 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
     let bytes = include_bytes!("fixtures/unix-links.zip");
     assert!(matches!(
         ZipArchive::open(Cursor::new(bytes)).await,
-        Err(DecodeError::Framing(FrameError::UnsupportedExtraField {
-            identifier: 0x000d,
+        Err(DecodeError::Framing(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::ExtraField {
+                identifier: ExtraHeaderId::Unix,
+            },
             ..
         }))
     ));
@@ -804,8 +831,8 @@ async fn configures_empty_deflate_stream_policy() -> TestResult {
     let policy = DecodePolicy::default().allow_empty_deflate_streams(false);
     assert!(matches!(
         ZipArchive::open_with_policy(Cursor::new(EMPTY_DEFLATE), policy).await,
-        Err(DecodeError::Framing(FrameError::Invalid {
-            reason: "empty member has file data",
+        Err(DecodeError::Framing(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::EmptyDeflateStream,
             ..
         }))
     ));

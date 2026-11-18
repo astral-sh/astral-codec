@@ -98,7 +98,43 @@ impl CompressionMethod {
     }
 }
 
-/// A malformed, unsupported, or over-budget ZIP archive.
+/// A supported ZIP feature excluded by the selected [`IndexPolicy`].
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Error)]
+#[non_exhaustive]
+pub enum IndexPolicyViolation {
+    /// A known member extra field was excluded by the extra-field policy.
+    #[error("extra field {:#06x}", u16::from(*identifier))]
+    ExtraField {
+        /// The supported extra-field identifier from the member header.
+        identifier: ExtraHeaderId,
+    },
+    /// The archive comment did not meet the configured comment rule.
+    #[error("archive comment rejected by {rule:?}")]
+    ArchiveComment {
+        /// The rule for the end-record comment.
+        rule: CommentRule,
+    },
+    /// A member comment did not meet the configured comment rule.
+    #[error("member comment rejected by {rule:?}")]
+    MemberComment {
+        /// The rule for central-directory comments.
+        rule: CommentRule,
+    },
+    /// A Stored member uses a data descriptor.
+    #[error("data descriptor for Stored member")]
+    StoredDataDescriptor,
+    /// A DEFLATE member with zero uncompressed size declares compressed bytes.
+    #[error("empty DEFLATE stream")]
+    EmptyDeflateStream,
+    /// A non-Unix creator supplied Unix symlink mode bits.
+    #[error("symlink mode from a non-Unix creator system")]
+    AmbiguousSymlinkMode,
+    /// A member name contains a literal backslash.
+    #[error("backslash in member name")]
+    BackslashInName,
+}
+
+/// A failure while reading or writing ZIP records.
 #[derive(Debug, Error)]
 pub enum Error {
     /// An input operation failed.
@@ -120,13 +156,21 @@ pub enum Error {
         /// The unsupported feature.
         feature: &'static str,
     },
-    /// A member header contains an extra field excluded by the reader's policy.
+    /// A member header contains an extra field that the reader does not support.
     #[error("at byte {position}: unsupported ZIP extra field {identifier:#06x}")]
     UnsupportedExtraField {
         /// Offset of the member header.
         position: u64,
         /// Extra-field identifier from the header.
         identifier: u16,
+    },
+    /// A supported feature was rejected by the index policy.
+    #[error("at byte {position}: index policy rejected input: {violation}")]
+    PolicyViolation {
+        /// Offset of the relevant record.
+        position: u64,
+        /// The policy rule that rejected the feature.
+        violation: IndexPolicyViolation,
     },
     /// A configured resource budget was exceeded.
     #[error(transparent)]
@@ -144,6 +188,13 @@ impl From<BudgetError> for Error {
 
 pub(crate) fn invalid(position: u64, reason: &'static str) -> Error {
     Error::Invalid { position, reason }
+}
+
+pub(crate) fn policy_violation(position: u64, violation: IndexPolicyViolation) -> Error {
+    Error::PolicyViolation {
+        position,
+        violation,
+    }
 }
 
 pub(crate) fn add(left: u64, right: u64) -> Result<u64, Error> {

@@ -55,7 +55,10 @@ impl<'a> PendingMember<'a> {
             return Err(invalid(0, "empty or oversized filename"));
         }
 
-        validate_name(path, 0, false)?;
+        validate_name(path, 0)?;
+        if path.contains('\\') {
+            return Err(invalid(0, "invalid ZIP filename"));
+        }
         if path.ends_with('/') != matches!(kind, EntryKind::Directory) {
             return Err(invalid(0, "filename suffix disagrees with member kind"));
         }
@@ -96,7 +99,12 @@ impl<'a> PendingMember<'a> {
             compressed,
             uncompressed,
         }
-        .validate(self.method, offset, false)?;
+        .validate(self.method, offset)?;
+
+        // APPNOTE 4.3.8 excludes file data for empty members.
+        if payload.has_empty_deflate_stream() {
+            return Err(invalid(offset, "empty member has file data"));
+        }
 
         if matches!(self.kind, EntryKind::Directory) && uncompressed != 0 {
             return Err(invalid(offset, "directory has file data"));

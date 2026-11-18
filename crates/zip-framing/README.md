@@ -25,6 +25,8 @@ gaps or overlaps. Payload decoding and CRC-32 verification belong to zip-codec.
 Pass an `IndexPolicy` to `Index::read_with_policy` to configure resource limits
 and which ZIP features the index accepts. `Limits` bounds archive size, entry
 count, metadata, and declared output sizes.
+An `Error::PolicyViolation` gives the record offset and an
+`IndexPolicyViolation` identifying the rejected feature.
 
 ## Writing
 
