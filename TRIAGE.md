@@ -31,7 +31,7 @@ the 64th symlink with peak RSS of 12.5 MiB. A ZIP with 63 such links followed
 by the regular file extracts successfully.
 [PR #376](https://github.com/astral-sh/astral-codec/pull/376)
 
-## 2. Failed extraction can leave an escaping symlink (high)
+## 2. Failed extraction can leave an escaping symlink (out of scope)
 
 Start with an empty directory `pivot` and a symlink `ambient -> pivot/../outside`
 inside the destination. Place a sentinel named `outside` beside the destination.
@@ -44,13 +44,17 @@ itself, so the following `..` reaches its parent. The final check returns
 `PermissionDenied` and leaves both links on disk. Opening `alias` after the
 error reads the sentinel. This reproduced with tar and ZIP. At `6759246`,
 tar extraction rejected the pre-existing link before creating `alias`.
-[Target inspection](crates/archive-trait/src/extract/root.rs#L982) ·
-[Validation before creation](crates/archive-trait/src/extract/root.rs#L553) ·
-[Final check](crates/archive-trait/src/extract/root.rs#L632)
+[Target inspection at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L982) ·
+[Validation before creation](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L553) ·
+[Final check](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L632)
 
-**Open question.** How should validation resolve a pre-existing symlink whose
-target traverses a pending archive link? In this example it needs to account
-for the pending `pivot -> .` before interpreting `..` or creating `alias`.
+**Decision.** Close as out of scope. The extractor made all filesystem
+changes inside the destination and reported the escape as an error. The
+caller read the sentinel by following `alias` in the partial destination
+after that error. The security model guarantees containment of symlink
+targets when extraction succeeds, and `extract_in` documents that a failure
+can leave a partial destination. [Security model](SECURITY.md#archive-trait) ·
+[`extract_in` contract](crates/archive-trait/src/lib.rs#L293)
 
 ## 3. Implicit parent creation copies every path prefix (medium)
 
