@@ -1,6 +1,6 @@
 # ZIP and extraction triage
 
-Five open findings from reviewing `ww/zip-codec` at `9292997` against
+Five findings from reviewing `ww/zip-codec` at `9292997` against
 `6759246`. The reproductions used the default policies on macOS arm64.
 Record each decision and its child PR under the corresponding finding.
 
@@ -20,13 +20,15 @@ at finalization, after allocation, and skips superseded links. At the default
 entry limit, 99,999 such links and one file would require about 12 GiB for
 target strings alone. This figure is an extrapolation from the record layout.
 [ZIP target decoding](crates/zip-codec/src/decode.rs#L233) ·
-[Reservation](crates/archive-trait/src/extract/root.rs#L464) ·
-[Finalization](crates/archive-trait/src/extract/root.rs#L549)
+[Reservation at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L464) ·
+[Finalization at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L549)
 
-**Open question.** Should the shared extractor bound the bytes retained by
-live symlinks at reservation time and release their storage on overwrite?
-Releasing superseded targets alone would still allow distinct names to
-accumulate until finalization.
+**Decision.** The shared extractor limits pending symlink records and their
+string allocations to 8 MiB. It checks the net cost before replacing a leaf
+and frees the superseded record on overwrite. Repeating the ZIP reproduction
+on `ww/triage` and the child branch gave peak RSS of 133.2 MiB and 5.2 MiB
+respectively. Both extractions produced the five-byte file.
+[PR #376](https://github.com/astral-sh/astral-codec/pull/376)
 
 ## 2. Failed extraction can leave an escaping symlink (high)
 
