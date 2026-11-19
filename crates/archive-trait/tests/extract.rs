@@ -377,16 +377,19 @@ async fn payload_errors_flush_prior_files_before_returning() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn pending_symlink_limit_is_checked_before_replacing_the_leaf() {
+async fn pending_symlink_limit_counts_only_live_links() {
     let temp = tempdir().expect("temporary directory should be created");
     let target = "x".repeat(usize::from(u16::MAX));
-    // Each original and normalized target pair takes just under 128 KiB.
-    // With the records and paths, the 64th live link exceeds 8 MiB.
-    let archive = TestArchive::new(
-        (0..64).map(|index| entry::symbolic_link(&format!("link-{index}"), &target)),
-    );
-    let leaf = temp.path().join("link-63");
-    std::fs::write(&leaf, b"original").expect("destination file should be created");
+    // The two target strings plus the record take just over 128 KiB per link.
+    // 63 live links fit in 8 MiB.
+    let links = (0..63).map(|index| entry::symbolic_link(&format!("link-{index}"), &target));
+    let archive = TestArchive::new(links.chain([
+        entry::symbolic_link("link-0", &target),
+        entry::file("link-0", b"kept"),
+        entry::symbolic_link("new", &target),
+        // This would be the 64th live link. Check the limit before deleting the file.
+        entry::symbolic_link("link-0", &target),
+    ]));
 
     assert!(matches!(
         archive.extract_in(temp.path(), ExtractPolicy::default()).await,
@@ -394,40 +397,11 @@ async fn pending_symlink_limit_is_checked_before_replacing_the_leaf() {
             path,
             reason: "pending symbolic-link storage limit exceeded",
             ..
-        }) if path == Path::new("link-63")
+        }) if path == Path::new("link-0")
     ));
     assert_eq!(
-        std::fs::read(leaf).expect("destination file should be readable"),
-        b"original"
-    );
-}
-
-#[cfg(unix)]
-#[tokio::test]
-async fn overwrites_release_pending_symlink_storage() {
-    let temp = tempdir().expect("temporary directory should be created");
-    let target = "x".repeat(usize::from(u16::MAX));
-    let mut entries = Vec::new();
-    for index in 0..63 {
-        entries.push(entry::symbolic_link(&format!("link-{index}"), &target));
-    }
-    // Replacing a link near the limit should charge only the net change.
-    entries.push(entry::symbolic_link("link-0", &target));
-    entries.push(entry::file("link-0", b"final"));
-    entries.push(entry::symbolic_link("new", &target));
-    // Replace the oversized targets before native link creation.
-    for index in 1..63 {
-        entries.push(entry::symbolic_link(&format!("link-{index}"), "new"));
-    }
-    entries.push(entry::symbolic_link("new", "link-0"));
-
-    TestArchive::new(entries)
-        .extract_in(temp.path(), ExtractPolicy::default())
-        .await
-        .expect("overwrites should keep live targets within the limit");
-    assert_eq!(
-        std::fs::read(temp.path().join("link-1")).expect("replacement chain should resolve"),
-        b"final"
+        std::fs::read(temp.path().join("link-0")).expect("file should survive rejected overwrite"),
+        b"kept"
     );
 }
 

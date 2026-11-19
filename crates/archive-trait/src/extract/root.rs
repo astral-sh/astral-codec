@@ -148,6 +148,13 @@ impl EntryTree {
         self.0.state(entry).copied()
     }
 
+    fn symlink_index(&self, entry: EntryId) -> Option<u64> {
+        match self.state(entry) {
+            Some(ExtractedEntry::Symlink { index }) => Some(index),
+            _ => None,
+        }
+    }
+
     fn state_for_path(&self, path: &NormalizedPath) -> Option<ExtractedEntry> {
         self.find(path).and_then(|entry| self.state(entry))
     }
@@ -478,20 +485,19 @@ impl<E> ExtractionRoot<E> {
             requires_directory: target.requires_directory,
         };
         // Check the net cost before removing an existing filesystem leaf.
-        let replaced_bytes = match self.entries.state(entry) {
-            Some(ExtractedEntry::Symlink { index }) => self.symlinks[&index].retained_bytes(),
-            _ => 0,
-        };
+        let replaced_bytes = self
+            .entries
+            .symlink_index(entry)
+            .map_or(0, |index| self.symlinks[&index].retained_bytes());
         let retained = self.pending_symlink_bytes - replaced_bytes + link.retained_bytes();
         if retained > MAX_PENDING_SYMLINK_BYTES {
             return Err(link.error("pending symbolic-link storage limit exceeded"));
         }
-        let index = match self.symlinks.last_key_value() {
-            Some((&last, _)) => last
-                .checked_add(1)
-                .ok_or_else(|| link.error("symbolic-link index overflow"))?,
-            None => 0,
-        };
+        let index = self
+            .symlinks
+            .last_key_value()
+            .map_or(Some(0), |(&last, _)| last.checked_add(1))
+            .ok_or_else(|| link.error("symbolic-link index overflow"))?;
         self.replace_leaf(&link.path, entry, parent).await?;
         self.entries
             .set_state(entry, ExtractedEntry::Symlink { index });
@@ -680,10 +686,7 @@ impl<E> ExtractionRoot<E> {
             self.queue_parents(path).await?
         };
         let entry = self.entries.ensure_child(parent, leaf_name(path));
-        if matches!(
-            self.entries.state(entry),
-            Some(ExtractedEntry::Symlink { .. })
-        ) {
+        if self.entries.symlink_index(entry).is_some() {
             self.flush_buffered_files().await?;
             self.replace_leaf(path, entry, parent).await?;
         }
@@ -792,10 +795,7 @@ impl<E> ExtractionRoot<E> {
     ) -> Result<File, ExtractError<E>> {
         let parent = self.ensure_parents(path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(path));
-        if matches!(
-            self.entries.state(entry),
-            Some(ExtractedEntry::Symlink { .. })
-        ) {
+        if self.entries.symlink_index(entry).is_some() {
             self.replace_leaf(path, entry, parent).await?;
         }
         let file = match self
@@ -921,7 +921,7 @@ impl<E> ExtractionRoot<E> {
         if let Some(metadata) = metadata {
             self.remove_leaf(path, entry, parent, &metadata).await?;
         }
-        if let Some(ExtractedEntry::Symlink { index }) = self.entries.state(entry)
+        if let Some(index) = self.entries.symlink_index(entry)
             && let Some(link) = self.symlinks.remove(&index)
         {
             self.pending_symlink_bytes -= link.retained_bytes();
