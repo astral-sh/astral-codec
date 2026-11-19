@@ -78,7 +78,7 @@ including the shared path allocation in the count, gave 1,004 bytes at
 500 parents and 2,004 bytes at 1,000 parents.
 [PR #377](https://github.com/astral-sh/astral-codec/pull/377)
 
-## 4. Named lookup and extraction disagree on duplicate destinations (medium)
+## 4. Named lookup and extraction disagree on duplicate destinations (medium, deferred)
 
 For two members named `config` containing `first` and `last` in that order,
 `validate_all()` succeeds, Go's `archive/zip.Reader.Open("config")` reads
@@ -93,8 +93,10 @@ its collision check compares literal components. Python's
 name before installation can therefore verify different bytes from those it
 installs. [Builder collision check](crates/archive-trait/src/builder.rs#L964)
 
-**Open question.** Should ZIP offer a policy that rejects repeated normalized
-destinations? If so, should the reader and builder enforce it by default?
+**Decision.** Defer until we know how often ZIP archives on PyPI contain
+duplicate member names or distinct names that normalize to the same destination.
+Use those counts to decide whether the ZIP reader and builder should reject
+either case and whether rejection should be the default.
 
 ## 5. A local directory header bypasses the version 1.0 opt-in (low)
 
