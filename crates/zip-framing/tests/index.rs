@@ -456,26 +456,26 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 
 #[tokio::test]
 async fn version_1_directories_require_opt_in() -> TestResult {
-    let archive = Fixture {
-        version: Some(10),
-        ..Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
-    }
-    .build();
-    let mut source = Cursor::new(&archive.bytes);
-    let mut index = Index::read(&mut source).await?;
-    assert!(matches!(
-        index.entry(&mut source, 0).await,
-        Err(FrameError::PolicyViolation {
-            position: 0,
-            violation: IndexPolicyViolation::Version1Directory
-        })
-    ));
+    let mut archive = Fixture::member("empty/", (0o040755 << 16) | 0x10, b"").build();
+    for (local, central) in [(10, 10), (10, 20), (20, 10)] {
+        set16(&mut archive.bytes, 4, local);
+        set16(&mut archive.bytes, archive.central + 6, central);
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(&mut source).await?;
+        assert!(matches!(
+            index.entry(&mut source, 0).await,
+            Err(FrameError::PolicyViolation {
+                position: 0,
+                violation: IndexPolicyViolation::Version1Directory
+            })
+        ));
 
-    let policy = IndexPolicy::default().allow_version_1_directories(true);
-    let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
-    let entry = index.resolved(0).ok_or("unresolved entry")?;
-    assert_eq!(entry.kind(), &EntryKind::Directory);
-    assert_eq!(entry.directory().version_needed(), 10);
+        let policy = IndexPolicy::default().allow_version_1_directories(true);
+        let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
+        let entry = index.resolved(0).ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), &EntryKind::Directory);
+        assert_eq!(entry.directory().version_needed(), central);
+    }
     Ok(())
 }
 
@@ -744,6 +744,22 @@ async fn checks_extraction_versions_independently() -> TestResult {
                     result?;
                 }
             }
+        }
+    }
+
+    let policy = IndexPolicy::default().allow_version_1_directories(true);
+    for (fixture, invalid, valid) in [
+        (Fixture::member("empty/", 0x10, b""), 11, 10),
+        (Fixture::member("volume", 0x08, b""), 10, 11),
+    ] {
+        let mut archive = fixture.build();
+        for (local, central) in [(invalid, valid), (valid, invalid)] {
+            set16(&mut archive.bytes, 4, local);
+            set16(&mut archive.bytes, archive.central + 6, central);
+            assert!(matches!(
+                read_validated_with(&mut Cursor::new(&archive.bytes), policy).await,
+                Err(FrameError::Invalid { position: 0, .. })
+            ));
         }
     }
 
