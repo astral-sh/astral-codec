@@ -21,6 +21,7 @@ pub(super) struct Fixture {
     pub(super) zip64_extensions: Vec<u8>,
     pub(super) zip64_version: Option<u16>,
     pub(super) version: Option<u16>,
+    pub(super) local_version: Option<u16>,
     pub(super) method: u16,
     pub(super) descriptor: Option<bool>,
     pub(super) crc: Option<u32>,
@@ -77,6 +78,12 @@ impl Fixture {
         }
     }
 
+    pub(super) fn with_versions(mut self, local: u16, central: u16) -> Self {
+        self.local_version = Some(local);
+        self.version = Some(central);
+        self
+    }
+
     pub(super) fn with_extra(mut self, local: bool, extra: Vec<u8>) -> Self {
         if local {
             self.local_extra = extra;
@@ -121,7 +128,7 @@ impl Fixture {
 
         let mut bytes = vec![0; 30];
         set32(&mut bytes, 0, 0x0403_4b50);
-        set16(&mut bytes, 4, version);
+        set16(&mut bytes, 4, self.local_version.unwrap_or(version));
         set16(&mut bytes, 6, flags);
         set16(&mut bytes, 8, self.method);
         set32(
