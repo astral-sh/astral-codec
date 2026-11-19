@@ -23,11 +23,12 @@ target strings alone. This figure is an extrapolation from the record layout.
 [Reservation at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L464) ·
 [Finalization at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L549)
 
-**Decision.** The shared extractor limits pending symlink records and their
-string allocations to 8 MiB. It checks the net cost before replacing a leaf
-and frees the superseded record on overwrite. Repeating the ZIP reproduction
-on `ww/triage` and the child branch gave peak RSS of 133.2 MiB and 5.2 MiB
-respectively. Both extractions produced the five-byte file.
+**Decision.** The shared extractor limits deferred symlink records and their
+string allocations to 8 MiB per archive. Each record counts even if a later
+member overwrites it. This lets the extractor keep its append-only vector and
+check one byte counter before reserving a link. The ZIP above now fails at
+the 64th symlink with peak RSS of 12.5 MiB. A ZIP with 63 such links followed
+by the regular file extracts successfully.
 [PR #376](https://github.com/astral-sh/astral-codec/pull/376)
 
 ## 2. Failed extraction can leave an escaping symlink (high)

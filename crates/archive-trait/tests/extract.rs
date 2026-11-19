@@ -377,30 +377,28 @@ async fn payload_errors_flush_prior_files_before_returning() {
 
 #[cfg(unix)]
 #[tokio::test]
-async fn pending_symlink_limit_counts_only_live_links() {
+async fn pending_symlink_limit_includes_overwritten_links() {
     let temp = tempdir().expect("temporary directory should be created");
     let target = "x".repeat(usize::from(u16::MAX));
     // The two target strings plus the record take just over 128 KiB per link.
-    // 63 live links fit in 8 MiB.
-    let links = (0..63).map(|index| entry::symbolic_link(&format!("link-{index}"), &target));
+    // The 64th reservation exceeds 8 MiB even when every link has the same name.
+    let links = (0..63).map(|_| entry::symbolic_link("p", &target));
     let archive = TestArchive::new(links.chain([
-        entry::symbolic_link("link-0", &target),
-        entry::file("link-0", b"kept"),
-        entry::symbolic_link("new", &target),
-        // This would be the 64th live link. Check the limit before deleting the file.
-        entry::symbolic_link("link-0", &target),
+        entry::file("p", b"kept"),
+        entry::symbolic_link("p", &target),
     ]));
 
     assert!(matches!(
-        archive.extract_in(temp.path(), ExtractPolicy::default()).await,
+        archive
+            .extract_in(temp.path(), ExtractPolicy::default())
+            .await,
         Err(ExtractError::InvalidLink {
-            path,
             reason: "pending symbolic-link storage limit exceeded",
             ..
-        }) if path == Path::new("link-0")
+        })
     ));
     assert_eq!(
-        std::fs::read(temp.path().join("link-0")).expect("file should survive rejected overwrite"),
+        std::fs::read(temp.path().join("p")).expect("file should survive rejected overwrite"),
         b"kept"
     );
 }
