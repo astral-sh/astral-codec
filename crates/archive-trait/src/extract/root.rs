@@ -11,7 +11,7 @@ use std::{
     fs as std_fs, io,
     marker::PhantomData,
     mem,
-    path::{Path, PathBuf},
+    path::{MAIN_SEPARATOR, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -122,17 +122,6 @@ impl EntryTree {
         let mut entry = ROOT_ENTRY;
         for component in path.components() {
             entry = self.child(entry, component)?;
-        }
-        Some(entry)
-    }
-
-    fn find_parent_directory(&self, path: &NormalizedPath) -> Option<EntryId> {
-        let mut entry = ROOT_ENTRY;
-        for component in path.parent_components() {
-            entry = self.child(entry, component)?;
-            if self.state(entry) != Some(ExtractedEntry::Directory) {
-                return None;
-            }
         }
         Some(entry)
     }
@@ -676,11 +665,12 @@ impl<E> ExtractionRoot<E> {
         executable: bool,
         contents: Vec<u8>,
     ) -> Result<Vec<u8>, ExtractError<E>> {
-        let parent = if let Some(parent) = self.known_parent(path) {
-            parent
+        let shared_path: Arc<str> = if cfg!(windows) {
+            path.as_str().replace('/', "\\").into()
         } else {
-            self.queue_parents(path).await?
+            path.as_str().into()
         };
+        let parent = self.queue_parents(&shared_path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(path));
         if matches!(
             self.entries.state(entry),
@@ -707,7 +697,7 @@ impl<E> ExtractionRoot<E> {
             .push(BufferedOperation::File(BufferedFile {
                 entry,
                 parent,
-                path: path.to_path_buf(),
+                path: shared_path,
                 executable,
                 contents,
                 replacement,
@@ -752,25 +742,26 @@ impl<E> ExtractionRoot<E> {
 
     /// Queue only implicit parents; explicit directories and link operations
     /// flush these commands before inspecting or replacing filesystem state.
-    async fn queue_parents(&mut self, path: &NormalizedPath) -> Result<EntryId, ExtractError<E>> {
-        let mut current = NormalizedPath::default();
+    async fn queue_parents(&mut self, path: &Arc<str>) -> Result<EntryId, ExtractError<E>> {
+        let mut start = 0;
         let mut parent = ROOT_ENTRY;
-        for component in path.parent_components() {
-            current.push(component);
-            let entry = self.entries.ensure_child(parent, component);
+        for (end, _) in path.match_indices(MAIN_SEPARATOR) {
+            let entry = self.entries.ensure_child(parent, &path[start..end]);
+            start = end + 1;
             match self.entries.state(entry) {
                 Some(ExtractedEntry::Directory) => {}
                 Some(_) => {
                     self.flush_buffered_files().await?;
                     return Err(ExtractError::PathCollision {
-                        path: current.to_path_buf(),
+                        path: path[..end].into(),
                     });
                 }
                 None => {
                     self.buffered_operations.push(BufferedOperation::Directory {
                         entry,
                         parent,
-                        path: current.to_path_buf(),
+                        path: Arc::clone(path),
+                        end,
                     });
                     self.entries.set_state(entry, ExtractedEntry::Directory);
                     if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS {
@@ -781,10 +772,6 @@ impl<E> ExtractionRoot<E> {
             parent = entry;
         }
         Ok(parent)
-    }
-
-    fn known_parent(&self, path: &NormalizedPath) -> Option<EntryId> {
-        self.entries.find_parent_directory(path)
     }
 
     async fn create_file(
@@ -1149,30 +1136,29 @@ impl<E> ExtractionRoot<E> {
     }
 
     fn entry_capability(&self, path: &NormalizedPath, parent: EntryId) -> (Arc<Dir>, PathBuf) {
-        entry_capability(
+        let (directory, relative_path) = entry_capability(
             &self.directory,
             &self.directory_handles,
             path.as_path(),
             parent,
-        )
+        );
+        (Arc::clone(directory), relative_path.to_owned())
     }
 }
 
-fn entry_capability(
-    directory: &Arc<Dir>,
-    handles: &DirectoryHandles,
-    path: &Path,
+fn entry_capability<'a>(
+    directory: &'a Arc<Dir>,
+    handles: &'a DirectoryHandles,
+    path: &'a Path,
     parent: EntryId,
-) -> (Arc<Dir>, PathBuf) {
-    if let Some(file_name) = path.file_name() {
-        if parent == ROOT_ENTRY {
-            return (Arc::clone(directory), file_name.into());
-        }
-        if let Some(directory) = handles.get(parent) {
-            return (Arc::clone(directory), file_name.into());
-        }
+) -> (&'a Arc<Dir>, &'a Path) {
+    if parent != ROOT_ENTRY
+        && let Some(directory) = handles.get(parent)
+        && let Some(file_name) = path.file_name()
+    {
+        return (directory, Path::new(file_name));
     }
-    (Arc::clone(directory), path.to_path_buf())
+    (directory, path)
 }
 
 fn check_symlink_resolution_limit(
