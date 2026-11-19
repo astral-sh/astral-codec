@@ -62,17 +62,21 @@ For a small file named `a/b/c/file`, `queue_parents` constructs separate paths
 for `a`, `a/b`, and `a/b/c`. With *n* one-character parents, the prefixes
 contain *n*² bytes in total. Flushing every 64 operations bounds the number
 held at once. Each prefix still gets constructed during extraction.
-[Parent batching](crates/archive-trait/src/extract/root.rs#L755) ·
-[Path construction](crates/archive-trait/src/extract/path.rs#L95)
+[Parent batching at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/root.rs#L755) ·
+[Path construction at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/archive-trait/src/extract/path.rs#L95)
 
 For one empty PAX file under 1,000 one-character parents, instrumenting
 `NormalizedPath::to_path_buf` counted 2,004 bytes of path text at `6759246`
 and 1,002,004 bytes at `9292997`. At 500 parents the counts were 1,004 and
 251,004 bytes respectively. Both codecs use this path through the extractor.
 
-**Open question.** Can queued parents share the member path and store an end
-offset for each prefix? The worker needs the leaf for a cached parent and the
-full prefix for a cache miss or an error.
+**Decision.** Share the buffered file's native path with its queued parents.
+Each parent stores the byte offset of its trailing separator. The worker
+borrows the leaf when it has a cached parent handle and the full prefix when
+it uses the root handle. Repeating the PAX reproduction on macOS arm64,
+including the shared path allocation in the count, gave 1,004 bytes at
+500 parents and 2,004 bytes at 1,000 parents.
+[PR #377](https://github.com/astral-sh/astral-codec/pull/377)
 
 ## 4. Named lookup and extraction disagree on duplicate destinations (medium)
 
