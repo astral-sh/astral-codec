@@ -70,6 +70,9 @@ impl PendingSymlink {
     }
 }
 
+// Bound all deferred link records and their strings, including superseded links.
+const MAX_PENDING_SYMLINK_BYTES: usize = 8 * 1024 * 1024;
+
 // Bound substitutions and cumulative path work while validating the archive graph.
 const MAX_SYMLINK_EXPANSIONS: usize = 256;
 const MAX_SYMLINK_RESOLUTION_WORK_BYTES: usize = 8 * 1024 * 1024;
@@ -254,6 +257,7 @@ pub(super) struct ExtractionRoot<E> {
     entries: EntryTree,
     /// Append-only storage; duplicate paths invalidate earlier indices.
     symlinks: Vec<PendingSymlink>,
+    pending_symlink_bytes: usize,
     /// Validated files and their parents awaiting ordered creation in one blocking task.
     buffered_operations: Vec<BufferedOperation>,
     /// Total payload size retained by [`Self::buffered_operations`].
@@ -366,6 +370,7 @@ impl<E> ExtractionRoot<E> {
             allow_overwrites,
             entries: EntryTree::new(),
             symlinks: Vec::new(),
+            pending_symlink_bytes: 0,
             buffered_operations: Vec::new(),
             buffered_file_bytes: 0,
             buffered_file_buffers: Vec::new(),
@@ -450,23 +455,36 @@ impl<E> ExtractionRoot<E> {
     /// Reserves a symbolic link for validation after all members are read.
     pub(super) async fn reserve_symlink(
         &mut self,
-        member: &ExtractMember,
+        member: ExtractMember,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         let target = validate_symlink_target(member.position, &member.path, &member.link_target)?;
+        let retained = self.pending_symlink_bytes
+            + size_of::<PendingSymlink>()
+            + member.path.capacity()
+            + member.link_target.capacity()
+            + target.resolved_target.capacity();
+        if retained > MAX_PENDING_SYMLINK_BYTES {
+            return Err(ExtractError::invalid_link(
+                member.position,
+                member.path.to_path_buf(),
+                member.link_target,
+                "pending symbolic-link storage limit exceeded",
+            ));
+        }
         let parent = self.ensure_parents(&member.path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(&member.path));
         self.replace_leaf(&member.path, entry, parent).await?;
         let index = self.symlinks.len();
-        let path = member.path.clone();
+        self.pending_symlink_bytes = retained;
         self.entries
             .set_state(entry, ExtractedEntry::Symlink { index });
         self.symlinks.push(PendingSymlink {
             entry,
             parent,
-            path,
+            path: member.path,
             position: member.position,
-            target: member.link_target.clone(),
+            target: member.link_target,
             resolved_target: target.resolved_target,
             requires_directory: target.requires_directory,
         });

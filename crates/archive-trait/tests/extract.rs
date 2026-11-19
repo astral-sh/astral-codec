@@ -375,6 +375,34 @@ async fn payload_errors_flush_prior_files_before_returning() {
     assert!(!destination.join("invalid").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pending_symlink_limit_includes_overwritten_links() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let target = "x".repeat(usize::from(u16::MAX));
+    // The two target strings plus the record take just over 128 KiB per link.
+    // The 64th reservation exceeds 8 MiB even when every link has the same name.
+    let links = (0..63).map(|_| entry::symbolic_link("p", &target));
+    let archive = TestArchive::new(links.chain([
+        entry::file("p", b"kept"),
+        entry::symbolic_link("p", &target),
+    ]));
+
+    assert!(matches!(
+        archive
+            .extract_in(temp.path(), ExtractPolicy::default())
+            .await,
+        Err(ExtractError::InvalidLink {
+            reason: "pending symbolic-link storage limit exceeded",
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(temp.path().join("p")).expect("file should survive rejected overwrite"),
+        b"kept"
+    );
+}
+
 #[tokio::test]
 async fn rejects_invalid_destinations_unsafe_special_and_colliding_members() {
     let temp = tempdir().expect("temporary directory should be created");
