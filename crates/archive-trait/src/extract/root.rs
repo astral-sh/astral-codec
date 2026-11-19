@@ -7,7 +7,7 @@ mod buffered;
 
 use std::{
     borrow::Cow,
-    collections::HashSet,
+    collections::{BTreeMap, HashSet},
     fs as std_fs, io,
     marker::PhantomData,
     mem,
@@ -60,6 +60,13 @@ struct PendingSymlink {
 }
 
 impl PendingSymlink {
+    fn retained_bytes(&self) -> usize {
+        size_of::<Self>()
+            + self.path.capacity()
+            + self.target.capacity()
+            + self.resolved_target.capacity()
+    }
+
     fn error<E>(&self, reason: &'static str) -> ExtractError<E> {
         ExtractError::invalid_link(
             self.position,
@@ -69,6 +76,9 @@ impl PendingSymlink {
         )
     }
 }
+
+// Bound live link records and their strings while reading the archive.
+const MAX_PENDING_SYMLINK_BYTES: usize = 8 * 1024 * 1024;
 
 // Bound substitutions and cumulative path work while validating the archive graph.
 const MAX_SYMLINK_EXPANSIONS: usize = 256;
@@ -91,7 +101,7 @@ const STREAMING_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 enum ExtractedEntry {
     File,
     Directory,
-    Symlink { index: usize },
+    Symlink { index: u64 },
 }
 
 type EntryId = NodeId;
@@ -252,8 +262,9 @@ pub(super) struct ExtractionRoot<E> {
     allow_overwrites: bool,
     /// The latest state recorded for every path encountered by the extraction.
     entries: EntryTree,
-    /// Append-only storage; duplicate paths invalidate earlier indices.
-    symlinks: Vec<PendingSymlink>,
+    /// Live links in archive iteration order, which can differ from physical offset order.
+    symlinks: BTreeMap<u64, PendingSymlink>,
+    pending_symlink_bytes: usize,
     /// Validated files and their parents awaiting ordered creation in one blocking task.
     buffered_operations: Vec<BufferedOperation>,
     /// Total payload size retained by [`Self::buffered_operations`].
@@ -365,7 +376,8 @@ impl<E> ExtractionRoot<E> {
             directory_handles: DirectoryHandles::default(),
             allow_overwrites,
             entries: EntryTree::new(),
-            symlinks: Vec::new(),
+            symlinks: BTreeMap::new(),
+            pending_symlink_bytes: 0,
             buffered_operations: Vec::new(),
             buffered_file_bytes: 0,
             buffered_file_buffers: Vec::new(),
@@ -450,26 +462,41 @@ impl<E> ExtractionRoot<E> {
     /// Reserves a symbolic link for validation after all members are read.
     pub(super) async fn reserve_symlink(
         &mut self,
-        member: &ExtractMember,
+        member: ExtractMember,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         let target = validate_symlink_target(member.position, &member.path, &member.link_target)?;
         let parent = self.ensure_parents(&member.path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(&member.path));
-        self.replace_leaf(&member.path, entry, parent).await?;
-        let index = self.symlinks.len();
-        let path = member.path.clone();
-        self.entries
-            .set_state(entry, ExtractedEntry::Symlink { index });
-        self.symlinks.push(PendingSymlink {
+        let link = PendingSymlink {
             entry,
             parent,
-            path,
+            path: member.path,
             position: member.position,
-            target: member.link_target.clone(),
+            target: member.link_target,
             resolved_target: target.resolved_target,
             requires_directory: target.requires_directory,
-        });
+        };
+        // Check the net cost before removing an existing filesystem leaf.
+        let replaced_bytes = match self.entries.state(entry) {
+            Some(ExtractedEntry::Symlink { index }) => self.symlinks[&index].retained_bytes(),
+            _ => 0,
+        };
+        let retained = self.pending_symlink_bytes - replaced_bytes + link.retained_bytes();
+        if retained > MAX_PENDING_SYMLINK_BYTES {
+            return Err(link.error("pending symbolic-link storage limit exceeded"));
+        }
+        let index = match self.symlinks.last_key_value() {
+            Some((&last, _)) => last
+                .checked_add(1)
+                .ok_or_else(|| link.error("symbolic-link index overflow"))?,
+            None => 0,
+        };
+        self.replace_leaf(&link.path, entry, parent).await?;
+        self.entries
+            .set_state(entry, ExtractedEntry::Symlink { index });
+        self.symlinks.insert(index, link);
+        self.pending_symlink_bytes = retained;
         Ok(())
     }
 
@@ -541,15 +568,11 @@ impl<E> ExtractionRoot<E> {
 
     /// Validates active symbolic links against the complete graph, then creates them.
     pub(super) async fn finalize_symlinks(
-        &mut self,
+        mut self,
         policy: LinkPolicy,
     ) -> Result<(), ExtractError<E>> {
-        let mut links = Vec::with_capacity(self.symlinks.len());
         let mut resolution_work_bytes = 0;
-        for (index, link) in self.symlinks.iter().enumerate() {
-            if self.entries.state(link.entry) != Some(ExtractedEntry::Symlink { index }) {
-                continue;
-            }
+        for link in self.symlinks.values() {
             let target = self
                 .resolve_terminal(&link.resolved_target, &mut resolution_work_bytes)
                 .map_err(|reason| link.error(reason))?;
@@ -563,19 +586,12 @@ impl<E> ExtractionRoot<E> {
             if kind == TerminalKind::NonDirectory && link.requires_directory {
                 return Err(link.error("target path suffix requires a directory"));
             }
-            links.push(index);
         }
 
-        for &index in &links {
-            let (entry, parent, path, contents) = {
-                let link = &self.symlinks[index];
-                (
-                    link.entry,
-                    link.parent,
-                    link.path.clone(),
-                    link.target.clone(),
-                )
-            };
+        let links = mem::take(&mut self.symlinks);
+        for link in links.values() {
+            let parent = link.parent;
+            let path = &link.path;
             // The link target was validated at this depth. A filesystem alias
             // must not redirect its parent to a previously published link.
             if parent != ROOT_ENTRY {
@@ -595,7 +611,7 @@ impl<E> ExtractionRoot<E> {
                     .insert(parent, ROOT_ENTRY, Arc::new(directory));
             }
             match self
-                .try_create_symlink(&path, parent, contents.clone())
+                .try_create_symlink(path, parent, link.target.clone())
                 .await?
             {
                 Ok(()) => continue,
@@ -615,14 +631,15 @@ impl<E> ExtractionRoot<E> {
             // a later archive member and already has precedence. A link can be
             // an earlier deferred link, which this member may replace according
             // to the normal overwrite policy.
-            self.check_replacement(&path, entry)?;
-            if let Some(metadata) = self.metadata(&path, parent).await? {
+            self.check_replacement(path, link.entry)?;
+            if let Some(metadata) = self.metadata(path, parent).await? {
                 if !metadata_is_link(&metadata) {
                     continue;
                 }
-                self.remove_leaf(&path, entry, parent, &metadata).await?;
+                self.remove_leaf(path, link.entry, parent, &metadata)
+                    .await?;
             }
-            self.try_create_symlink(&path, parent, contents)
+            self.try_create_symlink(path, parent, link.target.clone())
                 .await?
                 .map_err(|source| {
                     ExtractError::filesystem("create symbolic link", path.to_path_buf(), source)
@@ -630,8 +647,7 @@ impl<E> ExtractionRoot<E> {
         }
 
         // A later link can make a missing target reachable through a filesystem alias.
-        for index in links {
-            let link = &self.symlinks[index];
+        for link in links.into_values() {
             let exists = self
                 .with_root(
                     "resolve extracted symbolic link",
@@ -905,6 +921,11 @@ impl<E> ExtractionRoot<E> {
         if let Some(metadata) = metadata {
             self.remove_leaf(path, entry, parent, &metadata).await?;
         }
+        if let Some(ExtractedEntry::Symlink { index }) = self.entries.state(entry)
+            && let Some(link) = self.symlinks.remove(&index)
+        {
+            self.pending_symlink_bytes -= link.retained_bytes();
+        }
         self.entries.clear_state(entry);
         Ok(true)
     }
@@ -948,7 +969,7 @@ impl<E> ExtractionRoot<E> {
                 if let Some(entry) = entry {
                     match self.entries.state(entry) {
                         Some(ExtractedEntry::Symlink { index }) => {
-                            if let Some(link) = self.symlinks.get(index) {
+                            if let Some(link) = self.symlinks.get(&index) {
                                 let mut target = link.resolved_target.clone();
                                 target.extend(components.by_ref());
                                 rewritten = Some(target);

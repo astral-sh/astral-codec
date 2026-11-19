@@ -375,6 +375,62 @@ async fn payload_errors_flush_prior_files_before_returning() {
     assert!(!destination.join("invalid").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pending_symlink_limit_is_checked_before_replacing_the_leaf() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let target = "x".repeat(usize::from(u16::MAX));
+    // Each original and normalized target pair takes just under 128 KiB.
+    // With the records and paths, the 64th live link exceeds 8 MiB.
+    let archive = TestArchive::new(
+        (0..64).map(|index| entry::symbolic_link(&format!("link-{index}"), &target)),
+    );
+    let leaf = temp.path().join("link-63");
+    std::fs::write(&leaf, b"original").expect("destination file should be created");
+
+    assert!(matches!(
+        archive.extract_in(temp.path(), ExtractPolicy::default()).await,
+        Err(ExtractError::InvalidLink {
+            path,
+            reason: "pending symbolic-link storage limit exceeded",
+            ..
+        }) if path == Path::new("link-63")
+    ));
+    assert_eq!(
+        std::fs::read(leaf).expect("destination file should be readable"),
+        b"original"
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn overwrites_release_pending_symlink_storage() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let target = "x".repeat(usize::from(u16::MAX));
+    let mut entries = Vec::new();
+    for index in 0..63 {
+        entries.push(entry::symbolic_link(&format!("link-{index}"), &target));
+    }
+    // Replacing a link near the limit should charge only the net change.
+    entries.push(entry::symbolic_link("link-0", &target));
+    entries.push(entry::file("link-0", b"final"));
+    entries.push(entry::symbolic_link("new", &target));
+    // Replace the oversized targets before native link creation.
+    for index in 1..63 {
+        entries.push(entry::symbolic_link(&format!("link-{index}"), "new"));
+    }
+    entries.push(entry::symbolic_link("new", "link-0"));
+
+    TestArchive::new(entries)
+        .extract_in(temp.path(), ExtractPolicy::default())
+        .await
+        .expect("overwrites should keep live targets within the limit");
+    assert_eq!(
+        std::fs::read(temp.path().join("link-1")).expect("replacement chain should resolve"),
+        b"final"
+    );
+}
+
 #[tokio::test]
 async fn rejects_invalid_destinations_unsafe_special_and_colliding_members() {
     let temp = tempdir().expect("temporary directory should be created");

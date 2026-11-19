@@ -26,6 +26,10 @@ pub struct ExtractPolicy {
 /// By default, symbolic links are preserved as native links, including links
 /// to pre-existing entries and missing targets. Resolving a preserved link
 /// must stay within the extraction root. Hard links require explicit opt-in.
+///
+/// Extraction limits pending symbolic links to 8 MiB across their records,
+/// paths, original targets, and normalized targets. Overwriting a pending
+/// link releases its share of this limit.
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub struct LinkPolicy {
     pub(crate) symlink_policy: SymlinkPolicy,
@@ -176,7 +180,7 @@ pub(crate) async fn extract<A: Archive>(
                 Member::Directory { .. } => root.extract_directory(&decoded.path).await?,
                 Member::SymbolicLink { .. } => {
                     if policy.link_policy.symlink_policy == SymlinkPolicy::Preserve {
-                        root.reserve_symlink(&decoded).await?;
+                        root.reserve_symlink(decoded).await?;
                     }
                 }
                 Member::HardLink { size, payload, .. } => {
