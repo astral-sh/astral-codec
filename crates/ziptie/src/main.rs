@@ -4,17 +4,26 @@ use std::{
     process::ExitCode,
 };
 
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use thiserror::Error;
 use tokio::fs::File;
 use zip_codec::{
-    Archive as _, DecodeError, ExtractError, Member, MemberPayload as _, SpecialKind, ZipArchive,
-    extract::ExtractPolicy,
+    Archive as _, DecodeError, DecodePolicy, ExtractError, Member, MemberPayload as _, SpecialKind,
+    ZipArchive, extract::ExtractPolicy,
 };
-use zip_framing::{Error as FrameError, Index};
+use zip_framing::{Error as FrameError, ExtraFieldPolicy, Index, IndexPolicy};
 
 /// Inspect and extract ZIP archives.
 #[derive(Debug, Parser)]
+struct Cli {
+    /// Accept ZIP extra fields on the reader's allowlist (default: ZIP64 only).
+    #[arg(long, global = true)]
+    allow_known_extras: bool,
+    #[command(subcommand)]
+    command: Command,
+}
+
+#[derive(Debug, Subcommand)]
 enum Command {
     /// Check local records and dump their offsets and central directory metadata.
     Frames {
@@ -51,7 +60,7 @@ enum CliError {
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> ExitCode {
-    match run(Command::parse()).await {
+    match run(Cli::parse()).await {
         Ok(()) => ExitCode::SUCCESS,
         Err(error) => {
             eprintln!("error: {error}");
@@ -60,15 +69,24 @@ async fn main() -> ExitCode {
     }
 }
 
-async fn run(command: Command) -> Result<(), CliError> {
-    match command {
-        Command::Frames { archive } => dump_frames(&archive, &mut io::stdout().lock()).await,
-        Command::Logical { archive } => dump_logical(&archive, &mut io::stdout().lock()).await,
+async fn run(cli: Cli) -> Result<(), CliError> {
+    let extras = if cli.allow_known_extras {
+        ExtraFieldPolicy::AllowListed
+    } else {
+        ExtraFieldPolicy::default()
+    };
+    match cli.command {
+        Command::Frames { archive } => {
+            dump_frames(&archive, extras, &mut io::stdout().lock()).await
+        }
+        Command::Logical { archive } => {
+            dump_logical(&archive, extras, &mut io::stdout().lock()).await
+        }
         Command::Extract {
             archive,
             destination,
         } => {
-            ZipArchive::open(open_archive(&archive).await?)
+            open_archive(&archive, extras)
                 .await?
                 .extract_in(destination, ExtractPolicy::default())
                 .await?;
@@ -77,16 +95,26 @@ async fn run(command: Command) -> Result<(), CliError> {
     }
 }
 
-async fn open_archive(path: &Path) -> Result<File, CliError> {
+async fn open_file(path: &Path) -> Result<File, CliError> {
     File::open(path).await.map_err(|source| CliError::Open {
         path: path.to_owned(),
         source,
     })
 }
 
-async fn dump_frames(path: &Path, output: &mut impl Write) -> Result<(), CliError> {
-    let mut file = open_archive(path).await?;
-    let mut index = Index::read(&mut file).await?;
+async fn open_archive(path: &Path, extras: ExtraFieldPolicy) -> Result<ZipArchive<File>, CliError> {
+    let policy = DecodePolicy::default().extra_field_policy(extras);
+    Ok(ZipArchive::open_with_policy(open_file(path).await?, policy).await?)
+}
+
+async fn dump_frames(
+    path: &Path,
+    extras: ExtraFieldPolicy,
+    output: &mut impl Write,
+) -> Result<(), CliError> {
+    let mut file = open_file(path).await?;
+    let policy = IndexPolicy::default().extra_field_policy(extras);
+    let mut index = Index::read_with_policy(&mut file, policy).await?;
     writeln!(output, "archive: {path:?}\nformat: zip\nframes:")?;
     let mut number = 0;
     while let Some(entry) = index.entry(&mut file, number).await? {
@@ -112,8 +140,12 @@ async fn dump_frames(path: &Path, output: &mut impl Write) -> Result<(), CliErro
     Ok(())
 }
 
-async fn dump_logical(path: &Path, output: &mut impl Write) -> Result<(), CliError> {
-    let mut archive = ZipArchive::open(open_archive(path).await?).await?;
+async fn dump_logical(
+    path: &Path,
+    extras: ExtraFieldPolicy,
+    output: &mut impl Write,
+) -> Result<(), CliError> {
+    let mut archive = open_archive(path, extras).await?;
     writeln!(output, "archive: {path:?}\nformat: zip\nmembers:")?;
     let mut buffer = Vec::new();
     let mut number = 0usize;
