@@ -106,10 +106,10 @@ the versions produces `Version1Directory`. APPNOTE §4.4.3.2 sets the minimum
 directory version at 2.0, and `allow_version_1_directories` defaults to false.
 The parser checks the compression method's minimum in each header. The
 subsequent check for the resolved member kind receives only the central version.
-[Version check](crates/zip-framing/src/index.rs#L372) ·
-[Kind-specific minimum](crates/zip-framing/src/kind.rs#L120) ·
+[Version check at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/zip-framing/src/index.rs#L372) ·
+[Kind-specific minimum at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/zip-framing/src/kind.rs#L120) ·
 [PKWARE APPNOTE 6.3.9](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT)
 
-**Open question.** Should the kind-specific minimum apply independently to
-both headers? Independent checks would allow the central header to declare a
-higher version when only its local-header offset needs ZIP64.
+**Decision.** Apply the existing directory and volume label version requirements
+to each header independently.
+[PR #378](https://github.com/astral-sh/astral-codec/pull/378)

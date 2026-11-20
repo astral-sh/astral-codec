@@ -119,11 +119,11 @@ impl EntryKind {
     /// Checks the extraction version requirements specific to the resolved kind.
     pub(crate) fn check_version(
         &self,
-        directory: &CentralDirectoryEntry,
+        version: u16,
         allow_version_1_directories: bool,
+        position: u64,
     ) -> Result<(), Error> {
-        let position = directory.position();
-        match (self, directory.version_needed()) {
+        match (self, version) {
             (Self::VolumeLabel, ..version::V1_1) => Err(invalid(
                 position,
                 "volume label requires extraction version 1.1",

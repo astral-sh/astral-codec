@@ -367,11 +367,12 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(&mut buffered, &mut pending_budget)
+                    .read_local(
+                        &mut buffered,
+                        &mut pending_budget,
+                        self.allow_version_1_directories,
+                    )
                     .await?;
-                resolved
-                    .kind
-                    .check_version(indexed.directory(), self.allow_version_1_directories)?;
                 self.budget = pending_budget;
                 slot.insert(resolved)
             }
