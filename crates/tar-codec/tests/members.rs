@@ -98,7 +98,10 @@ async fn trailing_nonzero_byte_fails_before_eof() -> TestResult {
             inner: FrameErrorInner::TrailingData,
         }))) if position == (3 * BLOCK_SIZE + 7) as u64
     ));
-    assert!(archive.next_member().await?.is_none());
+    assert!(matches!(
+        archive.next_member().await,
+        Err(DecodeError::Poisoned)
+    ));
     Ok(())
 }
 
@@ -110,7 +113,9 @@ async fn ignoring_trailing_data_leaves_the_reader_at_the_marker() -> TestResult 
     let mut unread = bytes.as_slice();
     let mut archive = TarArchive::new(&mut unread)
         .with_policy(DecodePolicy::default().trailing_data_policy(TrailingDataPolicy::Ignore));
-    assert!(archive.next_member().await?.is_none());
+    for _ in 0..2 {
+        assert!(archive.next_member().await?.is_none());
+    }
     assert_eq!(unread, next_archive);
     Ok(())
 }
@@ -582,7 +587,7 @@ async fn advancing_drains_payload_and_applies_tar_policy() -> TestResult {
 }
 
 #[tokio::test]
-async fn payload_chunk_preflight_errors_fuse_member_iteration() -> TestResult {
+async fn payload_chunk_preflight_errors_poison_member_iteration() -> TestResult {
     let mut archive = ArchiveBuilder::new();
     archive
         .pax(b'x', &pax_record(PaxKeyword::Size, &u64::MAX.to_string()))
@@ -603,10 +608,15 @@ async fn payload_chunk_preflight_errors_fuse_member_iteration() -> TestResult {
             ..
         }))
     ));
+    assert!(matches!(
+        payload.next_chunk(&mut chunk, 1).await,
+        Err(DecodeError::Poisoned)
+    ));
+    assert!(matches!(payload.skip().await, Err(DecodeError::Poisoned)));
 
     for attempt in 1..=2 {
         assert!(
-            matches!(members.next().await, Ok(None)),
+            matches!(members.next().await, Err(DecodeError::Poisoned)),
             "iteration {attempt}"
         );
     }
@@ -615,7 +625,7 @@ async fn payload_chunk_preflight_errors_fuse_member_iteration() -> TestResult {
 }
 
 #[tokio::test]
-async fn payload_errors_fuse_member_iteration() -> TestResult {
+async fn payload_errors_poison_member_iteration() -> TestResult {
     #[derive(Clone, Copy, Debug)]
     enum Operation {
         Read,
@@ -644,7 +654,7 @@ async fn payload_errors_fuse_member_iteration() -> TestResult {
 
         for attempt in 1..=2 {
             assert!(
-                matches!(members.next().await, Ok(None)),
+                matches!(members.next().await, Err(DecodeError::Poisoned)),
                 "{operation:?}, iteration {attempt}"
             );
         }
@@ -681,7 +691,7 @@ async fn rejects_zero_length_gnu_extensions_at_their_header() -> TestResult {
                     inner: FrameErrorInner::InvalidGnuExtension { kind: found, .. },
                 })) if position == header_position as u64 && found == kind
             ));
-            assert!(members.next().await?.is_none());
+            assert!(matches!(members.next().await, Err(DecodeError::Poisoned)));
             assert_eq!(
                 bytes.len() - unread.len(),
                 header_position + BLOCK_SIZE,
@@ -694,7 +704,7 @@ async fn rejects_zero_length_gnu_extensions_at_their_header() -> TestResult {
 
 #[tokio::test]
 async fn cancelled_member_read_can_be_retried() -> TestResult {
-    let header = header(ArchiveFormat::Pax, "directory", b'5', 0, "", 0o755);
+    let header = header(ArchiveFormat::Pax, "file", b'0', 1, "", 0o644);
     let (input, mut writer) = duplex(BLOCK_SIZE);
     let mut members = TarArchive::new(input).members();
     writer.write_all(&header[..1]).await?;
@@ -702,15 +712,32 @@ async fn cancelled_member_read_can_be_retried() -> TestResult {
     assert!(pin!(members.next()).poll(&mut context).is_pending());
 
     writer.write_all(&header[1..]).await?;
-    drop(writer);
+    let Some(Member::File {
+        metadata,
+        mut payload,
+        ..
+    }) = members.next().await?
+    else {
+        return Err(io::Error::other("expected file member").into());
+    };
+    assert_eq!(metadata.path, "file");
+
+    let mut chunk = Vec::new();
+    writer.write_all(b"x").await?;
     assert!(
-        matches!(members.next().await?, Some(Member::Directory { metadata }) if metadata.path == "directory")
+        pin!(payload.next_chunk(&mut chunk, 1))
+            .poll(&mut context)
+            .is_pending()
     );
+    writer.write_all(&[0; BLOCK_SIZE - 1]).await?;
+    drop(writer);
+    assert!(payload.next_chunk(&mut chunk, 1).await?);
+    assert_eq!(chunk, b"x");
     Ok(())
 }
 
 #[tokio::test]
-async fn projection_errors_fuse_member_iteration() -> TestResult {
+async fn framing_errors_poison_member_iteration() -> TestResult {
     let mut archive = ArchiveBuilder::new();
     archive
         .gnu("longname", b'L', b"no-nul", "", 0o644)
@@ -729,13 +756,13 @@ async fn projection_errors_fuse_member_iteration() -> TestResult {
             ..
         }))
     ));
-    assert!(members.next().await?.is_none());
+    assert!(matches!(members.next().await, Err(DecodeError::Poisoned)));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn invalid_utf8_projection_errors_fuse_member_iteration() -> TestResult {
+async fn invalid_utf8_projection_errors_poison_member_iteration() -> TestResult {
     let mut binary_path = pax_record(PaxKeyword::HdrCharset, "BINARY");
     binary_path.extend_from_slice(&raw_pax_record(PaxKeyword::Path, &[0xff]));
 
@@ -751,13 +778,13 @@ async fn invalid_utf8_projection_errors_fuse_member_iteration() -> TestResult {
         members.next().await,
         Err(DecodeError::InvalidUtf8 { field: "path", .. })
     ));
-    assert!(members.next().await?.is_none());
+    assert!(matches!(members.next().await, Err(DecodeError::Poisoned)));
 
     Ok(())
 }
 
 #[tokio::test]
-async fn policy_errors_fuse_member_iteration() -> TestResult {
+async fn policy_errors_poison_member_iteration() -> TestResult {
     let mut archive = ArchiveBuilder::new();
     archive
         .pax(b'g', &pax_record(PaxKeyword::Path, "forbidden"))
@@ -773,6 +800,6 @@ async fn policy_errors_fuse_member_iteration() -> TestResult {
             ..
         })
     ));
-    assert!(members.next().await?.is_none());
+    assert!(matches!(members.next().await, Err(DecodeError::Poisoned)));
     Ok(())
 }

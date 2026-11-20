@@ -11,7 +11,7 @@ use std::{
     fs as std_fs, io,
     marker::PhantomData,
     mem,
-    path::{Path, PathBuf},
+    path::{MAIN_SEPARATOR, Path, PathBuf},
     sync::{
         Arc,
         atomic::{AtomicBool, Ordering},
@@ -35,7 +35,9 @@ use {
     },
 };
 
-use self::buffered::{BufferedFile, BufferedFileReplacement, write_buffered_files};
+use self::buffered::{
+    BufferedFile, BufferedFileReplacement, BufferedOperation, write_buffered_files,
+};
 use super::{
     LinkPolicy,
     path::{ExtractMember, NormalizedPath, resolve_link_target, validate_symlink_target},
@@ -68,6 +70,9 @@ impl PendingSymlink {
     }
 }
 
+// Bound all deferred link records and their strings, including superseded links.
+const MAX_PENDING_SYMLINK_BYTES: usize = 8 * 1024 * 1024;
+
 // Bound substitutions and cumulative path work while validating the archive graph.
 const MAX_SYMLINK_EXPANSIONS: usize = 256;
 const MAX_SYMLINK_RESOLUTION_WORK_BYTES: usize = 8 * 1024 * 1024;
@@ -78,25 +83,18 @@ const SYMLINK_RESOLUTION_LIMIT_EXCEEDED: &str =
 const BUFFERED_PAYLOAD_MAX_BYTES: usize = 1024 * 1024;
 
 // Bound read-ahead while amortizing blocking-pool handoffs across small files.
-const BUFFERED_FILE_BATCH_MAX_ENTRIES: usize = 64;
+const BUFFERED_BATCH_MAX_OPERATIONS: usize = 64;
 const BUFFERED_FILE_BATCH_MAX_BYTES: usize = 4 * 1024 * 1024;
 
 // Balance reusable-buffer initialization against blocking write cadence.
 const STREAMING_PAYLOAD_CHUNK_BYTES: usize = 2 * 1024 * 1024;
 
-/// The latest archive-visible state and provenance of an extracted path.
+/// The latest archive-visible state of an extracted path.
 #[derive(Clone, Copy, Eq, PartialEq)]
 enum ExtractedEntry {
     File,
-    CreatedDirectory,
-    AmbientDirectory,
+    Directory,
     Symlink { index: usize },
-}
-
-impl ExtractedEntry {
-    fn is_directory(self) -> bool {
-        matches!(self, Self::CreatedDirectory | Self::AmbientDirectory)
-    }
 }
 
 type EntryId = NodeId;
@@ -108,7 +106,7 @@ struct EntryTree(ComponentTree<Box<str>, ExtractedEntry>);
 
 impl EntryTree {
     fn new() -> Self {
-        Self(ComponentTree::new(Some(ExtractedEntry::AmbientDirectory)))
+        Self(ComponentTree::new(Some(ExtractedEntry::Directory)))
     }
 
     fn child(&self, parent: EntryId, component: &str) -> Option<EntryId> {
@@ -124,17 +122,6 @@ impl EntryTree {
         let mut entry = ROOT_ENTRY;
         for component in path.components() {
             entry = self.child(entry, component)?;
-        }
-        Some(entry)
-    }
-
-    fn find_parent_directory(&self, path: &NormalizedPath) -> Option<EntryId> {
-        let mut entry = ROOT_ENTRY;
-        for component in path.parent_components() {
-            entry = self.child(entry, component)?;
-            if !self.state(entry).is_some_and(ExtractedEntry::is_directory) {
-                return None;
-            }
         }
         Some(entry)
     }
@@ -215,22 +202,54 @@ impl FileOpenMode {
     }
 }
 
+/// Keep frequently used parents when opening their children, without retaining
+/// a descriptor for every archive directory.
+#[derive(Default)]
+struct DirectoryHandles(Vec<(EntryId, Arc<Dir>)>);
+
+impl DirectoryHandles {
+    fn get(&self, entry: EntryId) -> Option<&Arc<Dir>> {
+        self.0
+            .iter()
+            .rev()
+            .find_map(|(cached, directory)| (*cached == entry).then_some(directory))
+    }
+
+    fn remove(&mut self, entry: EntryId) {
+        self.0.retain(|(cached, _)| *cached != entry);
+    }
+
+    fn insert(&mut self, entry: EntryId, parent: EntryId, directory: Arc<Dir>) {
+        const CAPACITY: usize = 8;
+        self.remove(entry);
+        // A parent used to create siblings should outlive their leaf handles.
+        if let Some(position) = self.0.iter().position(|(cached, _)| *cached == parent) {
+            let parent = self.0.remove(position);
+            self.0.push(parent);
+        }
+        if self.0.len() == CAPACITY {
+            self.0.remove(0);
+        }
+        self.0.push((entry, directory));
+    }
+}
+
 /// Tracks destination capabilities and archive-owned state for one extraction.
 pub(super) struct ExtractionRoot<E> {
     /// The capability anchoring all extraction filesystem operations.
     directory: Arc<Dir>,
-    /// The most recently opened directory capability, used to keep nearby leaf
-    /// operations cheap without retaining one descriptor per directory.
-    directory_handle: Option<(EntryId, Arc<Dir>)>,
+    /// A bounded cache of recently opened directory capabilities.
+    directory_handles: DirectoryHandles,
     /// Whether overwrites are allowed during extraction.
     allow_overwrites: bool,
     /// The latest state recorded for every path encountered by the extraction.
     entries: EntryTree,
     /// Append-only storage; duplicate paths invalidate earlier indices.
     symlinks: Vec<PendingSymlink>,
-    /// Fully validated files awaiting ordered creation in one blocking task.
-    buffered_files: Vec<BufferedFile>,
-    /// Total payload size retained by [`Self::buffered_files`].
+    pending_symlink_bytes: usize,
+    /// Validated files and their parents awaiting ordered creation in one blocking task.
+    buffered_operations: Vec<BufferedOperation>,
+    /// Total payload size retained by [`Self::buffered_operations`].
     buffered_file_bytes: usize,
     /// Initialized payload allocations recycled after each completed batch.
     buffered_file_buffers: Vec<Vec<u8>>,
@@ -260,15 +279,10 @@ enum TerminalKind {
 }
 
 /// The result of resolving a target through the archive's symbolic-link graph.
-///
-/// Resolution stops when it reaches either an entry whose provenance and kind
-/// are known from this extraction, or a path whose terminal entry is not owned
-/// by the extraction and therefore requires policy-dependent handling.
 enum ResolvedTarget {
-    /// The extraction root or an archive-created entry of the given kind.
     Known(TerminalKind),
-    /// A normalized root-relative path not created by this extraction.
-    Unowned(NormalizedPath),
+    /// The archive graph has no entry for this path. Consult the filesystem.
+    Filesystem(NormalizedPath),
 }
 
 /// Streams a large payload into an already-created file.
@@ -297,8 +311,9 @@ async fn write_payload<P: MemberPayload>(
     result
 }
 
-// Member operations invoked by the extraction loop.
 impl<E> ExtractionRoot<E> {
+    // Member operations invoked by the extraction loop.
+
     /// Opens or creates a real directory and anchors extraction to its capability.
     pub(super) async fn open(
         requested: &Path,
@@ -340,11 +355,12 @@ impl<E> ExtractionRoot<E> {
 
         Ok(Self {
             directory,
-            directory_handle: None,
+            directory_handles: DirectoryHandles::default(),
             allow_overwrites,
             entries: EntryTree::new(),
             symlinks: Vec::new(),
-            buffered_files: Vec::new(),
+            pending_symlink_bytes: 0,
+            buffered_operations: Vec::new(),
             buffered_file_bytes: 0,
             buffered_file_buffers: Vec::new(),
             buffered_file_cancellation: Arc::new(AtomicBool::new(false)),
@@ -428,23 +444,36 @@ impl<E> ExtractionRoot<E> {
     /// Reserves a symbolic link for validation after all members are read.
     pub(super) async fn reserve_symlink(
         &mut self,
-        member: &ExtractMember,
+        member: ExtractMember,
     ) -> Result<(), ExtractError<E>> {
         self.flush_buffered_files().await?;
         let target = validate_symlink_target(member.position, &member.path, &member.link_target)?;
+        let retained = self.pending_symlink_bytes
+            + size_of::<PendingSymlink>()
+            + member.path.capacity()
+            + member.link_target.capacity()
+            + target.resolved_target.capacity();
+        if retained > MAX_PENDING_SYMLINK_BYTES {
+            return Err(ExtractError::invalid_link(
+                member.position,
+                member.path.to_path_buf(),
+                member.link_target,
+                "pending symbolic-link storage limit exceeded",
+            ));
+        }
         let parent = self.ensure_parents(&member.path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(&member.path));
         self.replace_leaf(&member.path, entry, parent).await?;
         let index = self.symlinks.len();
-        let path = member.path.clone();
+        self.pending_symlink_bytes = retained;
         self.entries
             .set_state(entry, ExtractedEntry::Symlink { index });
         self.symlinks.push(PendingSymlink {
             entry,
             parent,
-            path,
+            path: member.path,
             position: member.position,
-            target: member.link_target.clone(),
+            target: member.link_target,
             resolved_target: target.resolved_target,
             requires_directory: target.requires_directory,
         });
@@ -533,26 +562,7 @@ impl<E> ExtractionRoot<E> {
                 .map_err(|reason| link.error(reason))?;
             let kind = match target {
                 ResolvedTarget::Known(kind) => kind,
-                ResolvedTarget::Unowned(_)
-                    if !policy.allow_ambient_targets && !policy.allow_missing_targets =>
-                {
-                    return Err(link.error("target was not created by this extraction"));
-                }
-                ResolvedTarget::Unowned(path) => {
-                    let (kind, traverses_ambient_link) = self.inspect_ambient_target(&path).await?;
-                    if traverses_ambient_link && !policy.allow_ambient_targets {
-                        return Err(link.error("ambient target is not allowed"));
-                    }
-                    match kind {
-                        TerminalKind::Directory | TerminalKind::NonDirectory
-                            if !policy.allow_ambient_targets =>
-                        {
-                            return Err(link.error("ambient target is not allowed"));
-                        }
-                        _ => {}
-                    }
-                    kind
-                }
+                ResolvedTarget::Filesystem(path) => self.inspect_target(&path).await?,
             };
             if kind == TerminalKind::Dangling && !policy.allow_missing_targets {
                 return Err(link.error("target does not exist"));
@@ -588,7 +598,8 @@ impl<E> ExtractionRoot<E> {
                         Ok(directory)
                     })
                     .await?;
-                self.directory_handle = Some((parent, Arc::new(directory)));
+                self.directory_handles
+                    .insert(parent, ROOT_ENTRY, Arc::new(directory));
             }
             match self
                 .try_create_symlink(&path, parent, contents.clone())
@@ -644,10 +655,9 @@ impl<E> ExtractionRoot<E> {
         }
         Ok(())
     }
-}
 
-// Destination state transitions and replacement policy.
-impl<E> ExtractionRoot<E> {
+    // Destination state transitions and replacement policy.
+
     /// Queues a fully validated payload for ordered creation in a bounded batch.
     async fn queue_buffered_file(
         &mut self,
@@ -655,12 +665,12 @@ impl<E> ExtractionRoot<E> {
         executable: bool,
         contents: Vec<u8>,
     ) -> Result<Vec<u8>, ExtractError<E>> {
-        let parent = if let Some(parent) = self.known_parent(path) {
-            parent
+        let shared_path: Arc<str> = if cfg!(windows) {
+            path.as_str().replace('/', "\\").into()
         } else {
-            self.flush_buffered_files().await?;
-            self.ensure_parents(path).await?
+            path.as_str().into()
         };
+        let parent = self.queue_parents(&shared_path).await?;
         let entry = self.entries.ensure_child(parent, leaf_name(path));
         if matches!(
             self.entries.state(entry),
@@ -669,7 +679,7 @@ impl<E> ExtractionRoot<E> {
             self.flush_buffered_files().await?;
             self.replace_leaf(path, entry, parent).await?;
         }
-        if !self.buffered_files.is_empty()
+        if !self.buffered_operations.is_empty()
             && self.buffered_file_bytes.saturating_add(contents.len())
                 > BUFFERED_FILE_BATCH_MAX_BYTES
         {
@@ -682,25 +692,18 @@ impl<E> ExtractionRoot<E> {
         } else {
             BufferedFileReplacement::Allowed
         };
-        if self
-            .directory_handle
-            .as_ref()
-            .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-        {
-            self.directory_handle = None;
-        }
-        let (directory, relative_path) = self.entry_capability(path, parent);
         self.buffered_file_bytes = self.buffered_file_bytes.saturating_add(contents.len());
-        self.buffered_files.push(BufferedFile {
-            directory,
-            relative_path,
-            error_path: path.to_path_buf(),
-            executable,
-            contents,
-            replacement,
-        });
+        self.buffered_operations
+            .push(BufferedOperation::File(BufferedFile {
+                entry,
+                parent,
+                path: shared_path,
+                executable,
+                contents,
+                replacement,
+            }));
         self.entries.set_state(entry, ExtractedEntry::File);
-        if self.buffered_files.len() >= BUFFERED_FILE_BATCH_MAX_ENTRIES
+        if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS
             || self.buffered_file_bytes >= BUFFERED_FILE_BATCH_MAX_BYTES
         {
             self.flush_buffered_files().await?;
@@ -713,16 +716,20 @@ impl<E> ExtractionRoot<E> {
     }
 
     pub(super) async fn flush_buffered_files(&mut self) -> Result<(), ExtractError<E>> {
-        if self.buffered_files.is_empty() {
+        if self.buffered_operations.is_empty() {
             return Ok(());
         }
         self.buffered_file_bytes = 0;
-        let files = mem::take(&mut self.buffered_files);
+        let operations = mem::take(&mut self.buffered_operations);
+        let directory = Arc::clone(&self.directory);
+        let handles = mem::take(&mut self.directory_handles);
         let cancellation = Arc::clone(&self.buffered_file_cancellation);
-        let result =
-            tokio::task::spawn_blocking(move || write_buffered_files(files, &cancellation))
-                .await
-                .map_err(ExtractError::<E>::BlockingTask)?;
+        let result = tokio::task::spawn_blocking(move || {
+            write_buffered_files(directory, handles, operations, &cancellation)
+        })
+        .await
+        .map_err(ExtractError::<E>::BlockingTask)?;
+        self.directory_handles = result.handles;
         for mut buffer in result.buffers {
             buffer.clear();
             self.buffered_file_buffers.push(buffer);
@@ -733,8 +740,38 @@ impl<E> ExtractionRoot<E> {
         Ok(())
     }
 
-    fn known_parent(&self, path: &NormalizedPath) -> Option<EntryId> {
-        self.entries.find_parent_directory(path)
+    /// Queue only implicit parents; explicit directories and link operations
+    /// flush these commands before inspecting or replacing filesystem state.
+    async fn queue_parents(&mut self, path: &Arc<str>) -> Result<EntryId, ExtractError<E>> {
+        let mut start = 0;
+        let mut parent = ROOT_ENTRY;
+        for (end, _) in path.match_indices(MAIN_SEPARATOR) {
+            let entry = self.entries.ensure_child(parent, &path[start..end]);
+            start = end + 1;
+            match self.entries.state(entry) {
+                Some(ExtractedEntry::Directory) => {}
+                Some(_) => {
+                    self.flush_buffered_files().await?;
+                    return Err(ExtractError::PathCollision {
+                        path: path[..end].into(),
+                    });
+                }
+                None => {
+                    self.buffered_operations.push(BufferedOperation::Directory {
+                        entry,
+                        parent,
+                        path: Arc::clone(path),
+                        end,
+                    });
+                    self.entries.set_state(entry, ExtractedEntry::Directory);
+                    if self.buffered_operations.len() >= BUFFERED_BATCH_MAX_OPERATIONS {
+                        self.flush_buffered_files().await?;
+                    }
+                }
+            }
+            parent = entry;
+        }
+        Ok(parent)
     }
 
     async fn create_file(
@@ -804,7 +841,7 @@ impl<E> ExtractionRoot<E> {
         purpose: DirectoryPurpose,
     ) -> Result<(), ExtractError<E>> {
         if let Some(state) = self.entries.state(entry) {
-            if state.is_directory() {
+            if state == ExtractedEntry::Directory {
                 return Ok(());
             }
             if purpose == DirectoryPurpose::ImplicitParent {
@@ -819,7 +856,7 @@ impl<E> ExtractionRoot<E> {
             |source| ExtractError::filesystem("create directory", path.to_path_buf(), source);
         let collision = match self.try_create_directory(path, parent).await? {
             Ok(directory) => {
-                self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+                self.record_directory(entry, parent, directory);
                 return Ok(());
             }
             Err(source) if source.kind() == io::ErrorKind::AlreadyExists => source,
@@ -835,7 +872,7 @@ impl<E> ExtractionRoot<E> {
                     directory.open_dir(path)
                 })
                 .await?;
-            self.record_directory(entry, directory, ExtractedEntry::AmbientDirectory);
+            self.record_directory(entry, parent, directory);
             return Ok(());
         }
 
@@ -849,13 +886,14 @@ impl<E> ExtractionRoot<E> {
             .try_create_directory(path, parent)
             .await?
             .map_err(create_error)?;
-        self.record_directory(entry, directory, ExtractedEntry::CreatedDirectory);
+        self.record_directory(entry, parent, directory);
         Ok(())
     }
 
-    fn record_directory(&mut self, entry: EntryId, directory: Dir, state: ExtractedEntry) {
-        self.directory_handle = Some((entry, Arc::new(directory)));
-        self.entries.set_state(entry, state);
+    fn record_directory(&mut self, entry: EntryId, parent: EntryId, directory: Dir) {
+        self.directory_handles
+            .insert(entry, parent, Arc::new(directory));
+        self.entries.set_state(entry, ExtractedEntry::Directory);
     }
 
     async fn replace_leaf(
@@ -892,10 +930,9 @@ impl<E> ExtractionRoot<E> {
     fn can_replace(&self, entry: EntryId) -> bool {
         self.allow_overwrites && !self.entries.has_active_children(entry)
     }
-}
 
-// Symbolic-link graph resolution.
-impl<E> ExtractionRoot<E> {
+    // Symbolic-link graph resolution.
+
     fn resolve_terminal(
         &self,
         path: &NormalizedPath,
@@ -934,63 +971,39 @@ impl<E> ExtractionRoot<E> {
             if let Some(rewritten) = rewritten {
                 path = Cow::Owned(rewritten);
             } else {
-                if path.is_empty() {
-                    return Ok(ResolvedTarget::Known(TerminalKind::Directory));
-                }
                 return Ok(match entry.and_then(|entry| self.entries.state(entry)) {
-                    Some(ExtractedEntry::CreatedDirectory) => {
+                    Some(ExtractedEntry::Directory) => {
                         ResolvedTarget::Known(TerminalKind::Directory)
                     }
                     Some(ExtractedEntry::File) => ResolvedTarget::Known(TerminalKind::NonDirectory),
                     Some(ExtractedEntry::Symlink { .. }) => continue,
-                    Some(ExtractedEntry::AmbientDirectory) | None => {
-                        ResolvedTarget::Unowned(path.into_owned())
-                    }
+                    None => ResolvedTarget::Filesystem(path.into_owned()),
                 });
             }
         }
         Err("symbolic-link target expansion limit exceeded")
     }
 
-    async fn inspect_ambient_target(
-        &self,
-        path: &NormalizedPath,
-    ) -> Result<(TerminalKind, bool), ExtractError<E>> {
-        self.with_root("inspect symbolic-link target", path, |directory, path| {
-            if path.as_os_str().is_empty() {
-                return Ok((TerminalKind::Directory, false));
-            }
-            match directory.metadata(path) {
-                Ok(metadata) if metadata.is_dir() => return Ok((TerminalKind::Directory, false)),
-                Ok(_) => return Ok((TerminalKind::NonDirectory, false)),
+    async fn inspect_target(&self, path: &NormalizedPath) -> Result<TerminalKind, ExtractError<E>> {
+        self.with_root(
+            "inspect symbolic-link target",
+            path,
+            |directory, path| match directory.metadata(path) {
+                Ok(metadata) if metadata.is_dir() => Ok(TerminalKind::Directory),
+                Ok(_) => Ok(TerminalKind::NonDirectory),
                 Err(error) => match error.kind() {
-                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {}
-                    _ => return Err(error),
-                },
-            }
-
-            // A dangling target can still pass through an ambient symlink.
-            let mut prefix = PathBuf::new();
-            for component in path.components() {
-                prefix.push(component.as_os_str());
-                match directory.symlink_metadata(&prefix) {
-                    Ok(metadata) if metadata_is_link(&metadata) => {
-                        return Ok((TerminalKind::Dangling, true));
+                    io::ErrorKind::NotFound | io::ErrorKind::NotADirectory => {
+                        Ok(TerminalKind::Dangling)
                     }
-                    Ok(metadata) if !metadata.is_dir() => break,
-                    Ok(_) => {}
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => break,
-                    Err(error) => return Err(error),
-                }
-            }
-            Ok((TerminalKind::Dangling, false))
-        })
+                    _ => Err(error),
+                },
+            },
+        )
         .await
     }
-}
 
-// Capability-relative filesystem access.
-impl<E> ExtractionRoot<E> {
+    // Capability-relative filesystem access.
+
     async fn metadata(
         &self,
         path: &NormalizedPath,
@@ -1015,13 +1028,7 @@ impl<E> ExtractionRoot<E> {
     ) -> Result<(), ExtractError<E>> {
         if metadata.is_dir() && !metadata_is_link(metadata) {
             // Windows directory handles do not share delete access.
-            if self
-                .directory_handle
-                .as_ref()
-                .is_some_and(|(cached_entry, _)| *cached_entry == entry)
-            {
-                self.directory_handle = None;
-            }
+            self.directory_handles.remove(entry);
             let (directory, relative_path) = self.entry_capability(path, parent);
             run_blocking_io(directory, relative_path, |directory, path| {
                 directory.remove_dir(path)
@@ -1129,18 +1136,29 @@ impl<E> ExtractionRoot<E> {
     }
 
     fn entry_capability(&self, path: &NormalizedPath, parent: EntryId) -> (Arc<Dir>, PathBuf) {
-        if let Some(file_name) = path.file_name() {
-            if parent == ROOT_ENTRY {
-                return (Arc::clone(&self.directory), file_name.into());
-            }
-            if let Some((cached_entry, directory)) = &self.directory_handle
-                && *cached_entry == parent
-            {
-                return (Arc::clone(directory), file_name.into());
-            }
-        }
-        (Arc::clone(&self.directory), path.to_path_buf())
+        let (directory, relative_path) = entry_capability(
+            &self.directory,
+            &self.directory_handles,
+            path.as_path(),
+            parent,
+        );
+        (Arc::clone(directory), relative_path.to_owned())
     }
+}
+
+fn entry_capability<'a>(
+    directory: &'a Arc<Dir>,
+    handles: &'a DirectoryHandles,
+    path: &'a Path,
+    parent: EntryId,
+) -> (&'a Arc<Dir>, &'a Path) {
+    if parent != ROOT_ENTRY
+        && let Some(directory) = handles.get(parent)
+        && let Some(file_name) = path.file_name()
+    {
+        return (directory, Path::new(file_name));
+    }
+    (directory, path)
 }
 
 fn check_symlink_resolution_limit(

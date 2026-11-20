@@ -1,29 +1,16 @@
 # tar-codec
 
-tar-codec is a small, fast, constrained tar encoder and decoder for Rust.
+An asynchronous tar reader and writer for Rust. Reads POSIX pax/ustar and GNU
+archives and writes pax archives. The reader rejects UNIX v7 archives and
+streams that mix GNU and pax headers.
 
 This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
 
 > [!IMPORTANT]
 >
-> This crate is in a **very early** state of development and is **not**
-> considered ready for production use. You will encounter bugs, sharp edges,
-> etc.
+> This crate is in early development and is not ready for production use.
 
-Goals:
-
-- Fast, asynchronous, minimally ambiguous, strict pax-style tar encoding
-- Fast, asynchronous tar decoding for distinct POSIX pax/ustar or GNU archive streams
-
-Anti-goals:
-
-- Encoding support for anything other than pax
-- Decoding support for legacy (pre-ustar, "UNIX v7") archives
-- Decoding archives that mix POSIX pax/ustar and GNU framing in one stream
-
-## Usage
-
-Encoding/archive serialization:
+## Writing
 
 ```rust
 use tar_codec::{ArchiveBuilder as _, EntryMetadata, FilePayload, TarEncoder};
@@ -36,22 +23,14 @@ encoder
 encoder.finish().await?;
 ```
 
-Apart from `Builder::add_file`, you can use:
+Use `add_directory` for a directory entry or `add_directory_all` to include its
+contents. Set `Builder::with_policy` before adding members to configure name
+validation and handling of symlinks.
 
-- `Builder::add_directory` to add a single directory (just the directory, not any contents)
-- `Builder::add_directory_all` to recursively add an on-filesystem directory
+For compressed output such as `.tar.gz`, wrap the writer in a compressor from
+[async-compression](https://docs.rs/async-compression/latest/async_compression/).
 
-See `Builder::with_policy` for policy knobs that
-can be changed during building.
-
-Note that `tar-codec` does **not** perform compression for you.
-If you want a compressed tar stream (like a `.tar.gz`) consider
-supplying an adapted writer, such as from the [async-compression]
-crate.
-
-[async-compression]: https://docs.rs/async-compression/latest/async_compression/
-
-Decoding/extracting:
+## Extraction
 
 ```rust
 use tar_codec::{Archive as _, TarArchive, extract::ExtractPolicy};
@@ -61,20 +40,10 @@ TarArchive::new(reader)
     .await?;
 ```
 
-Unlike encoding, decoding/extraction has two policy layers:
-
-- Use `TarArchive::with_policy` to control various aspects of GNU or pax handling.
-- Use `extract::ExtractPolicy` to control various aspects of how archives become
-  real paths on the host filesystem.
+Use `TarArchive::with_policy` to configure GNU and pax decoding. `ExtractPolicy`
+controls how members are written to disk.
 
 ## Performance
 
-tar-codec aims to be as fast as (or substantially faster than) other
-tar libraries for Rust, including [tar] and [astral-tokio-tar].
-
-[tar]: https://crates.io/crates/tar
-[astral-tokio-tar]: https://crates.io/crates/astral-tokio-tar
-
-See [BENCHMARKS] for current benchmarks.
-
-[BENCHMARKS]: ./BENCHMARKS.md
+See [BENCHMARKS](./BENCHMARKS.md) for comparisons with `tar` and
+`astral-tokio-tar`.

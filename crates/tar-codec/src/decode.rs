@@ -32,12 +32,13 @@ pub use tar_framing::{
 /// By default, member iteration validates final record padding and waits for
 /// EOF before reporting the end of the archive. See [`DecodePolicy::trailing_data_policy`].
 ///
-/// Member iteration is fused. After reaching the end of the archive or
-/// returning a decoding error, every subsequent attempt returns end-of-archive.
+/// After a member or payload read returns an error, subsequent reads return
+/// [`DecodeError::Poisoned`]. At the end of the archive, member iteration
+/// returns `Ok(None)`. Cancelled reads can be retried.
 pub struct TarArchive<R> {
     reader: TarReader<R>,
     policy: DecodePolicy,
-    fused: bool,
+    poisoned: bool,
 }
 
 impl<R> TarArchive<R> {
@@ -46,7 +47,7 @@ impl<R> TarArchive<R> {
         Self {
             reader: TarReader::new(reader),
             policy: DecodePolicy::default(),
-            fused: false,
+            poisoned: false,
         }
     }
 
@@ -531,6 +532,9 @@ pub enum DecodeError {
         /// The selected policy rule that rejected the feature.
         violation: DecodePolicyViolation,
     },
+    /// An earlier decoding operation failed.
+    #[error("tar reader is poisoned after a decoding error")]
+    Poisoned,
 }
 
 impl DecodeError {
@@ -545,6 +549,7 @@ impl DecodeError {
 /// A tar member payload adapted to [`MemberPayloadTrait`].
 pub struct TarMemberPayload<'a, R> {
     payload: FramingMemberPayload<'a, R>,
+    poisoned: &'a mut bool,
 }
 
 impl<R: AsyncRead + Unpin> MemberPayloadTrait for TarMemberPayload<'_, R> {
@@ -555,14 +560,25 @@ impl<R: AsyncRead + Unpin> MemberPayloadTrait for TarMemberPayload<'_, R> {
         buffer: &mut Vec<u8>,
         target_len: usize,
     ) -> Result<bool, Self::Error> {
+        if *self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
         self.payload
             .next_chunk(buffer, target_len)
             .await
+            .inspect_err(|_| *self.poisoned = true)
             .map_err(Into::into)
     }
 
     async fn skip(self) -> Result<(), Self::Error> {
-        self.payload.skip().await.map_err(Into::into)
+        if *self.poisoned {
+            return Err(DecodeError::Poisoned);
+        }
+        self.payload
+            .skip()
+            .await
+            .inspect_err(|_| *self.poisoned = true)
+            .map_err(Into::into)
     }
 }
 
@@ -576,24 +592,26 @@ impl<R: AsyncRead + Unpin> ArchiveTrait for TarArchive<R> {
     async fn next_member<'a>(
         &'a mut self,
     ) -> Result<Option<Member<Self::Payload<'a>>>, Self::Error> {
-        if self.fused {
-            return Ok(None);
+        let poisoned = &mut self.poisoned;
+        if *poisoned {
+            return Err(DecodeError::Poisoned);
         }
 
-        let result = match self.reader.next_frame().await {
+        let member = match self.reader.next_frame().await {
             Ok(Some(frame)) => decode_member(frame, &self.policy).map(Some),
             Ok(None) => Ok(None),
             Err(error) => Err(error.into()),
-        };
-        self.fused = !matches!(result, Ok(Some(_)));
-        result
+        }
+        .inspect_err(|_| *poisoned = true)?;
+        Ok(member
+            .map(|member| member.map_payload(|payload| TarMemberPayload { payload, poisoned })))
     }
 }
 
 fn decode_member<'a, R>(
     frame: MemberFrame<'a, R>,
     policy: &DecodePolicy,
-) -> Result<Member<TarMemberPayload<'a, R>>, DecodeError> {
+) -> Result<Member<FramingMemberPayload<'a, R>>, DecodeError> {
     policy.check_member(&frame)?;
     let position = frame.header.position;
     let kind = frame.header.kind;
@@ -622,9 +640,7 @@ fn decode_member<'a, R>(
             metadata,
             size,
             executable,
-            payload: TarMemberPayload {
-                payload: frame.payload,
-            },
+            payload: frame.payload,
         },
         UstarKind::Directory => Member::Directory { metadata },
         UstarKind::SymbolicLink => Member::SymbolicLink { metadata, target },
@@ -632,9 +648,7 @@ fn decode_member<'a, R>(
             metadata,
             target,
             size,
-            payload: TarMemberPayload {
-                payload: frame.payload,
-            },
+            payload: frame.payload,
         },
         UstarKind::CharacterDevice => Member::Special {
             metadata,

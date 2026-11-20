@@ -1,51 +1,40 @@
 # tar-framing
 
-Low-level strict tar stream framing for either POSIX pax/ustar or GNU archives.
+Low-level record framing for POSIX pax/ustar and GNU tar streams.
 
 This crate is a component of [astral-codec](https://github.com/astral-sh/astral-codec).
-Most users should not use this crate's APIs directly.
+Most users should use [tar-codec](../tar-codec) to read or write archives.
 
 ## Reading
 
-This crate provides two views over an asynchronous I/O source:
+`logical::TarReader` groups each member with its PAX or GNU extensions. To
+list member paths, including paths set by those extensions:
 
-- `stream::TarStream` emits physical 512-byte header and data frames
-  for lossless inspection and debugging. Parsed PAX records are available
-  on the final physical PAX payload frame.
-- `logical::TarReader` emits ordinary members with extension metadata
-  attached, exposes a compact logical header borrowing reusable ordinary
-  path/link storage, resolves byte-oriented member path/link metadata
-  according to PAX/GNU precedence, and streams member payload blocks through
-  a borrowing cursor.
+```rust
+use tar_framing::logical::TarReader;
 
-Both readers accept a `StreamPolicy` through `with_policy` to configure
-extension size limits and numeric-header compatibility. Their `new`
-constructors use the default policy.
+let mut archive = TarReader::new(reader);
+while let Some(member) = archive.next_frame().await? {
+    println!("{}", String::from_utf8_lossy(member.effective_path()?));
+}
+```
 
-For PAX members, one `PaxState` provides standards-consistent effective values
-while preserving each positioned global or local extension newly encountered
-for that member. Trailing global extensions without a following member are
-consumed and ignored. Use `TarStream` when standalone physical extension
-headers must be inspected losslessly.
+To inspect individual 512-byte blocks, use `stream::TarStream`. It exposes
+extension headers even when there is no following member. The final data frame
+of a PAX extension includes its parsed records.
 
-Each stream is "locked" to one archive family: POSIX pax/ustar or GNU.
-Streams that combine pax and GNU members are rejected.
+Both readers reject streams that mix pax and GNU headers. Use `with_policy` to
+set extension size limits or allow additional numeric header formats.
 
 ## Writing
 
-tar-framing also provides `write` helpers for constructing pax-conforming member
-blocks without performing I/O.
+The `write` module constructs pax member blocks in memory. The caller writes
+them to the archive.
 
 ## Benchmarking
-
-Run the internal framing benchmarks with:
 
 ```shell
 cargo bench -p tar-framing --bench framing --locked
 ```
-
-`encode_pax_framing` measures reusable pure-pax framing without payload reads.
-`decode_payload` compares lossless block iteration, validated chunk reads, and
-payload skipping over in-memory archives.
 
 See [CONTRIBUTING](../../CONTRIBUTING.md#benchmarking) for CodSpeed and smoke-test commands.

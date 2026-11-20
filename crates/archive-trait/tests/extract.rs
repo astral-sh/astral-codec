@@ -63,6 +63,10 @@ async fn extracts_common_members_and_streams_payload_sizes() {
     let buffered_boundary = patterned_payload(BUFFERED_BOUNDARY_BYTES);
     let large = patterned_payload(STREAMING_PAYLOAD_BYTES);
     let archive = TestArchive::new([
+        // Both write paths must release older cached handles before replacing
+        // empty directories; Windows does not share directory delete access.
+        entry::directory("same"),
+        entry::directory("large"),
         entry::directory("bin"),
         entry::executable("bin/tool", b"run"),
         entry::file("same", b"old"),
@@ -371,6 +375,34 @@ async fn payload_errors_flush_prior_files_before_returning() {
     assert!(!destination.join("invalid").exists());
 }
 
+#[cfg(unix)]
+#[tokio::test]
+async fn pending_symlink_limit_includes_overwritten_links() {
+    let temp = tempdir().expect("temporary directory should be created");
+    let target = "x".repeat(usize::from(u16::MAX));
+    // The two target strings plus the record take just over 128 KiB per link.
+    // The 64th reservation exceeds 8 MiB even when every link has the same name.
+    let links = (0..63).map(|_| entry::symbolic_link("p", &target));
+    let archive = TestArchive::new(links.chain([
+        entry::file("p", b"kept"),
+        entry::symbolic_link("p", &target),
+    ]));
+
+    assert!(matches!(
+        archive
+            .extract_in(temp.path(), ExtractPolicy::default())
+            .await,
+        Err(ExtractError::InvalidLink {
+            reason: "pending symbolic-link storage limit exceeded",
+            ..
+        })
+    ));
+    assert_eq!(
+        std::fs::read(temp.path().join("p")).expect("file should survive rejected overwrite"),
+        b"kept"
+    );
+}
+
 #[tokio::test]
 async fn rejects_invalid_destinations_unsafe_special_and_colliding_members() {
     let temp = tempdir().expect("temporary directory should be created");
@@ -426,6 +458,30 @@ async fn rejects_invalid_destinations_unsafe_special_and_colliding_members() {
             .await,
         Err(ExtractError::PathCollision { path }) if path == Path::new("file")
     ));
+
+    // A parent-directory failure in a batch must preserve earlier files and
+    // prevent every later write, including files outside the blocked parent.
+    let destination = temp.path().join("parent-collision");
+    std::fs::create_dir_all(destination.join("nested")).expect("directory should be created");
+    let blocked = Path::new("nested").join("文件");
+    std::fs::write(destination.join(&blocked), b"ambient").expect("parent file should be written");
+    let result = TestArchive::new([
+        entry::file("before", b"kept"),
+        entry::file("nested/文件/child", b"invalid"),
+        entry::file("after", b"not written"),
+    ])
+    .extract_in(&destination, ExtractPolicy::default())
+    .await;
+    assert!(matches!(result, Err(ExtractError::PathCollision { path }) if path == blocked));
+    assert_eq!(
+        std::fs::read(destination.join("before")).expect("prior file should remain"),
+        b"kept"
+    );
+    assert_eq!(
+        std::fs::read(destination.join(blocked)).expect("parent file should remain"),
+        b"ambient"
+    );
+    assert!(!destination.join("after").exists());
 }
 
 #[tokio::test]

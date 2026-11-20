@@ -18,6 +18,10 @@ pub(super) struct ExtractMember {
 pub(super) struct NormalizedPath(String);
 
 impl NormalizedPath {
+    pub(super) fn capacity(&self) -> usize {
+        self.0.capacity()
+    }
+
     pub(super) fn as_str(&self) -> &str {
         &self.0
     }
