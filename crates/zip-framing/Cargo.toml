@@ -4,7 +4,6 @@ description = "Strict, bounded framing for seekable ZIP archives"
 readme = "README.md"
 version = { workspace = true }
 edition = { workspace = true }
-homepage = { workspace = true }
 repository = { workspace = true }
 authors = { workspace = true }
 license = { workspace = true }

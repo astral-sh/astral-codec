@@ -4,7 +4,6 @@ description = "A CLI for inspecting and extracting tar streams"
 readme = "README.md"
 
 edition.workspace = true
-homepage.workspace = true
 repository.workspace = true
 authors.workspace = true
 license.workspace = true
@@ -22,3 +21,6 @@ async-compression = { workspace = true }
 clap = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt"] }
+
+[lints]
+workspace = true
