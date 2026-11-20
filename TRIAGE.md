@@ -110,9 +110,6 @@ subsequent check for the resolved member kind receives only the central version.
 [Kind-specific minimum at review](https://github.com/astral-sh/astral-codec/blob/9292997/crates/zip-framing/src/kind.rs#L120) ·
 [PKWARE APPNOTE 6.3.9](https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT)
 
-**Decision.** Check each header's extraction version against the resolved
-member kind before caching the entry. Directories require at least 2.0 in
-each header, with an opt-in for 1.0. DOS volume labels require at least 1.1
-in each header. The central header can declare a higher version when its
-local-header offset needs ZIP64.
+**Decision.** Apply the existing directory and volume label version requirements
+to each header independently.
 [PR #378](https://github.com/astral-sh/astral-codec/pull/378)

@@ -403,18 +403,18 @@ impl IndexedEntry {
 
         let attributes =
             ExternalAttributes::new(directory.host_system(), directory.external_attributes());
-        Ok(ResolvedMember {
+        let resolved = ResolvedMember {
             data_offset,
             has_unix_extra: unix_data.is_some(),
-            kind: EntryKind::resolve(
-                directory,
-                unix_data,
-                &attributes,
-                header_fields.version,
-                allow_version_1_directories,
-            )?,
+            kind: EntryKind::resolve(directory, unix_data, &attributes)?,
             unix_mode: attributes.unix_mode,
-        })
+        };
+        for version in [directory.version_needed(), header_fields.version] {
+            resolved
+                .kind
+                .check_version(version, allow_version_1_directories, position)?;
+        }
+        Ok(resolved)
     }
 
     /// Validate a data descriptor after a member's compressed contents.

@@ -456,26 +456,37 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 
 #[tokio::test]
 async fn version_1_directories_require_opt_in() -> TestResult {
-    for (local, central) in [(10, 10), (10, 20), (20, 10)] {
-        let archive = Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
-            .with_versions(local, central)
-            .build();
-        let mut source = Cursor::new(&archive.bytes);
-        let mut index = Index::read(&mut source).await?;
-        assert!(matches!(
-            index.entry(&mut source, 0).await,
-            Err(FrameError::PolicyViolation {
-                position: 0,
-                violation: IndexPolicyViolation::Version1Directory
-            })
-        ));
-
-        let policy = IndexPolicy::default().allow_version_1_directories(true);
-        let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
-        let entry = index.resolved(0).ok_or("unresolved entry")?;
-        assert_eq!(entry.kind(), &EntryKind::Directory);
-        assert_eq!(entry.directory().version_needed(), central);
+    let mut archive = Fixture {
+        version: Some(10),
+        ..Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
     }
+    .build();
+    let mut source = Cursor::new(&archive.bytes);
+    let mut index = Index::read(&mut source).await?;
+    assert!(matches!(
+        index.entry(&mut source, 0).await,
+        Err(FrameError::PolicyViolation {
+            position: 0,
+            violation: IndexPolicyViolation::Version1Directory
+        })
+    ));
+
+    let policy = IndexPolicy::default().allow_version_1_directories(true);
+    let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
+    let entry = index.resolved(0).ok_or("unresolved entry")?;
+    assert_eq!(entry.kind(), &EntryKind::Directory);
+    assert_eq!(entry.directory().version_needed(), 10);
+
+    // Only the local header declares version 1.0.
+    set16(&mut archive.bytes, archive.central + 6, 20);
+    assert!(matches!(
+        read_validated(&archive.bytes).await,
+        Err(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::Version1Directory,
+            ..
+        })
+    ));
+    read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
     Ok(())
 }
 
@@ -491,8 +502,6 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
     let non_file = "non-file member has payload data";
     let unexpected = "unexpected UNIX file-type data";
     let bad_device = "invalid UNIX device numbers";
-    let directory_version = "directory requires extraction version 2.0";
-    let volume_version = "volume label requires extraction version 1.1";
 
     for (fixture, expected) in [
         (member("file", (0o100644 << 16) | 0x10, b""), inconsistent),
@@ -512,19 +521,21 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         (directory(b"data"), non_file),
         (fifo(b"data"), non_file),
         (volume(b"data"), non_file),
-        (directory(b"").with_versions(11, 11), directory_version),
-        (directory(b"").with_versions(11, 10), directory_version),
-        (directory(b"").with_versions(10, 11), directory_version),
+        (
+            Fixture {
+                version: Some(11),
+                ..directory(b"")
+            },
+            "directory requires extraction version 2.0",
+        ),
         (
             Fixture {
                 made_by: Some(20),
                 version: Some(10),
                 ..volume(b"")
             },
-            volume_version,
+            "volume label requires extraction version 1.1",
         ),
-        (volume(b"").with_versions(10, 11), volume_version),
-        (volume(b"").with_versions(11, 10), volume_version),
         (link(b""), "empty symbolic-link target"),
         (
             link(b"target").with_unix_data(b""),

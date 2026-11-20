@@ -48,8 +48,6 @@ impl EntryKind {
         directory: &CentralDirectoryEntry,
         unix_data: Option<Vec<u8>>,
         attributes: &ExternalAttributes,
-        local_version: u16,
-        allow_version_1_directories: bool,
     ) -> Result<Self, Error> {
         let position = directory.position();
         let has_directory_suffix = directory.path().ends_with('/');
@@ -87,7 +85,7 @@ impl EntryKind {
         }
 
         let has_type_data = unix_data.as_ref().is_some_and(|data| !data.is_empty());
-        let kind = match file_type {
+        Ok(match file_type {
             UnixFileType::SymbolicLink => Self::SymbolicLink {
                 unix_target: unix_data
                     .map(|data| parse_link_target(data, position))
@@ -115,25 +113,33 @@ impl EntryKind {
             UnixFileType::Fifo => Self::Fifo,
             UnixFileType::Socket => Self::Socket,
             UnixFileType::Unknown(mode) => Self::Unknown { mode },
-        };
+        })
+    }
 
-        for version in [directory.version_needed(), local_version] {
-            let error = match (&kind, version) {
-                (Self::Directory, version::BASE) if allow_version_1_directories => continue,
-                (Self::Directory, version::BASE) => {
-                    policy_violation(position, IndexPolicyViolation::Version1Directory)
-                }
-                (Self::Directory, ..version::V2_0) => {
-                    invalid(position, "directory requires extraction version 2.0")
-                }
-                (Self::VolumeLabel, ..version::V1_1) => {
-                    invalid(position, "volume label requires extraction version 1.1")
-                }
-                _ => continue,
-            };
-            return Err(error);
+    /// Checks the extraction version requirements specific to the resolved kind.
+    pub(crate) fn check_version(
+        &self,
+        version: u16,
+        allow_version_1_directories: bool,
+        position: u64,
+    ) -> Result<(), Error> {
+        match (self, version) {
+            (Self::VolumeLabel, ..version::V1_1) => Err(invalid(
+                position,
+                "volume label requires extraction version 1.1",
+            )),
+            // Header parsing already requires version 2.0 for DEFLATE.
+            (Self::Directory, version::BASE) if allow_version_1_directories => Ok(()),
+            (Self::Directory, version::BASE) => Err(policy_violation(
+                position,
+                IndexPolicyViolation::Version1Directory,
+            )),
+            (Self::Directory, ..version::V2_0) => Err(invalid(
+                position,
+                "directory requires extraction version 2.0",
+            )),
+            _ => Ok(()),
         }
-        Ok(kind)
     }
 }
 
