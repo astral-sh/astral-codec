@@ -1527,7 +1527,6 @@ name = "ziptie"
 version = "0.0.16"
 dependencies = [
  "clap",
- "tempfile",
  "thiserror",
  "tokio",
  "zip-codec",

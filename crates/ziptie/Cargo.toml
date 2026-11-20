@@ -18,8 +18,5 @@ clap = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "macros", "rt"] }
 
-[dev-dependencies]
-tempfile = { workspace = true }
-
 [lints]
 workspace = true
