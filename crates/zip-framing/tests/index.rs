@@ -456,7 +456,7 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 
 #[tokio::test]
 async fn version_1_directories_require_opt_in() -> TestResult {
-    let archive = Fixture {
+    let mut archive = Fixture {
         version: Some(10),
         ..Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
     }
@@ -476,6 +476,17 @@ async fn version_1_directories_require_opt_in() -> TestResult {
     let entry = index.resolved(0).ok_or("unresolved entry")?;
     assert_eq!(entry.kind(), &EntryKind::Directory);
     assert_eq!(entry.directory().version_needed(), 10);
+
+    // Only the local header declares version 1.0.
+    set16(&mut archive.bytes, archive.central + 6, 20);
+    assert!(matches!(
+        read_validated(&archive.bytes).await,
+        Err(FrameError::PolicyViolation {
+            violation: IndexPolicyViolation::Version1Directory,
+            ..
+        })
+    ));
+    read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
     Ok(())
 }
 

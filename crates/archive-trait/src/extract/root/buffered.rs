@@ -42,7 +42,7 @@ pub(super) enum BufferedError {
 pub(super) struct BufferedFile {
     pub(super) entry: EntryId,
     pub(super) parent: EntryId,
-    pub(super) path: PathBuf,
+    pub(super) path: Arc<str>,
     pub(super) executable: bool,
     pub(super) contents: Vec<u8>,
     pub(super) replacement: BufferedFileReplacement,
@@ -53,7 +53,10 @@ pub(super) enum BufferedOperation {
     Directory {
         entry: EntryId,
         parent: EntryId,
-        path: PathBuf,
+        /// The member's native path, shared with its other implicit parents.
+        path: Arc<str>,
+        /// Byte offset of the separator following this directory.
+        end: usize,
     },
     File(BufferedFile),
 }
@@ -97,31 +100,34 @@ pub(super) fn write_buffered_files(
                 entry,
                 parent,
                 path,
+                end,
             } => {
                 if execute {
+                    let path = Path::new(&path[..end]);
                     let (directory, relative_path) =
-                        entry_capability(&root, &handles, &path, parent);
-                    match create_parent(&directory, &relative_path) {
+                        entry_capability(&root, &handles, path, parent);
+                    match create_parent(directory, relative_path) {
                         Ok(opened) => {
                             handles.insert(entry, parent, Arc::new(opened));
                         }
-                        Err(source) => error = Some((path, source)),
+                        Err(source) => error = Some((path.to_path_buf(), source)),
                     }
                 }
             }
             BufferedOperation::File(file) => {
                 if execute {
                     handles.remove(file.entry);
+                    let path = Path::new(file.path.as_ref());
                     let (directory, relative_path) =
-                        entry_capability(&root, &handles, &file.path, file.parent);
+                        entry_capability(&root, &handles, path, file.parent);
                     if let Err(source) = write_buffered_file(
-                        &directory,
-                        &relative_path,
+                        directory,
+                        relative_path,
                         file.executable,
                         &file.contents,
                         file.replacement,
                     ) {
-                        error = Some((file.path, source));
+                        error = Some((path.to_path_buf(), source));
                     }
                 }
                 buffers.push(file.contents);
