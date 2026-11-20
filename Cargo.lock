@@ -1523,6 +1523,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "ziptie"
+version = "0.0.16"
+dependencies = [
+ "clap",
+ "thiserror",
+ "tokio",
+ "zip-codec",
+ "zip-framing",
+]
+
+[[package]]
 name = "zlib-rs"
 version = "0.6.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"

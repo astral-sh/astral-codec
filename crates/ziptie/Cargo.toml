@@ -1,0 +1,22 @@
+[package]
+name = "ziptie"
+description = "A CLI for inspecting and extracting ZIP archives"
+readme = "README.md"
+publish = false
+
+edition.workspace = true
+repository.workspace = true
+authors.workspace = true
+license.workspace = true
+version.workspace = true
+
+[dependencies]
+zip-codec = { workspace = true }
+zip-framing = { workspace = true }
+
+clap = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tokio = { workspace = true, features = ["fs", "macros", "rt"] }
+
+[lints]
+workspace = true
