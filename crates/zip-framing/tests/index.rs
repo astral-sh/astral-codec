@@ -771,6 +771,7 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         (0x7075, unicode_data(b"file"), unicode_data(b"file")),
         (0x7855, vec![0; 4], Vec::new()),
         (0x7875, vec![1, 1, 2, 1, 3], vec![1, 1, 2, 1, 3]),
+        (0xcafe, Vec::new(), Vec::new()),
     ] {
         for (central, central_extra) in [(true, field(identifier, &directory)), (false, vec![])] {
             let archive = Fixture {
@@ -2042,6 +2043,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0],
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
+        field(0xcafe, &[0]),
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {

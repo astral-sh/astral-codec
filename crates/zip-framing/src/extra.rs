@@ -44,6 +44,8 @@ pub enum ExtraHeaderId {
     InfoZipOwnership16 = 0x7855,
     /// Info-ZIP variable-width UID and GID.
     InfoZipOwnership = 0x7875,
+    /// Empty marker written by Java's `JarOutputStream`.
+    JarMagic = 0xcafe,
 }
 
 impl TryFrom<u16> for ExtraHeaderId {
@@ -59,6 +61,7 @@ impl TryFrom<u16> for ExtraHeaderId {
             Self::UnicodePath,
             Self::InfoZipOwnership16,
             Self::InfoZipOwnership,
+            Self::JarMagic,
         ]
         .into_iter()
         .find(|&field| field as u16 == identifier)
@@ -199,6 +202,9 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "duplicate extra-field identifier"));
             }
 
+            if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
+                return Err(invalid(position, "JAR marker must be empty"));
+            }
             if identifier != ExtraHeaderId::Zip64 {
                 let field = identifier.unix_metadata(header, data, position)?;
                 extras.unix = extras.unix.merge(field, position)?;
@@ -443,7 +449,7 @@ impl ExtraHeaderId {
             (Self::InfoZipOwnership16, Header::Local, 4) => Some(data.split_at(2)),
             (Self::InfoZipOwnership16, Header::Central, 0) => None,
             (Self::InfoZipOwnership, _, _) => Some(ownership_ids(data).ok_or_else(invalid_layout)?),
-            (Self::Zip64 | Self::UnicodePath | Self::UnicodeComment, _, _) => None,
+            (Self::Zip64 | Self::UnicodePath | Self::UnicodeComment | Self::JarMagic, _, _) => None,
             (Self::InfoZipUnix | Self::InfoZipOwnership16, _, _) => {
                 return Err(invalid_layout());
             }
