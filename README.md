@@ -22,6 +22,7 @@ for building and extracting archives.
 | [zip-codec](./crates/zip-codec) | Seekable ZIP decoding and streaming ZIP64 encoding, with stored and DEFLATE members. |
 | [zip-framing](./crates/zip-framing) | Bounded ZIP indexing, record consistency checks, and serialization. |
 | [tarpit](./crates/tarpit) | A development-only CLI for inspecting and extracting tar streams. |
+| [ziptie](./crates/ziptie) | A development-only CLI for inspecting and extracting ZIP archives. |
 
 See each crate's README for usage and scope.
 
