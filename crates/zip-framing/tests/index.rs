@@ -9,8 +9,9 @@ use zip_framing::{
     CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::{AllowKnown, AllowListed, Permissive},
-    ExtraHeaderId, ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation,
-    IndexedEntry, LimitExceeded, Limits,
+    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic},
+    ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry,
+    LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -867,63 +868,50 @@ fn extra_header_id_sets_distinguish_all_known_identifiers() {
 
 #[tokio::test]
 async fn checks_every_optional_extra_against_the_allowlist() -> TestResult {
-    let fixture = Fixture {
+    let policy = |allowed| IndexPolicy::default().extra_field_policy(AllowListed(allowed));
+    let archive = Fixture {
         zip64: true,
         ..Fixture::default()
-    };
-    let policy = |allowed| IndexPolicy::default().extra_field_policy(AllowListed(allowed));
-    read_validated_with(
-        &mut Cursor::new(fixture.build().bytes),
-        policy(ExtraHeaderIdSet::default()),
-    )
-    .await?;
+    }
+    .build();
+    read_validated_with(&mut Cursor::new(archive.bytes), policy([].into())).await?;
 
     let timestamp = field(0x5455, &[0]);
-    let with_marker = [timestamp.clone(), field(0xcafe, &[])].concat();
-    for local in [false, true] {
-        let archive = Fixture {
-            local_extra: timestamp.clone(),
-            central_extra: timestamp.clone(),
-            ..Fixture::default()
-        }
-        .with_extra(local, with_marker.clone())
-        .build();
-        let offset = if local { 0 } else { archive.central as u64 };
-        let mut reader = Cursor::new(archive.bytes);
-        let allowed = [ExtraHeaderId::ExtendedTimestamp].into();
+    let archive = Fixture {
+        local_extra: [timestamp.clone(), field(0xcafe, &[])].concat(),
+        central_extra: timestamp,
+        ..Fixture::default()
+    }
+    .build();
+    let mut reader = Cursor::new(archive.bytes);
+    for (allowed, rejected, offset) in [
+        (JarMagic, ExtendedTimestamp, archive.central as u64),
+        (ExtendedTimestamp, JarMagic, 0),
+    ] {
         assert!(matches!(
-            read_validated_with(&mut reader, policy(allowed)).await,
+            read_validated_with(&mut reader, policy([allowed].into())).await,
             Err(FrameError::PolicyViolation {
                 position,
-                violation: IndexPolicyViolation::ExtraField { identifier: ExtraHeaderId::JarMagic },
-            }) if position == offset
+                violation: IndexPolicyViolation::ExtraField { identifier },
+            }) if position == offset && identifier == rejected
         ));
-        let allowed = [ExtraHeaderId::ExtendedTimestamp, ExtraHeaderId::JarMagic].into();
-        read_validated_with(&mut reader, policy(allowed)).await?;
     }
+    read_validated_with(&mut reader, policy([ExtendedTimestamp, JarMagic].into())).await?;
     Ok(())
 }
 
 #[tokio::test]
-async fn accepts_unknown_extras_only_under_permissive_policy() -> TestResult {
+async fn rejects_unsupported_extras_in_either_header() {
     for identifier in [
         0x0007, 0x0008, 0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x2605, 0x6c78, 0x756e,
         0x9901, 0xbeef,
     ] {
-        let extra = field(identifier, &[]);
-        for (local, central) in [(true, false), (false, true), (true, true)] {
-            let archive = Fixture {
-                local_extra: if local { extra.clone() } else { Vec::new() },
-                central_extra: if central { extra.clone() } else { Vec::new() },
-                ..Fixture::default()
-            }
-            .build();
-            let offset = if central { archive.central as u64 } else { 0 };
-            for policy in [
-                IndexPolicy::default(),
-                all_features(),
-                all_features().extra_field_policy(AllowListed([ExtraHeaderId::JarMagic].into())),
-            ] {
+        for local in [false, true] {
+            let archive = Fixture::default()
+                .with_extra(local, field(identifier, &[]))
+                .build();
+            let offset = if local { 0 } else { archive.central as u64 };
+            for policy in [IndexPolicy::default(), all_features()] {
                 let result = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await;
                 assert!(
                     matches!(
@@ -931,41 +919,49 @@ async fn accepts_unknown_extras_only_under_permissive_policy() -> TestResult {
                         Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
                             if position == offset && rejected == identifier
                     ),
-                    "{identifier:#06x}, local={local}, central={central}: {result:?}"
+                    "{identifier:#06x}, local={local}: {result:?}"
                 );
             }
-            read_validated_with(
-                &mut Cursor::new(&archive.bytes),
-                all_features().extra_field_policy(Permissive),
-            )
-            .await?;
         }
     }
-    Ok(())
 }
 
 #[tokio::test]
-async fn permissive_policy_skips_unknown_data_but_checks_known_fields() -> TestResult {
-    let policy = IndexPolicy::default().extra_field_policy(Permissive);
-    for (local, expected) in [
-        (vec![0; 12], None),
-        (vec![0; 11], Some("truncated UNIX extra field")),
-        (vec![1; 12], Some("local and central extra fields disagree")),
-    ] {
-        let archive = Fixture {
-            local_extra: [field(0xbeef, b"local"), field(0x000d, &local)].concat(),
+async fn permissive_policy_skips_only_unknown_field_contents() -> TestResult {
+    let archive = |extra| {
+        Fixture {
+            local_extra: [field(0xbeef, b"local"), field(0x0007, &[]), extra].concat(),
             central_extra: [field(0xbeef, b"central"), field(0x000d, &[0; 12])].concat(),
             ..Fixture::default()
         }
-        .build();
-        let result = read_validated_with(&mut Cursor::new(archive.bytes), policy).await;
-        if let Some(expected) = expected {
-            assert!(
-                matches!(result, Err(FrameError::Invalid { reason, .. }) if reason == expected)
-            );
-        } else {
-            result?;
-        }
+        .build()
+    };
+    let mut reader = Cursor::new(archive(field(0x000d, &[0; 12])).bytes);
+    let listed =
+        IndexPolicy::default().extra_field_policy(AllowListed([ExtraHeaderId::Unix].into()));
+    assert!(matches!(
+        Index::read_with_policy(&mut reader, listed).await,
+        Err(FrameError::UnsupportedExtraField {
+            identifier: 0xbeef,
+            ..
+        })
+    ));
+    let permissive = IndexPolicy::default().extra_field_policy(Permissive);
+    read_validated_with(&mut reader, permissive).await?;
+
+    for (extra, expected) in [
+        (vec![0xad, 0xde, 1, 0], "truncated extra-field data"),
+        (field(0xbeef, &[]), "duplicate extra-field identifier"),
+        (field(0x000d, &[0; 11]), "truncated UNIX extra field"),
+        (
+            field(0x000d, &[1; 12]),
+            "local and central extra fields disagree",
+        ),
+    ] {
+        let result = read_validated_with(&mut Cursor::new(archive(extra).bytes), permissive).await;
+        assert!(
+            matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected)
+        );
     }
     Ok(())
 }
@@ -2133,23 +2129,15 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         field(0xcafe, &[0]),
-        vec![0xef, 0xbe, 1, 0],
-        [field(0xbeef, &[]), field(0xcafe, &[]), field(0xbeef, &[1])].concat(),
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {
-            let archive = Fixture::default().with_extra(local, extra.clone()).build();
-            for policy in [AllowKnown, Permissive] {
-                let result = read_validated_with(
-                    &mut Cursor::new(&archive.bytes),
-                    all_features().extra_field_policy(policy),
-                )
-                .await;
-                assert!(
-                    result.is_err(),
-                    "extra {extra:?}, local={local}, policy={policy:?}"
-                );
-            }
+            let fixture = Fixture::default().with_extra(local, extra.clone());
+
+            assert!(
+                read_validated(&fixture.build().bytes).await.is_err(),
+                "extra {extra:?}, local={local}"
+            );
         }
     }
 

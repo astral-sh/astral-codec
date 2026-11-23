@@ -203,13 +203,12 @@ impl<'a> Extras<'a> {
         if let Some(comment) = comment {
             self.check_comment(comment, position)?;
         }
-        let mut identifiers = self.fields.keys().copied();
-        let rejected = match policy {
-            ExtraFieldPolicy::Zip64Only => identifiers.next(),
-            ExtraFieldPolicy::AllowListed(allowed) => identifiers.find(|&id| !allowed.contains(id)),
-            ExtraFieldPolicy::AllowKnown | ExtraFieldPolicy::Permissive => None,
+        let allowed = match policy {
+            ExtraFieldPolicy::Zip64Only => ExtraHeaderIdSet::default(),
+            ExtraFieldPolicy::AllowListed(allowed) => allowed,
+            ExtraFieldPolicy::AllowKnown | ExtraFieldPolicy::Permissive => return Ok(()),
         };
-        if let Some(identifier) = rejected {
+        if let Some(&identifier) = self.fields.keys().find(|&&id| !allowed.contains(id)) {
             return Err(policy_violation(
                 position,
                 IndexPolicyViolation::ExtraField { identifier },
@@ -231,6 +230,7 @@ impl<'a> Extras<'a> {
         };
 
         let mut unknown = BTreeSet::new();
+        let duplicate = || invalid(position, "duplicate extra-field identifier");
         while !bytes.is_empty() {
             let Some((prefix, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
             else {
@@ -243,37 +243,36 @@ impl<'a> Extras<'a> {
                 return Err(invalid(position, "truncated extra-field data"));
             };
 
-            bytes = remaining;
             let raw_id = u16::from_le_bytes([identifier_low, identifier_high]);
-            let Ok(identifier) = ExtraHeaderId::try_from(raw_id) else {
-                if policy != ExtraFieldPolicy::Permissive {
+            match ExtraHeaderId::try_from(raw_id) {
+                Ok(ExtraHeaderId::Zip64) => {
+                    if extras.zip64.replace(data).is_some() {
+                        return Err(duplicate());
+                    }
+                }
+                Ok(identifier) => {
+                    if extras.fields.insert(identifier, data).is_some() {
+                        return Err(duplicate());
+                    }
+                    if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
+                        return Err(invalid(position, "JAR marker must be empty"));
+                    }
+                    let field = identifier.unix_metadata(header, data, position)?;
+                    extras.unix = extras.unix.merge(field, position)?;
+                }
+                Err(identifier) if policy == ExtraFieldPolicy::Permissive => {
+                    if !unknown.insert(identifier) {
+                        return Err(duplicate());
+                    }
+                }
+                Err(identifier) => {
                     return Err(Error::UnsupportedExtraField {
                         position,
-                        identifier: raw_id,
+                        identifier,
                     });
                 }
-                if !unknown.insert(raw_id) {
-                    return Err(invalid(position, "duplicate extra-field identifier"));
-                }
-                continue;
-            };
-
-            let previous = if identifier == ExtraHeaderId::Zip64 {
-                extras.zip64.replace(data)
-            } else {
-                extras.fields.insert(identifier, data)
-            };
-            if previous.is_some() {
-                return Err(invalid(position, "duplicate extra-field identifier"));
             }
-
-            if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
-                return Err(invalid(position, "JAR marker must be empty"));
-            }
-            if identifier != ExtraHeaderId::Zip64 {
-                let field = identifier.unix_metadata(header, data, position)?;
-                extras.unix = extras.unix.merge(field, position)?;
-            }
+            bytes = remaining;
         }
 
         Ok(extras)
