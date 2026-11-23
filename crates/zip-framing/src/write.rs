@@ -192,9 +192,9 @@ impl CompletedMember<'_> {
             common: Common {
                 flags: GeneralPurposeFlags::UTF8,
                 method: self.header.method,
-                time: DEFAULT_TIME,
-                date: DEFAULT_DATE,
             },
+            time: DEFAULT_TIME,
+            date: DEFAULT_DATE,
             payload: PayloadFields {
                 crc: self.payload.fields().crc,
                 compressed: SizeField::Zip64,

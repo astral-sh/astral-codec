@@ -9,7 +9,7 @@ use zip_framing::{
     CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::{AllowKnown, AllowListed, Permissive},
-    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic},
+    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic, Ntfs},
     ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry,
     LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
@@ -23,6 +23,13 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
     let mut data = vec![1];
     data.extend(crc32(value).to_le_bytes());
     data.extend_from_slice(value);
+    data
+}
+
+fn ntfs_data() -> Vec<u8> {
+    let mut data = vec![0; 32];
+    set16(&mut data, 4, 1);
+    set16(&mut data, 6, 24);
     data
 }
 
@@ -629,8 +636,6 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
     for (label, offset, value) in [
         ("flags", 7, 0),
         ("method", 8, 8),
-        ("time", 10, 1),
-        ("date", 12, 1),
         ("crc", 14, 1),
         ("compressed size", 18, 6),
         ("size", 22, 6),
@@ -641,6 +646,12 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
 
         assert!(read_validated(&archive.bytes).await.is_err(), "{label}");
     }
+
+    let mut archive = Fixture::default().build();
+    // Even invalid packed DOS times and dates may differ between headers.
+    set32(&mut archive.bytes, 10, u32::MAX);
+    set32(&mut archive.bytes, archive.central + 12, 0);
+    read_validated_with(&mut Cursor::new(&archive.bytes), IndexPolicy::default()).await?;
 
     let mut archive = Fixture::default().build();
     for flags in [2, 4, 6] {
@@ -766,6 +777,7 @@ async fn checks_extraction_versions_independently() -> TestResult {
 #[tokio::test]
 async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult {
     for (identifier, local, directory) in [
+        (0x000a, ntfs_data(), ntfs_data()),
         (0x000d, vec![0; 12], vec![0; 12]),
         (0x5455, vec![0], vec![0]),
         (0x5855, vec![0; 12], vec![0; 8]),
@@ -1686,15 +1698,66 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 }
 
 #[tokio::test]
+async fn validates_ntfs_timestamp_layout_in_each_header() -> TestResult {
+    let policy = IndexPolicy::default().extra_field_policy(AllowListed([Ntfs].into()));
+    let mut data = ntfs_data();
+    for local in [false, true] {
+        let archive = Fixture::default()
+            .with_extra(local, field(0x000a, &data))
+            .build();
+        read_validated_with(&mut Cursor::new(archive.bytes), policy).await?;
+    }
+
+    let central_extra = field(0x000a, &data);
+    data[..4].fill(1); // Reserved bytes are ignored.
+    data[8..].fill(0xff);
+    let archive = Fixture {
+        local_extra: [field(0x000a, &data), field(0x5455, &[1; 5])].concat(),
+        central_extra,
+        ..Fixture::default()
+    }
+    .build();
+    read_validated(&archive.bytes).await?;
+
+    let policy = IndexPolicy::default().extra_field_policy(Permissive);
+    for (length, tag, size) in [(31, 1, 24), (36, 1, 24), (32, 2, 24), (32, 1, 16)] {
+        let mut data = vec![0; length];
+        set16(&mut data, 4, tag);
+        set16(&mut data, 6, size);
+        for local in [false, true] {
+            let archive = Fixture::default()
+                .with_extra(local, field(0x000a, &data))
+                .build();
+            let offset = if local { 0 } else { archive.central as u64 };
+            let mut reader = Cursor::new(archive.bytes);
+            let result = if local {
+                let mut index = Index::read_with_policy(&mut reader, policy).await?;
+                index.validate_all(&mut reader).await
+            } else {
+                Index::read_with_policy(&mut reader, policy)
+                    .await
+                    .map(|_| ())
+            };
+            assert!(matches!(
+                result,
+                Err(FrameError::Invalid { position, reason: "invalid NTFS extra field layout" })
+                    if position == offset
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn reconciles_unix_extra_fields() -> TestResult {
     // Four-byte tags distinguish the timestamps. PKWARE stores each ID in two bytes.
     let prefix = b"atimmtimu\0g\0";
     let unix = || field(0x000d, prefix);
     let padded_owner = &[1, 1, b'u', 3, b'g', 0, 0];
     for (identifier, local, central) in [
-        (0x5855, &prefix[..], &prefix[..8]),
+        (0x5855, &prefix[..], &b"diffdiff"[..]),
         (0x5855, &prefix[..8], &prefix[..8]),
-        (0x5455, b"\x03mtimatim", b"\x03mtim"),
+        (0x5455, b"\x03diffdiff", b"\x01mtim"),
         (0x5455, b"\x02atim", b"\x02"),
         (0x5455, b"\x07mtimatimctim", b"\x07mtim"),
         (0x7855, &prefix[8..], &[]),
@@ -1709,18 +1772,25 @@ async fn reconciles_unix_extra_fields() -> TestResult {
         read_validated(&archive.bytes).await?;
     }
 
+    // The central-only extended timestamp may disagree with both older formats.
+    let archive = Fixture {
+        local_extra: field(0x000d, b"diffdiffu\0g\0"),
+        central_extra: [
+            unix(),
+            field(0x5855, &prefix[..8]),
+            field(0x5455, b"\x01time"),
+        ]
+        .concat(),
+        ..Fixture::default()
+    }
+    .build();
+    read_validated(&archive.bytes).await?;
+
     let bad_layout = "invalid Info-ZIP extra field layout";
-    let copy_mismatch = "local and central extra fields disagree";
-    let missing_local = "central Info-ZIP field has no local copy";
     let conflict = "conflicting UNIX metadata in extra fields";
     for (local, central, expected) in [
         (field(0x5855, &[1; 12]), field(0x5855, &[1; 7]), bad_layout),
         (field(0x5855, &[1; 10]), vec![], bad_layout),
-        (
-            field(0x5855, &[1; 12]),
-            field(0x5855, &[2; 8]),
-            copy_mismatch,
-        ),
         (field(0x5455, &[3; 9]), field(0x5455, &[3]), bad_layout),
         (field(0x5455, &[8; 5]), vec![], bad_layout),
         (
@@ -1728,22 +1798,14 @@ async fn reconciles_unix_extra_fields() -> TestResult {
             vec![],
             "missing Info-ZIP timestamp flags",
         ),
-        (
-            field(0x5455, &[3; 9]),
-            field(0x5455, &[1; 5]),
-            copy_mismatch,
-        ),
         (field(0x7855, &[1; 4]), field(0x7855, &[1; 4]), bad_layout),
         (field(0x7855, &[1; 2]), vec![], bad_layout),
-        (vec![], field(0x7855, &[]), missing_local),
-        (vec![], field(0x5455, &[3; 5]), missing_local),
         (
-            field(0x5855, &[0; 12]),
-            field(0x5455, &[1; 5]),
-            "mixed old and new Info-ZIP UNIX metadata",
+            vec![],
+            field(0x7855, &[]),
+            "central Info-ZIP field has no local copy",
         ),
         (field(0x5855, b"atimmtimu\0x\0"), unix(), conflict),
-        (field(0x5455, b"\x02mtim"), unix(), conflict),
         (
             [unix(), field(0x7855, b"u\0x\0")].concat(),
             vec![],
@@ -1771,15 +1833,13 @@ async fn reconciles_unix_extra_fields() -> TestResult {
         );
     }
 
-    // Reject conflicting directory fields at open, before reading the local header.
-    for times in [unix(), field(0x5855, &prefix[..8])] {
-        let central = [times, field(0x5455, b"\x01oops")].concat();
-        let archive = Fixture::default().with_extra(false, central).build();
-        assert!(matches!(
-            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowKnown)).await,
-            Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
-        ));
-    }
+    // Reject conflicting ownership in the directory before reading the local header.
+    let central = [unix(), field(0x7875, &[1, 1, b'u', 1, b'x'])].concat();
+    let archive = Fixture::default().with_extra(false, central).build();
+    assert!(matches!(
+        Index::read_with_policy(&mut Cursor::new(archive.bytes), all_features()).await,
+        Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
+    ));
     Ok(())
 }
 
@@ -2129,6 +2189,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         field(0xcafe, &[0]),
+        field(0x000a, &ntfs_data()).repeat(2),
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {

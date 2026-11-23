@@ -278,12 +278,6 @@ pub(crate) struct Common {
     pub(crate) flags: GeneralPurposeFlags,
     /// The member's compression method.
     pub(crate) method: CompressionMethod,
-    /// The member's last-modified time, in MS-DOS format.
-    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
-    pub(crate) time: u16,
-    /// The member's last-modified date, in MS-DOS format.
-    /// See: <https://learn.microsoft.com/en-us/windows/win32/api/winbase/nf-winbase-dosdatetimetofiletime>
-    pub(crate) date: u16,
 }
 
 /// The payload CRC and sizes. Header sizes use [`SizeField`], and resolved sizes use [`u64`].
@@ -341,6 +335,9 @@ pub(crate) struct MemberHeader {
     /// central header needs version 4.5 for a ZIP64 local-header offset.
     pub(crate) version: u16,
     pub(crate) common: Common,
+    /// Packed MS-DOS modification time and date, which may differ between headers.
+    pub(crate) time: u16,
+    pub(crate) date: u16,
     pub(crate) payload: PayloadFields<SizeField>,
 }
 
@@ -377,12 +374,9 @@ impl MemberHeader {
 
         Ok(Self {
             version,
-            common: Common {
-                flags,
-                method,
-                time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
-                date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
-            },
+            common: Common { flags, method },
+            time: u16::from_le_bytes(array_at::<6, 2, _>(bytes)),
+            date: u16::from_le_bytes(array_at::<8, 2, _>(bytes)),
             payload: PayloadFields {
                 crc: u32::from_le_bytes(array_at::<10, 4, _>(bytes)),
                 compressed: SizeField::from(u32::from_le_bytes(array_at::<14, 4, _>(bytes))),
@@ -397,8 +391,8 @@ impl MemberHeader {
         bytes[0..2].copy_from_slice(&self.version.to_le_bytes());
         bytes[2..4].copy_from_slice(&self.common.flags.bits().to_le_bytes());
         bytes[4..6].copy_from_slice(&(self.common.method as u16).to_le_bytes());
-        bytes[6..8].copy_from_slice(&self.common.time.to_le_bytes());
-        bytes[8..10].copy_from_slice(&self.common.date.to_le_bytes());
+        bytes[6..8].copy_from_slice(&self.time.to_le_bytes());
+        bytes[8..10].copy_from_slice(&self.date.to_le_bytes());
         bytes[10..14].copy_from_slice(&self.payload.crc.to_le_bytes());
         bytes[14..18].copy_from_slice(&u32::from(self.payload.compressed).to_le_bytes());
         bytes[18..22].copy_from_slice(&u32::from(self.payload.uncompressed).to_le_bytes());
@@ -459,9 +453,9 @@ mod tests {
             common: Common {
                 flags: GeneralPurposeFlags::parse(0x080a, 42)?,
                 method: CompressionMethod::Deflate,
-                time: 0x1234,
-                date: 0x5678,
             },
+            time: 0x1234,
+            date: 0x5678,
             payload: PayloadFields {
                 crc: 0x4433_2211,
                 compressed: SizeField::Value(0x8877_6655),

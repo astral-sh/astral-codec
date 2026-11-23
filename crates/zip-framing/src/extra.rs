@@ -19,7 +19,7 @@ const UNICODE_VERSION: u8 = 1;
 ///
 /// All policies accept required ZIP64 values and reject missing or superfluous
 /// values. Known fields must pass the same layout and agreement checks under
-/// every policy.
+/// every policy. Timestamp values may differ across fields and headers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtraFieldPolicy {
@@ -46,6 +46,8 @@ pub enum ExtraFieldPolicy {
 pub enum ExtraHeaderId {
     /// ZIP64 sizes, local offset, and disk number.
     Zip64 = 0x0001,
+    /// NTFS timestamps (attribute tag `0x0001` only).
+    Ntfs = 0x000a,
     /// PKWARE UNIX metadata.
     Unix = 0x000d,
     /// Info-ZIP extended timestamps.
@@ -70,6 +72,7 @@ impl TryFrom<u16> for ExtraHeaderId {
     fn try_from(identifier: u16) -> Result<Self, Self::Error> {
         [
             Self::Zip64,
+            Self::Ntfs,
             Self::Unix,
             Self::ExtendedTimestamp,
             Self::InfoZipUnix,
@@ -124,7 +127,7 @@ struct Extras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
     fields: BTreeMap<ExtraHeaderId, &'a [u8]>,
-    unix: UnixMetadata<'a>,
+    owner: Option<UnixOwner<'a>>,
 }
 
 /// Checked central extra fields retained for reconciliation with the local header.
@@ -225,7 +228,7 @@ impl<'a> Extras<'a> {
         let mut extras = Self {
             zip64: None,
             fields: BTreeMap::new(),
-            unix: UnixMetadata::default(),
+            owner: None,
         };
 
         let mut unknown = BTreeSet::new();
@@ -253,11 +256,8 @@ impl<'a> Extras<'a> {
                     if extras.fields.insert(identifier, data).is_some() {
                         return Err(duplicate());
                     }
-                    if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
-                        return Err(invalid(position, "JAR marker must be empty"));
-                    }
-                    let field = identifier.unix_metadata(header, data, position)?;
-                    extras.unix = extras.unix.merge(field, position)?;
+                    let owner = identifier.validate_layout(header, data, position)?;
+                    extras.owner = merge_owners(extras.owner, owner, position)?;
                 }
                 Err(identifier) if policy == ExtraFieldPolicy::Permissive => {
                     if !unknown.insert(identifier) {
@@ -403,8 +403,7 @@ impl<'a> Extras<'a> {
         let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
         let ownership = has(ExtraHeaderId::InfoZipOwnership);
         let ownership16 = has(ExtraHeaderId::InfoZipOwnership16);
-        if (has(ExtraHeaderId::InfoZipUnix)
-            && (has(ExtraHeaderId::ExtendedTimestamp) || ownership16 || ownership))
+        if (has(ExtraHeaderId::InfoZipUnix) && (ownership16 || ownership))
             || (ownership16 && ownership)
         {
             return Err(invalid(
@@ -413,17 +412,12 @@ impl<'a> Extras<'a> {
             ));
         }
 
-        // These central forms describe timestamps or ownership in the local header.
-        for identifier in [
-            ExtraHeaderId::ExtendedTimestamp,
-            ExtraHeaderId::InfoZipOwnership16,
-        ] {
-            if central.fields.contains_key(&identifier) && !self.fields.contains_key(&identifier) {
-                return Err(invalid(
-                    position,
-                    "central Info-ZIP field has no local copy",
-                ));
-            }
+        // The empty central marker refers to ownership stored in the local header.
+        if ownership16 && !self.fields.contains_key(&ExtraHeaderId::InfoZipOwnership16) {
+            return Err(invalid(
+                position,
+                "central Info-ZIP field has no local copy",
+            ));
         }
 
         for (identifier, local) in &self.fields {
@@ -438,12 +432,14 @@ impl<'a> Extras<'a> {
                 continue;
             };
 
-            // The validated Info-ZIP central forms contain only the shared
-            // leading fields. The PKWARE UNIX field has one layout (APPNOTE 4.5.7).
             let equal = match *identifier {
-                ExtraHeaderId::InfoZipUnix
+                // These central forms contain only timestamps or an empty marker.
+                ExtraHeaderId::Ntfs
                 | ExtraHeaderId::ExtendedTimestamp
-                | ExtraHeaderId::InfoZipOwnership16 => local.starts_with(other),
+                | ExtraHeaderId::InfoZipUnix
+                | ExtraHeaderId::InfoZipOwnership16 => continue,
+                // Skip atime and mtime, preserving ownership and file-type data.
+                ExtraHeaderId::Unix => local[8..] == other[8..],
                 _ => local == other,
             };
             if !equal {
@@ -451,7 +447,7 @@ impl<'a> Extras<'a> {
             }
         }
 
-        self.unix.merge(central.unix, position)?;
+        merge_owners(self.owner, central.owner, position)?;
         Ok(self
             .fields
             .get(&ExtraHeaderId::Unix)
@@ -460,13 +456,8 @@ impl<'a> Extras<'a> {
     }
 }
 
-/// The values shared by PKWARE and Info-ZIP, independent of their wire layouts.
-#[derive(Default)]
-struct UnixMetadata<'a> {
-    atime: Option<&'a [u8; 4]>,
-    mtime: Option<&'a [u8; 4]>,
-    owner: Option<(&'a [u8], &'a [u8])>,
-}
+/// UID and GID, with high zero bytes removed for comparison across formats.
+type UnixOwner<'a> = (&'a [u8], &'a [u8]);
 
 impl ExtraHeaderId {
     /// A dense bit assignment independent of the ZIP wire values.
@@ -481,27 +472,28 @@ impl ExtraHeaderId {
             Self::InfoZipOwnership16 => 1 << 6,
             Self::InfoZipOwnership => 1 << 7,
             Self::JarMagic => 1 << 8,
+            Self::Ntfs => 1 << 9,
         }
     }
 
-    fn unix_metadata(
+    /// Checks the field layout and returns any UNIX ownership for reconciliation.
+    fn validate_layout(
         self,
         header: Header,
         data: &[u8],
         position: u64,
-    ) -> Result<UnixMetadata<'_>, Error> {
+    ) -> Result<Option<UnixOwner<'_>>, Error> {
         let invalid_layout = || invalid(position, "invalid Info-ZIP extra field layout");
-        let mut fields = UnixMetadata::default();
         let owner = match (self, header, data.len()) {
+            // Four reserved bytes precede tag 1, size 24, and three FILETIMEs (APPNOTE 4.5.5).
+            (Self::Ntfs, _, 32) if data[4..8] == [1, 0, 24, 0] => None,
+            (Self::Ntfs, _, _) => return Err(invalid(position, "invalid NTFS extra field layout")),
             (Self::Unix, _, 0..extra::UNIX_PREFIX_SIZE) => {
                 return Err(invalid(position, "truncated UNIX extra field"));
             }
-            (Self::Unix, _, _)
-            | (Self::InfoZipUnix, _, 8)
-            | (Self::InfoZipUnix, Header::Local, 12) => {
-                fields.atime = data.first_chunk();
-                fields.mtime = data[4..].first_chunk();
-                data.get(8..12).map(|ids| ids.split_at(2))
+            (Self::InfoZipUnix, _, 8) => None,
+            (Self::Unix, _, _) | (Self::InfoZipUnix, Header::Local, 12) => {
+                Some(data[8..12].split_at(2))
             }
             (Self::ExtendedTimestamp, _, _) => {
                 let Some((&flags, times)) = data.split_first() else {
@@ -514,39 +506,26 @@ impl ExtraHeaderId {
                 if flags & !0b111 != 0 || times.len() != 4 * stored.count_ones() as usize {
                     return Err(invalid_layout());
                 }
-                let mut times = times.as_chunks::<4>().0.iter();
-                if stored & 1 != 0 {
-                    fields.mtime = times.next();
-                }
-                if stored & 2 != 0 {
-                    fields.atime = times.next();
-                }
                 None
             }
             (Self::InfoZipOwnership16, Header::Local, 4) => Some(data.split_at(2)),
             (Self::InfoZipOwnership16, Header::Central, 0) => None,
             (Self::InfoZipOwnership, _, _) => Some(ownership_ids(data).ok_or_else(invalid_layout)?),
+            (Self::JarMagic, _, 1..) => return Err(invalid(position, "JAR marker must be empty")),
             (Self::Zip64 | Self::UnicodePath | Self::UnicodeComment | Self::JarMagic, _, _) => None,
             (Self::InfoZipUnix | Self::InfoZipOwnership16, _, _) => {
                 return Err(invalid_layout());
             }
         };
-        fields.owner = owner.map(|(uid, gid)| (significant_bytes(uid), significant_bytes(gid)));
-        Ok(fields)
+        Ok(owner.map(|(uid, gid)| (significant_bytes(uid), significant_bytes(gid))))
     }
 }
 
-impl UnixMetadata<'_> {
-    fn merge(self, other: Self, position: u64) -> Result<Self, Error> {
-        Ok(Self {
-            atime: agree(self.atime, other.atime, position)?,
-            mtime: agree(self.mtime, other.mtime, position)?,
-            owner: agree(self.owner, other.owner, position)?,
-        })
-    }
-}
-
-fn agree<T: Eq>(left: Option<T>, right: Option<T>, position: u64) -> Result<Option<T>, Error> {
+fn merge_owners<'a>(
+    left: Option<UnixOwner<'a>>,
+    right: Option<UnixOwner<'a>>,
+    position: u64,
+) -> Result<Option<UnixOwner<'a>>, Error> {
     match (left, right) {
         (Some(left), Some(right)) if left != right => Err(invalid(
             position,

@@ -384,9 +384,9 @@ impl Index {
     /// Checks every local header, descriptor, and kind, including unselected members.
     ///
     /// Success establishes complete, non-overlapping record coverage and
-    /// agreement of redundant and kind-specific metadata. Payload sizes and
-    /// CRCs still need to be verified when decoding. Already checked members
-    /// require no I/O.
+    /// agreement of redundant and kind-specific metadata except timestamps.
+    /// Payload sizes and CRCs still need to be verified when decoding.
+    /// Already checked members require no I/O.
     pub async fn validate_all<R: AsyncRead + AsyncSeek + Unpin>(
         &mut self,
         reader: &mut R,

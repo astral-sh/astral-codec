@@ -9,7 +9,7 @@
 //! - [`CentralDirectoryEntry`], [`IndexedEntry`], and [`Entry`] represent a refinement
 //!   type hierarchy, i.e. they go from fewest invariants preserved (just parsing
 //!   the central directory entry) to the most invariants preserved (a member whose
-//!   central and local states are fully reconciled).
+//!   central and local records have been checked for consistency).
 //!
 //! - Filenames and UNIX extra-field link targets must be UTF-8.
 //!
@@ -44,6 +44,10 @@
 //!
 //! - By default, zip-framing accepts only required ZIP64 extra fields (`0x0001`).
 //!   See [`ExtraFieldPolicy`] for options to accept other fields.
+//!
+//! - Timestamps may differ between headers and across formats. zip-framing
+//!   accepts any packed DOS date and time and checks the layout of supported
+//!   timestamp extras. It does not interpret or expose timestamp values.
 
 #![forbid(unsafe_code)]
 
