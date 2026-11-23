@@ -8,8 +8,10 @@ use zip_framing::{
     CentralDirectoryEntry, CommentPolicy,
     CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
-    ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry, LimitExceeded, Limits,
+    ExtraFieldPolicy::{AllowKnown, AllowListed, Permissive},
+    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic},
+    ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry,
+    LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -27,7 +29,7 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 // Exercise the format checks for features that require an opt-in.
 fn all_features() -> IndexPolicy {
     IndexPolicy::default()
-        .extra_field_policy(AllowListed)
+        .extra_field_policy(AllowKnown)
         .comment_policy(CommentPolicy {
             per_member: AllowAll,
             archive: AllowAll,
@@ -583,7 +585,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
                     metadata_size: (archive.end - archive.payload.len()) as u64,
                     ..Limits::default()
                 })
-                .extra_field_policy(AllowListed),
+                .extra_field_policy(AllowKnown),
         )
         .await?;
 
@@ -851,21 +853,64 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
     Ok(())
 }
 
+#[test]
+fn extra_header_id_sets_distinguish_all_known_identifiers() {
+    let known: Vec<_> = (0..=u16::MAX)
+        .filter_map(|raw| ExtraHeaderId::try_from(raw).ok())
+        .collect();
+    for &identifier in &known {
+        let set = ExtraHeaderIdSet::from([identifier]);
+        for &other in &known {
+            assert_eq!(set.contains(other), identifier == other);
+        }
+    }
+}
+
+#[tokio::test]
+async fn checks_every_optional_extra_against_the_allowlist() -> TestResult {
+    let policy = |allowed| IndexPolicy::default().extra_field_policy(AllowListed(allowed));
+    let archive = Fixture {
+        zip64: true,
+        ..Fixture::default()
+    }
+    .build();
+    read_validated_with(&mut Cursor::new(archive.bytes), policy([].into())).await?;
+
+    let timestamp = field(0x5455, &[0]);
+    let archive = Fixture {
+        local_extra: [timestamp.clone(), field(0xcafe, &[])].concat(),
+        central_extra: timestamp,
+        ..Fixture::default()
+    }
+    .build();
+    let mut reader = Cursor::new(archive.bytes);
+    for (allowed, rejected, offset) in [
+        (JarMagic, ExtendedTimestamp, archive.central as u64),
+        (ExtendedTimestamp, JarMagic, 0),
+    ] {
+        assert!(matches!(
+            read_validated_with(&mut reader, policy([allowed].into())).await,
+            Err(FrameError::PolicyViolation {
+                position,
+                violation: IndexPolicyViolation::ExtraField { identifier },
+            }) if position == offset && identifier == rejected
+        ));
+    }
+    read_validated_with(&mut reader, policy([ExtendedTimestamp, JarMagic].into())).await?;
+    Ok(())
+}
+
 #[tokio::test]
 async fn rejects_unsupported_extras_in_either_header() {
     for identifier in [
         0x0007, 0x0008, 0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x2605, 0x6c78, 0x756e,
         0x9901, 0xbeef,
     ] {
-        let extra = field(identifier, &[]);
-        for (local, central) in [(true, false), (false, true), (true, true)] {
-            let archive = Fixture {
-                local_extra: if local { extra.clone() } else { Vec::new() },
-                central_extra: if central { extra.clone() } else { Vec::new() },
-                ..Fixture::default()
-            }
-            .build();
-            let offset = if central { archive.central as u64 } else { 0 };
+        for local in [false, true] {
+            let archive = Fixture::default()
+                .with_extra(local, field(identifier, &[]))
+                .build();
+            let offset = if local { 0 } else { archive.central as u64 };
             for policy in [IndexPolicy::default(), all_features()] {
                 let result = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await;
                 assert!(
@@ -874,11 +919,51 @@ async fn rejects_unsupported_extras_in_either_header() {
                         Err(FrameError::UnsupportedExtraField { position, identifier: rejected })
                             if position == offset && rejected == identifier
                     ),
-                    "{identifier:#06x}, local={local}, central={central}: {result:?}"
+                    "{identifier:#06x}, local={local}: {result:?}"
                 );
             }
         }
     }
+}
+
+#[tokio::test]
+async fn permissive_policy_skips_only_unknown_field_contents() -> TestResult {
+    let archive = |extra| {
+        Fixture {
+            local_extra: [field(0xbeef, b"local"), field(0x0007, &[]), extra].concat(),
+            central_extra: [field(0xbeef, b"central"), field(0x000d, &[0; 12])].concat(),
+            ..Fixture::default()
+        }
+        .build()
+    };
+    let mut reader = Cursor::new(archive(field(0x000d, &[0; 12])).bytes);
+    let listed =
+        IndexPolicy::default().extra_field_policy(AllowListed([ExtraHeaderId::Unix].into()));
+    assert!(matches!(
+        Index::read_with_policy(&mut reader, listed).await,
+        Err(FrameError::UnsupportedExtraField {
+            identifier: 0xbeef,
+            ..
+        })
+    ));
+    let permissive = IndexPolicy::default().extra_field_policy(Permissive);
+    read_validated_with(&mut reader, permissive).await?;
+
+    for (extra, expected) in [
+        (vec![0xad, 0xde, 1, 0], "truncated extra-field data"),
+        (field(0xbeef, &[]), "duplicate extra-field identifier"),
+        (field(0x000d, &[0; 11]), "truncated UNIX extra field"),
+        (
+            field(0x000d, &[1; 12]),
+            "local and central extra fields disagree",
+        ),
+    ] {
+        let result = read_validated_with(&mut Cursor::new(archive(extra).bytes), permissive).await;
+        assert!(
+            matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected)
+        );
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1691,7 +1776,7 @@ async fn reconciles_unix_extra_fields() -> TestResult {
         let central = [times, field(0x5455, b"\x01oops")].concat();
         let archive = Fixture::default().with_extra(false, central).build();
         assert!(matches!(
-            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowListed)).await,
+            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowKnown)).await,
             Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
         ));
     }
@@ -1855,7 +1940,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let mut source = Cursor::new(ordered);
     // Even an unselected member with a Stored descriptor must fail at open.
     assert!(matches!(
-        Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowListed)).await,
+        Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowKnown)).await,
         Err(FrameError::PolicyViolation {
             position,
             violation: IndexPolicyViolation::StoredDataDescriptor,
@@ -2301,7 +2386,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
                     metadata_size: budget,
                     ..Limits::default()
                 })
-                .extra_field_policy(AllowListed),
+                .extra_field_policy(AllowKnown),
         )
         .await?;
         if !valid {

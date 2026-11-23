@@ -1,4 +1,7 @@
-use std::{collections::BTreeMap, str};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    str,
+};
 
 use crc32fast::hash as crc32;
 
@@ -13,14 +16,27 @@ use crate::{
 const UNICODE_VERSION: u8 = 1;
 
 /// Which extra fields a reader accepts in local and central member headers.
+///
+/// All policies accept required ZIP64 values and reject missing or superfluous
+/// values. Known fields must pass the same layout and agreement checks under
+/// every policy.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtraFieldPolicy {
     /// Accept only ZIP64 values required by the member header's sentinel fields.
     #[default]
     Zip64Only,
-    /// Accept all fields in [`ExtraHeaderId`], with their layout and agreement checks.
-    AllowListed,
+    /// Accept only the optional fields in the set. An empty set is equivalent
+    /// to [`Self::Zip64Only`].
+    AllowListed(ExtraHeaderIdSet),
+    /// Accept all fields in [`ExtraHeaderId`].
+    AllowKnown,
+    /// Accept known fields and skip unknown fields without interpreting or
+    /// comparing their contents. Truncation and duplicate identifiers are errors.
+    ///
+    /// Other ZIP readers may interpret the skipped fields and report different
+    /// metadata for the same member.
+    Permissive,
 }
 
 /// A supported ZIP member extra-field identifier. The discriminant is the wire value.
@@ -75,6 +91,35 @@ impl From<ExtraHeaderId> for u16 {
     }
 }
 
+/// A set of known ZIP extra-field identifiers for [`ExtraFieldPolicy::AllowListed`].
+///
+/// ```
+/// use zip_framing::{ExtraFieldPolicy, ExtraHeaderId};
+///
+/// let policy = ExtraFieldPolicy::AllowListed([ExtraHeaderId::ExtendedTimestamp].into());
+/// ```
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub struct ExtraHeaderIdSet(u16);
+
+impl ExtraHeaderIdSet {
+    /// Returns whether the set contains the given identifier.
+    pub fn contains(self, identifier: ExtraHeaderId) -> bool {
+        self.0 & identifier.bit() != 0
+    }
+}
+
+impl FromIterator<ExtraHeaderId> for ExtraHeaderIdSet {
+    fn from_iter<T: IntoIterator<Item = ExtraHeaderId>>(iter: T) -> Self {
+        Self(iter.into_iter().fold(0, |bits, id| bits | id.bit()))
+    }
+}
+
+impl<const N: usize> From<[ExtraHeaderId; N]> for ExtraHeaderIdSet {
+    fn from(identifiers: [ExtraHeaderId; N]) -> Self {
+        identifiers.into_iter().collect()
+    }
+}
+
 struct Extras<'a> {
     // ZIP64 sizes are reconciled separately and need no map allocation.
     zip64: Option<&'a [u8]>,
@@ -107,7 +152,7 @@ impl CentralExtras {
         policy: ExtraFieldPolicy,
         position: u64,
     ) -> Result<(Self, MemberPayload, u64), Error> {
-        let extras = Extras::parse(bytes, Header::Central, position)?;
+        let extras = Extras::parse(bytes, Header::Central, policy, position)?;
         let (offset, disk) = location;
         let (fields, local_offset) = extras.central_payload(header, offset, disk, position)?;
         let payload = fields.validate(header.common.method, position)?;
@@ -132,7 +177,7 @@ impl CentralExtras {
         path: &str,
         position: u64,
     ) -> Result<(PayloadFields, bool, Option<Vec<u8>>), Error> {
-        let extras = Extras::parse(bytes, Header::Local, position)?;
+        let extras = Extras::parse(bytes, Header::Local, self.policy, position)?;
         let payload = extras.local_payload(header, position)?;
         extras.validate(path, None, self.policy, position)?;
         // A descriptor uses ZIP64 widths if either header has ZIP64 extra values.
@@ -150,14 +195,19 @@ impl<'a> Extras<'a> {
         policy: ExtraFieldPolicy,
         position: u64,
     ) -> Result<(), Error> {
-        let Some(&identifier) = self.fields.keys().next() else {
+        if self.fields.is_empty() {
             return Ok(());
-        };
+        }
         self.check_name(path, position)?;
         if let Some(comment) = comment {
             self.check_comment(comment, position)?;
         }
-        if policy == ExtraFieldPolicy::Zip64Only {
+        let allowed = match policy {
+            ExtraFieldPolicy::Zip64Only => ExtraHeaderIdSet::default(),
+            ExtraFieldPolicy::AllowListed(allowed) => allowed,
+            ExtraFieldPolicy::AllowKnown | ExtraFieldPolicy::Permissive => return Ok(()),
+        };
+        if let Some(&identifier) = self.fields.keys().find(|&&id| !allowed.contains(id)) {
             return Err(policy_violation(
                 position,
                 IndexPolicyViolation::ExtraField { identifier },
@@ -166,13 +216,20 @@ impl<'a> Extras<'a> {
         Ok(())
     }
 
-    fn parse(mut bytes: &'a [u8], header: Header, position: u64) -> Result<Self, Error> {
+    fn parse(
+        mut bytes: &'a [u8],
+        header: Header,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<Self, Error> {
         let mut extras = Self {
             zip64: None,
             fields: BTreeMap::new(),
             unix: UnixMetadata::default(),
         };
 
+        let mut unknown = BTreeSet::new();
+        let duplicate = || invalid(position, "duplicate extra-field identifier");
         while !bytes.is_empty() {
             let Some((prefix, remaining)) = bytes.split_first_chunk::<{ extra::HEADER_SIZE }>()
             else {
@@ -186,28 +243,33 @@ impl<'a> Extras<'a> {
             };
 
             let raw_id = u16::from_le_bytes([identifier_low, identifier_high]);
-            let identifier = ExtraHeaderId::try_from(raw_id).map_err(|identifier| {
-                Error::UnsupportedExtraField {
-                    position,
-                    identifier,
+            match ExtraHeaderId::try_from(raw_id) {
+                Ok(ExtraHeaderId::Zip64) => {
+                    if extras.zip64.replace(data).is_some() {
+                        return Err(duplicate());
+                    }
                 }
-            })?;
-
-            let previous = if identifier == ExtraHeaderId::Zip64 {
-                extras.zip64.replace(data)
-            } else {
-                extras.fields.insert(identifier, data)
-            };
-            if previous.is_some() {
-                return Err(invalid(position, "duplicate extra-field identifier"));
-            }
-
-            if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
-                return Err(invalid(position, "JAR marker must be empty"));
-            }
-            if identifier != ExtraHeaderId::Zip64 {
-                let field = identifier.unix_metadata(header, data, position)?;
-                extras.unix = extras.unix.merge(field, position)?;
+                Ok(identifier) => {
+                    if extras.fields.insert(identifier, data).is_some() {
+                        return Err(duplicate());
+                    }
+                    if identifier == ExtraHeaderId::JarMagic && !data.is_empty() {
+                        return Err(invalid(position, "JAR marker must be empty"));
+                    }
+                    let field = identifier.unix_metadata(header, data, position)?;
+                    extras.unix = extras.unix.merge(field, position)?;
+                }
+                Err(identifier) if policy == ExtraFieldPolicy::Permissive => {
+                    if !unknown.insert(identifier) {
+                        return Err(duplicate());
+                    }
+                }
+                Err(identifier) => {
+                    return Err(Error::UnsupportedExtraField {
+                        position,
+                        identifier,
+                    });
+                }
             }
             bytes = remaining;
         }
@@ -337,7 +399,7 @@ impl<'a> Extras<'a> {
         if self.fields.is_empty() && central.bytes.is_empty() {
             return Ok(None);
         }
-        let central = Self::parse(&central.bytes, Header::Central, position)?;
+        let central = Self::parse(&central.bytes, Header::Central, central.policy, position)?;
         let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
         let ownership = has(ExtraHeaderId::InfoZipOwnership);
         let ownership16 = has(ExtraHeaderId::InfoZipOwnership16);
@@ -407,6 +469,21 @@ struct UnixMetadata<'a> {
 }
 
 impl ExtraHeaderId {
+    /// A dense bit assignment independent of the ZIP wire values.
+    fn bit(self) -> u16 {
+        match self {
+            Self::Zip64 => 1 << 0,
+            Self::Unix => 1 << 1,
+            Self::ExtendedTimestamp => 1 << 2,
+            Self::InfoZipUnix => 1 << 3,
+            Self::UnicodeComment => 1 << 4,
+            Self::UnicodePath => 1 << 5,
+            Self::InfoZipOwnership16 => 1 << 6,
+            Self::InfoZipOwnership => 1 << 7,
+            Self::JarMagic => 1 << 8,
+        }
+    }
+
     fn unix_metadata(
         self,
         header: Header,

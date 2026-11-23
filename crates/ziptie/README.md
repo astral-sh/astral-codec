@@ -33,9 +33,9 @@ cargo run -p ziptie -- extract archive.zip destination
 ```
 
 By default, `ziptie` accepts only the ZIP64 extra field. Pass
-`--allow-known-extras` to any command to accept additional fields on the
-reader's allowlist, such as Info-ZIP extended timestamps. The reader validates
-these fields in both the local headers and the central directory.
+`--allow-known-extras` to any command to accept all known fields, such as
+Info-ZIP extended timestamps. The reader validates these fields in both the
+local headers and the central directory.
 
 ```shell
 cargo run -p ziptie -- logical --allow-known-extras archive.zip

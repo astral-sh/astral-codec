@@ -16,7 +16,7 @@ use zip_framing::{Error as FrameError, ExtraFieldPolicy, Index, IndexPolicy};
 /// Inspect and extract ZIP archives.
 #[derive(Debug, Parser)]
 struct Cli {
-    /// Accept ZIP extra fields on the reader's allowlist (default: ZIP64 only).
+    /// Accept all known ZIP extra fields. By default, only ZIP64 is accepted.
     #[arg(long, global = true)]
     allow_known_extras: bool,
     /// Accept empty, uncompressed directory entries that declare extraction version 1.0.
@@ -74,7 +74,7 @@ async fn main() -> ExitCode {
 
 async fn run(cli: Cli) -> Result<(), CliError> {
     let extras = if cli.allow_known_extras {
-        ExtraFieldPolicy::AllowListed
+        ExtraFieldPolicy::AllowKnown
     } else {
         ExtraFieldPolicy::default()
     };
