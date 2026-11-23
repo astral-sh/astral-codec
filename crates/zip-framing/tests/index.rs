@@ -9,7 +9,7 @@ use zip_framing::{
     CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
     ExtraFieldPolicy::{AllowKnown, AllowListed, Permissive},
-    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic, Ntfs},
+    ExtraHeaderId::{self, ExtendedTimestamp, JarMagic, Ntfs, NtfsSecurityDescriptor},
     ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry,
     LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
@@ -775,10 +775,14 @@ async fn checks_extraction_versions_independently() -> TestResult {
 
 #[tokio::test]
 async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult {
+    // Version 0 with an unknown method, opaque data, and a conflicting size.
+    let mut security_descriptor = vec![0xff; 12];
+    security_descriptor[4] = 0;
     for (identifier, local, directory) in [
         // With NTFS enabled, reserved bytes and timestamps may differ.
         (0x000a, ntfs_data(0), ntfs_data(0xff)),
         (0x000d, vec![0; 12], vec![0; 12]),
+        (0x4453, security_descriptor, vec![0; 4]),
         (0x5455, vec![0], vec![0]),
         (0x5855, vec![0; 12], vec![0; 8]),
         (0x6375, unicode_data(b""), unicode_data(b"")),
@@ -827,6 +831,10 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
         (
             Fixture::default().with_extra(false, field(0x000d, &[0; 11])),
             "truncated UNIX extra field",
+        ),
+        (
+            Fixture::default().with_extra(false, field(0x4453, &[0; 11])),
+            "invalid NT security descriptor extra field layout",
         ),
         (
             Fixture {
@@ -913,6 +921,17 @@ async fn checks_every_optional_extra_against_the_allowlist() -> TestResult {
         ));
     }
     read_validated_with(&mut reader, policy([ExtendedTimestamp, JarMagic].into())).await?;
+
+    for (local, data) in [(true, &[0; 11][..]), (false, &[0; 4][..])] {
+        let archive = Fixture::default()
+            .with_extra(local, field(0x4453, data))
+            .build();
+        read_validated_with(
+            &mut Cursor::new(archive.bytes),
+            policy([NtfsSecurityDescriptor].into()),
+        )
+        .await?;
+    }
     Ok(())
 }
 
@@ -965,16 +984,21 @@ async fn permissive_policy_skips_only_unknown_field_contents() -> TestResult {
     let permissive = IndexPolicy::default().extra_field_policy(Permissive);
     read_validated_with(&mut reader, permissive).await?;
 
+    let invalid_descriptor = "invalid NT security descriptor extra field layout";
     for (extra, expected) in [
         (vec![0xad, 0xde, 1, 0], "truncated extra-field data"),
         (field(0xbeef, &[]), "duplicate extra-field identifier"),
         (field(0x000d, &[0; 11]), "truncated UNIX extra field"),
+        (field(0x4453, &[0; 10]), invalid_descriptor),
+        (field(0x4453, &[1; 11]), invalid_descriptor),
         (
             field(0x000d, &[1; 12]),
             "local and central extra fields disagree",
         ),
     ] {
-        let result = read_validated_with(&mut Cursor::new(archive(extra).bytes), permissive).await;
+        let mut reader = Cursor::new(archive(extra).bytes);
+        let mut index = Index::read_with_policy(&mut reader, permissive).await?;
+        let result = index.entry(&mut reader, 0).await;
         assert!(
             matches!(result, Err(FrameError::Invalid { position: 0, reason }) if reason == expected)
         );

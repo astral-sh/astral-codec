@@ -139,9 +139,9 @@ impl<R: AsyncRead + AsyncSeek + Unpin> ZipArchive<R> {
 
     /// Selects a member by central-directory index.
     ///
-    /// The selected local header and descriptor must agree with the directory
-    /// before a member is returned. Timestamps may differ and are not exposed.
-    /// Successful metadata checks are cached.
+    /// The local header and data descriptor are checked against the directory
+    /// before a member is returned. Timestamps and Windows NT security descriptors
+    /// are neither compared nor exposed. Successful metadata checks are cached.
     /// An unfinished prior payload is drained and validated first. The next
     /// sequential read resumes immediately after the selected entry. Repeated
     /// explicit selections repeat the associated I/O and decompression work.

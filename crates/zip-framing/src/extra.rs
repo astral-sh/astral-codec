@@ -19,7 +19,8 @@ const UNICODE_VERSION: u8 = 1;
 ///
 /// All policies accept required ZIP64 values and reject missing or superfluous
 /// values. Known fields must pass the same layout and agreement checks under
-/// every policy. Timestamp values may differ across fields and headers.
+/// every policy. Timestamps and Windows NT security descriptor sizes need
+/// not agree between headers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtraFieldPolicy {
@@ -50,6 +51,8 @@ pub enum ExtraHeaderId {
     Ntfs = 0x000a,
     /// PKWARE UNIX metadata.
     Unix = 0x000d,
+    /// Windows NT security descriptor (version 0). The descriptor is ignored.
+    NtfsSecurityDescriptor = 0x4453,
     /// Info-ZIP extended timestamps.
     ExtendedTimestamp = 0x5455,
     /// Original Info-ZIP UNIX timestamps and optional ownership.
@@ -74,6 +77,7 @@ impl TryFrom<u16> for ExtraHeaderId {
             Self::Zip64,
             Self::Ntfs,
             Self::Unix,
+            Self::NtfsSecurityDescriptor,
             Self::ExtendedTimestamp,
             Self::InfoZipUnix,
             Self::UnicodeComment,
@@ -433,8 +437,10 @@ impl<'a> Extras<'a> {
             };
 
             let equal = match *identifier {
-                // These central forms contain only timestamps or an empty marker.
+                // These central forms contain only timestamps, a security
+                // descriptor size, or an empty ownership marker.
                 ExtraHeaderId::Ntfs
+                | ExtraHeaderId::NtfsSecurityDescriptor
                 | ExtraHeaderId::ExtendedTimestamp
                 | ExtraHeaderId::InfoZipUnix
                 | ExtraHeaderId::InfoZipOwnership16 => continue,
@@ -473,6 +479,7 @@ impl ExtraHeaderId {
             Self::InfoZipOwnership => 1 << 7,
             Self::JarMagic => 1 << 8,
             Self::Ntfs => 1 << 9,
+            Self::NtfsSecurityDescriptor => 1 << 10,
         }
     }
 
@@ -488,6 +495,16 @@ impl ExtraHeaderId {
             // Four reserved bytes precede tag 1, size 24, and three FILETIMEs (APPNOTE 4.5.5).
             (Self::Ntfs, _, 32) if data[4..8] == [1, 0, 24, 0] => None,
             (Self::Ntfs, _, _) => return Err(invalid(position, "invalid NTFS extra field layout")),
+            // Info-ZIP's SD field stores the uncompressed size in both headers.
+            // Only the local form adds a version, method, CRC32, and descriptor.
+            (Self::NtfsSecurityDescriptor, Header::Central, 4) => None,
+            (Self::NtfsSecurityDescriptor, Header::Local, 11..) if data[4] == 0 => None,
+            (Self::NtfsSecurityDescriptor, _, _) => {
+                return Err(invalid(
+                    position,
+                    "invalid NT security descriptor extra field layout",
+                ));
+            }
             (Self::Unix, _, 0..extra::UNIX_PREFIX_SIZE) => {
                 return Err(invalid(position, "truncated UNIX extra field"));
             }
