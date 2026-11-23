@@ -16,7 +16,7 @@ use tar_codec::{
     PaxDecodePolicy, SpecialKind, TarArchive, TrailingDataPolicy,
 };
 use tar_framing::{
-    BLOCK_SIZE, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
+    BLOCK_SIZE, Block, FrameError, FrameErrorInner, GnuKind, PaxError, PaxKeyword, StreamPolicy,
     header::{GID_RANGE, GNAME_RANGE, MODE_RANGE, MTIME_RANGE, UID_RANGE, UNAME_RANGE},
     logical::{MemberExtensions, TarReader},
 };
@@ -263,6 +263,64 @@ async fn pax_hard_link_payloads_require_opt_in() -> TestResult {
 }
 
 #[tokio::test]
+async fn pax_extension_headers_reject_invalid_numeric_fields() -> TestResult {
+    for &typeflag in b"xg" {
+        for (field, range) in [
+            ("mode", MODE_RANGE),
+            ("uid", UID_RANGE),
+            ("gid", GID_RANGE),
+            ("mtime", MTIME_RANGE),
+        ] {
+            let mut archive = ArchiveBuilder::new();
+            archive
+                .ustar("prefix", b'0', b"", "", 0o644)
+                .pax(typeflag, &pax_record(PaxKeyword::Comment, "metadata"))
+                .ustar("file", b'0', b"", "", 0o644);
+            let mut bytes = archive.finish();
+            let block: &mut Block = (&mut bytes[BLOCK_SIZE..2 * BLOCK_SIZE]).try_into()?;
+            block[range.start + 4] = b'8';
+            set_checksum(block);
+
+            let mut members = TarArchive::new(bytes.as_slice()).members();
+            assert!(matches!(
+                members.next().await?,
+                Some(Member::File { metadata, .. }) if metadata.path == "prefix"
+            ));
+            assert!(matches!(
+                members.next().await,
+                Err(DecodeError::Framing(FrameError {
+                    position,
+                    inner: FrameErrorInner::InvalidNumericField { field: invalid, .. },
+                })) if position == BLOCK_SIZE as u64 && invalid == field
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn pax_extension_headers_allow_absent_numeric_fields_under_strict_policy() -> TestResult {
+    for &typeflag in b"xg" {
+        let mut archive = ArchiveBuilder::new();
+        archive
+            .pax(typeflag, &pax_record(PaxKeyword::Comment, "metadata"))
+            .ustar("file", b'0', b"", "", 0o644);
+        let mut bytes = archive.finish();
+        let block: &mut Block = (&mut bytes[..BLOCK_SIZE]).try_into()?;
+        for range in [MODE_RANGE, UID_RANGE, GID_RANGE, MTIME_RANGE] {
+            block[range].fill(0);
+        }
+        set_checksum(block);
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(DecodePolicy::default().allow_all_nul_numeric_fields(false))
+            .members();
+        assert!(matches!(members.next().await?, Some(Member::File { .. })));
+    }
+    Ok(())
+}
+
+#[tokio::test]
 async fn all_nul_numeric_fields_are_policy_controlled() -> TestResult {
     let strict_policy = DecodePolicy::default().allow_all_nul_numeric_fields(false);
 
@@ -341,6 +399,38 @@ async fn base256_uid_and_gid_are_policy_controlled() -> TestResult {
     assert_eq!(member.header.uid, Some(241_306_344));
     assert_eq!(member.header.gid, Some(1_954_207_199));
     assert!(reader.next_frame().await?.is_none());
+    Ok(())
+}
+
+#[tokio::test]
+async fn pax_extension_headers_validate_but_ignore_base256_owner_ids() -> TestResult {
+    for &typeflag in b"xg" {
+        let mut archive = ArchiveBuilder::new();
+        archive
+            .pax(typeflag, &pax_record(PaxKeyword::Comment, "metadata"))
+            .ustar("file", b'0', b"", "", 0o755);
+        let mut bytes = archive.finish();
+        let block: &mut Block = (&mut bytes[..BLOCK_SIZE]).try_into()?;
+        block[UID_RANGE].copy_from_slice(&[0x80, 0, 0, 0, 0, 0, 0, 1]);
+        block[GID_RANGE].copy_from_slice(&[0x80, 0, 0, 0, 0, 0, 0, 2]);
+        block[MTIME_RANGE].copy_from_slice(b"00000000003\0");
+        set_checksum(block);
+
+        assert!(matches!(
+            TarArchive::new(bytes.as_slice()).members().next().await,
+            Err(DecodeError::Framing(FrameError {
+                inner: FrameErrorInner::InvalidNumericField { field: "uid", .. },
+                ..
+            }))
+        ));
+        let mut reader = TarReader::new(bytes.as_slice())
+            .with_policy(StreamPolicy::default().allow_pax_base256_uid_and_gid(true));
+        let member = reader.next_frame().await?.expect("expected file member");
+        assert_eq!(member.header.mode, Some(0o755));
+        assert_eq!(member.header.uid, Some(0));
+        assert_eq!(member.header.gid, Some(0));
+        assert_eq!(member.header.mtime, Some(0));
+    }
     Ok(())
 }
 
