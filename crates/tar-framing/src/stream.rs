@@ -182,28 +182,7 @@ impl HeaderFrame {
         );
         let kind = UstarKind::from_header(position, &block, has_linkpath)?;
 
-        // Some real-world pax writers encode absent ordinary-header metadata as
-        // all NULs. The compatibility policy may accept these empty fields; every
-        // populated fallback remains subject to strict validation.
-        let parse_numeric_field = |format, field, range: Range<usize>| {
-            Self::parse_numeric_field(
-                position,
-                format,
-                field,
-                &block[range],
-                policy.allow_all_nul_numeric_fields,
-            )
-        };
-        let owner_id_format = if policy.allow_pax_base256_uid_and_gid {
-            NumericFormat::Gnu
-        } else {
-            NumericFormat::Octal
-        };
-        let mode = parse_numeric_field(NumericFormat::Octal, "mode", MODE_RANGE)?;
-        let uid = parse_numeric_field(owner_id_format, "uid", UID_RANGE)?;
-        let gid = parse_numeric_field(owner_id_format, "gid", GID_RANGE)?;
-        let mtime = parse_numeric_field(NumericFormat::Octal, "mtime", MTIME_RANGE)?;
-
+        let fields = NumericFields::parse(position, &block, ArchiveFormat::Pax, policy)?;
         Self::validate_owner_names(position, &block, policy)?;
 
         // POSIX pax deliberately leaves the representation of device numbers unspecified.
@@ -227,10 +206,10 @@ impl HeaderFrame {
             kind,
             declared_size,
             effective_size,
-            mode,
-            uid,
-            gid,
-            mtime,
+            mode: fields.mode,
+            uid: fields.uid,
+            gid: fields.gid,
+            mtime: fields.mtime,
         })
     }
 
@@ -243,19 +222,7 @@ impl HeaderFrame {
     ) -> Result<Self, FrameError> {
         let kind = UstarKind::from_header(position, &block, has_long_link)?;
         validate_gnu_member_size(position, kind, declared_size)?;
-        let parse_numeric_field = |field, range: Range<usize>| {
-            Self::parse_numeric_field(
-                position,
-                NumericFormat::Gnu,
-                field,
-                &block[range],
-                policy.allow_all_nul_numeric_fields,
-            )
-        };
-        let mode = parse_numeric_field("mode", MODE_RANGE)?;
-        let uid = parse_numeric_field("uid", UID_RANGE)?;
-        let gid = parse_numeric_field("gid", GID_RANGE)?;
-        let mtime = parse_numeric_field("mtime", MTIME_RANGE)?;
+        let fields = NumericFields::parse(position, &block, ArchiveFormat::Gnu, policy)?;
         Self::validate_owner_names(position, &block, policy)?;
 
         Ok(Self {
@@ -265,10 +232,10 @@ impl HeaderFrame {
             kind,
             declared_size,
             effective_size: declared_size,
-            mode,
-            uid,
-            gid,
-            mtime,
+            mode: fields.mode,
+            uid: fields.uid,
+            gid: fields.gid,
+            mtime: fields.mtime,
         })
     }
 
@@ -289,27 +256,6 @@ impl HeaderFrame {
             }
         }
         Ok(())
-    }
-
-    fn parse_numeric_field(
-        position: u64,
-        format: NumericFormat,
-        field: &'static str,
-        bytes: &[u8],
-        allow_all_nul_numeric_fields: bool,
-    ) -> Result<Option<u64>, FrameError> {
-        if allow_all_nul_numeric_fields && is_all_nul(bytes) {
-            return Ok(None);
-        }
-        format.parse(bytes).map(Some).ok_or_else(|| {
-            FrameError::at(
-                position,
-                FrameErrorInner::InvalidNumericField {
-                    field,
-                    found: bytes.to_vec(),
-                },
-            )
-        })
     }
 
     /// Returns the bytes before the first NUL, or the whole field if it has none.
@@ -335,6 +281,55 @@ impl HeaderFrame {
             path.push(b'/');
         }
         path.extend_from_slice(name);
+    }
+}
+
+/// Numeric fields in a UStar/pax or GNU header.
+struct NumericFields {
+    mode: Option<u64>,
+    uid: Option<u64>,
+    gid: Option<u64>,
+    mtime: Option<u64>,
+}
+
+impl NumericFields {
+    fn parse(
+        position: u64,
+        block: &Block,
+        format: ArchiveFormat,
+        policy: &StreamPolicy,
+    ) -> Result<Self, FrameError> {
+        // These fields have no meaning on pax extended headers. Validate them
+        // when populated, but always allow writers to leave them all NUL.
+        let allow_all_nul = policy.allow_all_nul_numeric_fields
+            || (format == ArchiveFormat::Pax && matches!(block[TYPEFLAG_OFFSET], b'x' | b'g'));
+        let parse = |encoding: NumericFormat, field, range: Range<usize>| {
+            let bytes = &block[range];
+            if allow_all_nul && is_all_nul(bytes) {
+                return Ok(None);
+            }
+            encoding.parse(bytes).map(Some).ok_or_else(|| {
+                FrameError::at(
+                    position,
+                    FrameErrorInner::InvalidNumericField {
+                        field,
+                        found: bytes.to_vec(),
+                    },
+                )
+            })
+        };
+        let encoding = NumericFormat::from(format);
+        let owner_id_format = if policy.allow_pax_base256_uid_and_gid {
+            NumericFormat::Gnu
+        } else {
+            encoding
+        };
+        Ok(Self {
+            mode: parse(encoding, "mode", MODE_RANGE)?,
+            uid: parse(owner_id_format, "uid", UID_RANGE)?,
+            gid: parse(owner_id_format, "gid", GID_RANGE)?,
+            mtime: parse(encoding, "mtime", MTIME_RANGE)?,
+        })
     }
 }
 
@@ -1040,6 +1035,7 @@ impl<R: AsyncRead + Unpin> TarStream<R> {
         payload_size: u64,
         kind: PaxKind,
     ) -> Result<Frame, FrameError> {
+        NumericFields::parse(position, &block, ArchiveFormat::Pax, &self.policy)?;
         if payload_size > self.policy.max_pax_extension_size {
             return Err(FrameError::at(
                 position,

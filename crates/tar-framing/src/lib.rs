@@ -108,10 +108,11 @@
 //! `linkname` field, a pax `linkpath` record, or a GNU long-link extension.
 //! A pax deletion cannot hide a populated `linkname` on a non-link member.
 //!
-//! tar-framing accepts wholly NUL `mode`, `uid`, `gid`, and `mtime` fields by default for
-//! compatibility with real-world writers in both families. These fields are represented as
-//! missing rather than assigned a value. This can be disabled with
-//! [`StreamPolicy::allow_all_nul_numeric_fields`].
+//! In ordinary member headers of either family, tar-framing treats wholly NUL
+//! `mode`, `uid`, `gid`, and `mtime` fields as missing by default. This can be
+//! disabled with [`StreamPolicy::allow_all_nul_numeric_fields`].
+//! On local and global pax extended headers, these four fields may always be
+//! wholly NUL. Populated fields are validated and their values are discarded.
 //!
 //! By default, tar-framing requires the numeric fields of pax/ustar headers to be octal.
 //! Some writers, including the Rust `tar` crate, encode large `uid` and `gid` values
