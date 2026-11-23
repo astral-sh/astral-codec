@@ -40,3 +40,12 @@ these fields in both the local headers and the central directory.
 ```shell
 cargo run -p ziptie -- logical --allow-known-extras archive.zip
 ```
+
+Info-ZIP 3.0 can write empty, uncompressed directory entries that declare
+extraction version 1.0. Pass `--allow-version-1-directories` to any command
+to accept these entries. Combine it with `--allow-known-extras` if the archive
+also contains fields such as extended timestamps.
+
+```shell
+cargo run -p ziptie -- logical --allow-version-1-directories --allow-known-extras archive.zip
+```

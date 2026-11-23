@@ -19,6 +19,9 @@ struct Cli {
     /// Accept ZIP extra fields on the reader's allowlist (default: ZIP64 only).
     #[arg(long, global = true)]
     allow_known_extras: bool,
+    /// Accept empty, uncompressed directory entries that declare extraction version 1.0.
+    #[arg(long, global = true)]
+    allow_version_1_directories: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -75,18 +78,24 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     } else {
         ExtraFieldPolicy::default()
     };
+    let decode_policy = DecodePolicy::default()
+        .extra_field_policy(extras)
+        .allow_version_1_directories(cli.allow_version_1_directories);
     match cli.command {
         Command::Frames { archive } => {
-            dump_frames(&archive, extras, &mut io::stdout().lock()).await
+            let index_policy = IndexPolicy::default()
+                .extra_field_policy(extras)
+                .allow_version_1_directories(cli.allow_version_1_directories);
+            dump_frames(&archive, index_policy, &mut io::stdout().lock()).await
         }
         Command::Logical { archive } => {
-            dump_logical(&archive, extras, &mut io::stdout().lock()).await
+            dump_logical(&archive, decode_policy, &mut io::stdout().lock()).await
         }
         Command::Extract {
             archive,
             destination,
         } => {
-            open_archive(&archive, extras)
+            open_archive(&archive, decode_policy)
                 .await?
                 .extract_in(destination, ExtractPolicy::default())
                 .await?;
@@ -102,18 +111,16 @@ async fn open_file(path: &Path) -> Result<File, CliError> {
     })
 }
 
-async fn open_archive(path: &Path, extras: ExtraFieldPolicy) -> Result<ZipArchive<File>, CliError> {
-    let policy = DecodePolicy::default().extra_field_policy(extras);
+async fn open_archive(path: &Path, policy: DecodePolicy) -> Result<ZipArchive<File>, CliError> {
     Ok(ZipArchive::open_with_policy(open_file(path).await?, policy).await?)
 }
 
 async fn dump_frames(
     path: &Path,
-    extras: ExtraFieldPolicy,
+    policy: IndexPolicy,
     output: &mut impl Write,
 ) -> Result<(), CliError> {
     let mut file = open_file(path).await?;
-    let policy = IndexPolicy::default().extra_field_policy(extras);
     let mut index = Index::read_with_policy(&mut file, policy).await?;
     writeln!(output, "archive: {path:?}\nformat: zip\nframes:")?;
     let mut number = 0;
@@ -142,10 +149,10 @@ async fn dump_frames(
 
 async fn dump_logical(
     path: &Path,
-    extras: ExtraFieldPolicy,
+    policy: DecodePolicy,
     output: &mut impl Write,
 ) -> Result<(), CliError> {
-    let mut archive = open_archive(path, extras).await?;
+    let mut archive = open_archive(path, policy).await?;
     writeln!(output, "archive: {path:?}\nformat: zip\nmembers:")?;
     let mut buffer = Vec::new();
     let mut number = 0usize;
