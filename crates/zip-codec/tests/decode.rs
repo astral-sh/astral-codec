@@ -291,6 +291,25 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
 }
 
 #[tokio::test]
+async fn opts_in_to_redundant_local_zip64_sizes() -> TestResult {
+    let bytes = include_bytes!("fixtures/redundant-zip64.zip");
+    for extras in [ExtraFieldPolicy::Zip64Only, ExtraFieldPolicy::Permissive] {
+        let policy = DecodePolicy::default().extra_field_policy(extras);
+        let mut archive = ZipArchive::open_with_policy(Cursor::new(bytes), policy).await?;
+        assert_policy_violation(
+            archive.member(0).await,
+            IndexPolicyViolation::RedundantZip64Sizes,
+        );
+    }
+
+    let policy = DecodePolicy::default().allow_redundant_zip64_sizes(true);
+    let mut archive = ZipArchive::open_with_policy(Cursor::new(bytes), policy).await?;
+    let payload = file_payload(archive.member(0).await?)?;
+    assert_eq!(contents(payload).await?, b"some data");
+    Ok(())
+}
+
+#[tokio::test]
 async fn reads_python_archives_and_projects_members() -> TestResult {
     let policy = DecodePolicy::default().allow_stored_data_descriptors(true);
     for (label, bytes) in FIXTURES {

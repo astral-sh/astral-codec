@@ -58,6 +58,13 @@ impl DecodePolicy {
         self
     }
 
+    /// Allows [redundant local ZIP64 sizes](IndexPolicy::allow_redundant_zip64_sizes).
+    /// Disabled by default.
+    pub fn allow_redundant_zip64_sizes(mut self, allow: bool) -> Self {
+        self.framing = self.framing.allow_redundant_zip64_sizes(allow);
+        self
+    }
+
     /// Allows [Stored members with data descriptors](IndexPolicy::allow_stored_data_descriptors).
     pub fn allow_stored_data_descriptors(mut self, allow: bool) -> Self {
         self.framing = self.framing.allow_stored_data_descriptors(allow);

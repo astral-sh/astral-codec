@@ -44,6 +44,8 @@
 //!
 //! - By default, zip-framing accepts only required ZIP64 extra fields (`0x0001`).
 //!   See [`ExtraFieldPolicy`] for options to accept other fields.
+//!   Redundant local ZIP64 sizes require a separate opt-in through
+//!   [`IndexPolicy::allow_redundant_zip64_sizes`].
 //!
 //! - Timestamps may differ between headers and across formats. zip-framing
 //!   accepts any packed DOS date and time and checks the layout of supported
@@ -127,6 +129,9 @@ pub enum IndexPolicyViolation {
         /// The rule for central-directory comments.
         rule: CommentRule,
     },
+    /// A local ZIP64 extra repeats both 32-bit sizes.
+    #[error("redundant local ZIP64 sizes")]
+    RedundantZip64Sizes,
     /// A Stored member uses a data descriptor.
     #[error("data descriptor for Stored member")]
     StoredDataDescriptor,

@@ -334,7 +334,7 @@ impl IndexedEntry {
         &self,
         reader: &mut RecordReader<'_, R>,
         budget: &mut Budget,
-        allow_version_1_directories: bool,
+        policy: &IndexPolicy,
     ) -> Result<ResolvedMember, Error> {
         let directory = &self.directory;
         let boundary = self.boundary;
@@ -368,6 +368,8 @@ impl IndexedEntry {
             &variable[name_length..],
             header_fields,
             &directory.path,
+            policy.extra_fields,
+            policy.allow_redundant_zip64_sizes,
             position,
         )?;
         if header_fields.common != directory.common {
@@ -412,7 +414,7 @@ impl IndexedEntry {
         for version in [directory.version_needed(), header_fields.version] {
             resolved
                 .kind
-                .check_version(version, allow_version_1_directories, position)?;
+                .check_version(version, policy.allow_version_1_directories, position)?;
         }
         Ok(resolved)
     }
