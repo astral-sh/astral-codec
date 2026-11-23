@@ -22,7 +22,7 @@ pub use archive_trait::{
 };
 pub use decode::{
     CommentPolicy, CommentRule, DecodeError, DecodePolicy, ExtraFieldPolicy, ExtraHeaderId,
-    IndexPolicyViolation, Limits, ZipArchive, ZipMemberPayload,
+    ExtraHeaderIdSet, IndexPolicyViolation, Limits, ZipArchive, ZipMemberPayload,
 };
 pub use encode::{EncodeError, EncodeLimits, ZipEncoder, ZipFileOptions};
 pub use zip_framing::{

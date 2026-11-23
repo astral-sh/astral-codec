@@ -780,7 +780,7 @@ async fn checks_unix_symlink_targets_and_rejects_ambiguous_hard_links() -> TestR
             identifier: ExtraHeaderId::Unix,
         },
     );
-    let policy = DecodePolicy::default().extra_field_policy(ExtraFieldPolicy::AllowListed);
+    let policy = DecodePolicy::default().extra_field_policy(ExtraFieldPolicy::AllowKnown);
     let limited = policy.limits(Limits {
         member_size: 0,
         ..Limits::default()

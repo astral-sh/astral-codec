@@ -8,8 +8,9 @@ use zip_framing::{
     CentralDirectoryEntry, CommentPolicy,
     CommentRule::{AllowAll, AllowUtf8, Reject},
     CompressionMethod, DeviceNumbers, EntryKind, Error as FrameError,
-    ExtraFieldPolicy::AllowListed,
-    HostSystem, Index, IndexPolicy, IndexPolicyViolation, IndexedEntry, LimitExceeded, Limits,
+    ExtraFieldPolicy::{AllowKnown, AllowListed, Permissive},
+    ExtraHeaderId, ExtraHeaderIdSet, HostSystem, Index, IndexPolicy, IndexPolicyViolation,
+    IndexedEntry, LimitExceeded, Limits,
     write::{EntryKind as WriteEntryKind, PendingMember, end_records},
 };
 
@@ -27,7 +28,7 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
 // Exercise the format checks for features that require an opt-in.
 fn all_features() -> IndexPolicy {
     IndexPolicy::default()
-        .extra_field_policy(AllowListed)
+        .extra_field_policy(AllowKnown)
         .comment_policy(CommentPolicy {
             per_member: AllowAll,
             archive: AllowAll,
@@ -583,7 +584,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
                     metadata_size: (archive.end - archive.payload.len()) as u64,
                     ..Limits::default()
                 })
-                .extra_field_policy(AllowListed),
+                .extra_field_policy(AllowKnown),
         )
         .await?;
 
@@ -851,8 +852,60 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
     Ok(())
 }
 
+#[test]
+fn extra_header_id_sets_distinguish_all_known_identifiers() {
+    let known: Vec<_> = (0..=u16::MAX)
+        .filter_map(|raw| ExtraHeaderId::try_from(raw).ok())
+        .collect();
+    for &identifier in &known {
+        let set = ExtraHeaderIdSet::from([identifier]);
+        for &other in &known {
+            assert_eq!(set.contains(other), identifier == other);
+        }
+    }
+}
+
 #[tokio::test]
-async fn rejects_unsupported_extras_in_either_header() {
+async fn checks_every_optional_extra_against_the_allowlist() -> TestResult {
+    let fixture = Fixture {
+        zip64: true,
+        ..Fixture::default()
+    };
+    let policy = |allowed| IndexPolicy::default().extra_field_policy(AllowListed(allowed));
+    read_validated_with(
+        &mut Cursor::new(fixture.build().bytes),
+        policy(ExtraHeaderIdSet::default()),
+    )
+    .await?;
+
+    let timestamp = field(0x5455, &[0]);
+    let with_marker = [timestamp.clone(), field(0xcafe, &[])].concat();
+    for local in [false, true] {
+        let archive = Fixture {
+            local_extra: timestamp.clone(),
+            central_extra: timestamp.clone(),
+            ..Fixture::default()
+        }
+        .with_extra(local, with_marker.clone())
+        .build();
+        let offset = if local { 0 } else { archive.central as u64 };
+        let mut reader = Cursor::new(archive.bytes);
+        let allowed = [ExtraHeaderId::ExtendedTimestamp].into();
+        assert!(matches!(
+            read_validated_with(&mut reader, policy(allowed)).await,
+            Err(FrameError::PolicyViolation {
+                position,
+                violation: IndexPolicyViolation::ExtraField { identifier: ExtraHeaderId::JarMagic },
+            }) if position == offset
+        ));
+        let allowed = [ExtraHeaderId::ExtendedTimestamp, ExtraHeaderId::JarMagic].into();
+        read_validated_with(&mut reader, policy(allowed)).await?;
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn accepts_unknown_extras_only_under_permissive_policy() -> TestResult {
     for identifier in [
         0x0007, 0x0008, 0x000f, 0x0014, 0x0015, 0x0016, 0x0017, 0x0019, 0x2605, 0x6c78, 0x756e,
         0x9901, 0xbeef,
@@ -866,7 +919,11 @@ async fn rejects_unsupported_extras_in_either_header() {
             }
             .build();
             let offset = if central { archive.central as u64 } else { 0 };
-            for policy in [IndexPolicy::default(), all_features()] {
+            for policy in [
+                IndexPolicy::default(),
+                all_features(),
+                all_features().extra_field_policy(AllowListed([ExtraHeaderId::JarMagic].into())),
+            ] {
                 let result = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await;
                 assert!(
                     matches!(
@@ -877,8 +934,40 @@ async fn rejects_unsupported_extras_in_either_header() {
                     "{identifier:#06x}, local={local}, central={central}: {result:?}"
                 );
             }
+            read_validated_with(
+                &mut Cursor::new(&archive.bytes),
+                all_features().extra_field_policy(Permissive),
+            )
+            .await?;
         }
     }
+    Ok(())
+}
+
+#[tokio::test]
+async fn permissive_policy_skips_unknown_data_but_checks_known_fields() -> TestResult {
+    let policy = IndexPolicy::default().extra_field_policy(Permissive);
+    for (local, expected) in [
+        (vec![0; 12], None),
+        (vec![0; 11], Some("truncated UNIX extra field")),
+        (vec![1; 12], Some("local and central extra fields disagree")),
+    ] {
+        let archive = Fixture {
+            local_extra: [field(0xbeef, b"local"), field(0x000d, &local)].concat(),
+            central_extra: [field(0xbeef, b"central"), field(0x000d, &[0; 12])].concat(),
+            ..Fixture::default()
+        }
+        .build();
+        let result = read_validated_with(&mut Cursor::new(archive.bytes), policy).await;
+        if let Some(expected) = expected {
+            assert!(
+                matches!(result, Err(FrameError::Invalid { reason, .. }) if reason == expected)
+            );
+        } else {
+            result?;
+        }
+    }
+    Ok(())
 }
 
 #[tokio::test]
@@ -1691,7 +1780,7 @@ async fn reconciles_unix_extra_fields() -> TestResult {
         let central = [times, field(0x5455, b"\x01oops")].concat();
         let archive = Fixture::default().with_extra(false, central).build();
         assert!(matches!(
-            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowListed)).await,
+            Index::read_with_policy(&mut Cursor::new(archive.bytes), IndexPolicy::default().extra_field_policy(AllowKnown)).await,
             Err(FrameError::Invalid { position, reason }) if position == archive.central as u64 && reason == conflict
         ));
     }
@@ -1855,7 +1944,7 @@ async fn respects_directory_order_but_rejects_shared_or_unindexed_local_members(
     let mut source = Cursor::new(ordered);
     // Even an unselected member with a Stored descriptor must fail at open.
     assert!(matches!(
-        Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowListed)).await,
+        Index::read_with_policy(&mut source, IndexPolicy::default().extra_field_policy(AllowKnown)).await,
         Err(FrameError::PolicyViolation {
             position,
             violation: IndexPolicyViolation::StoredDataDescriptor,
@@ -2044,15 +2133,23 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         field(0xcafe, &[0]),
+        vec![0xef, 0xbe, 1, 0],
+        [field(0xbeef, &[]), field(0xcafe, &[]), field(0xbeef, &[1])].concat(),
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {
-            let fixture = Fixture::default().with_extra(local, extra.clone());
-
-            assert!(
-                read_validated(&fixture.build().bytes).await.is_err(),
-                "extra {extra:?}, local={local}"
-            );
+            let archive = Fixture::default().with_extra(local, extra.clone()).build();
+            for policy in [AllowKnown, Permissive] {
+                let result = read_validated_with(
+                    &mut Cursor::new(&archive.bytes),
+                    all_features().extra_field_policy(policy),
+                )
+                .await;
+                assert!(
+                    result.is_err(),
+                    "extra {extra:?}, local={local}, policy={policy:?}"
+                );
+            }
         }
     }
 
@@ -2301,7 +2398,7 @@ async fn charges_local_metadata_once_after_successful_resolution() -> TestResult
                     metadata_size: budget,
                     ..Limits::default()
                 })
-                .extra_field_policy(AllowListed),
+                .extra_field_policy(AllowKnown),
         )
         .await?;
         if !valid {

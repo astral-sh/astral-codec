@@ -8,7 +8,8 @@ use tokio::io::{AsyncRead, AsyncSeek, AsyncSeekExt};
 use zip_framing::{Entry, EntryKind, Index, IndexPolicy, IndexedEntry, constants::attributes};
 
 pub use zip_framing::{
-    CommentPolicy, CommentRule, ExtraFieldPolicy, ExtraHeaderId, IndexPolicyViolation, Limits,
+    CommentPolicy, CommentRule, ExtraFieldPolicy, ExtraHeaderId, ExtraHeaderIdSet,
+    IndexPolicyViolation, Limits,
 };
 
 use crate::payload::{CHUNK_SIZE, Payload};
