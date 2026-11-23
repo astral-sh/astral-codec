@@ -29,8 +29,7 @@ pub enum ExtraFieldPolicy {
     /// Accept only the optional fields in the set. An empty set is equivalent
     /// to [`Self::Zip64Only`].
     AllowListed(ExtraHeaderIdSet),
-    /// Accept all fields in [`ExtraHeaderId`]. Replaces the former unit
-    /// variant `AllowListed`.
+    /// Accept all fields in [`ExtraHeaderId`].
     AllowKnown,
     /// Accept known fields and skip unknown fields without interpreting or
     /// comparing their contents. Truncation and duplicate identifiers are errors.
