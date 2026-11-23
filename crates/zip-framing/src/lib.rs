@@ -48,6 +48,10 @@
 //! - Timestamps may differ between headers and across formats. zip-framing
 //!   accepts any packed DOS date and time and checks the layout of supported
 //!   timestamp extras. It does not interpret or expose timestamp values.
+//!
+//! - Windows NT security descriptor extras (`0x4453`) may appear in either
+//!   header or both. zip-framing checks each layout independently and ignores
+//!   the declared size and descriptor contents.
 
 #![forbid(unsafe_code)]
 

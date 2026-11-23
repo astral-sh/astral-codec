@@ -89,9 +89,10 @@ General properties:
 - If a ZIP is ambiguous (i.e. not well-formed), zip-codec should reject it rather than
   picking an arbitrary interpretation.
 - zip-codec should reject ZIPs that contain inconsistent states, e.g. where the local file headers
-  and central directory disagree. Timestamps are an exception. zip-codec checks the layout
-  of supported timestamp extras but does not interpret, compare, or expose timestamp values.
-  Other readers may report different times for the same member.
+  and central directory disagree. Timestamps and Windows NT security descriptors are exceptions.
+  zip-codec checks the layout of these extras in each header but does not compare or expose
+  their values. Other readers may report different times for the same member. Extraction
+  never applies permissions from a Windows NT security descriptor.
 - Encoding should always produce a valid, unambiguous ZIP.
 
 [PKWARE APPNOTE 6.3.9]: https://pkwaredownloads.blob.core.windows.net/pkware-general/Documentation/APPNOTE-6.3.9.TXT
