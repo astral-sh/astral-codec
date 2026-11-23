@@ -127,6 +127,7 @@ pub struct IndexPolicy {
     limits: Limits,
     extra_fields: ExtraFieldPolicy,
     comments: CommentPolicy,
+    allow_redundant_zip64_sizes: bool,
     allow_stored_data_descriptors: bool,
     allow_empty_deflate_streams: bool,
     allow_version_1_directories: bool,
@@ -140,6 +141,7 @@ impl Default for IndexPolicy {
             limits: Limits::default(),
             extra_fields: ExtraFieldPolicy::default(),
             comments: CommentPolicy::default(),
+            allow_redundant_zip64_sizes: false,
             allow_stored_data_descriptors: false,
             allow_empty_deflate_streams: true,
             allow_version_1_directories: false,
@@ -165,6 +167,19 @@ impl IndexPolicy {
     /// Sets the rules for member and archive comments.
     pub fn comment_policy(mut self, policy: CommentPolicy) -> Self {
         self.comments = policy;
+        self
+    }
+
+    /// Allows a local ZIP64 extra that repeats both 32-bit sizes on a member
+    /// without a data descriptor. Disabled by default.
+    ///
+    /// [Older CPython versions] wrote these extras with `force_zip64` even
+    /// when the extraction version was below 4.5. Both sizes must match
+    /// exactly. Required ZIP64 fields still need version 4.5.
+    ///
+    /// [Older CPython versions]: https://github.com/python/cpython/issues/103861
+    pub fn allow_redundant_zip64_sizes(mut self, allow: bool) -> Self {
+        self.allow_redundant_zip64_sizes = allow;
         self
     }
 
@@ -220,8 +235,8 @@ pub struct Index {
     entries: Vec<IndexedEntry>,
     /// Cached resolutions in directory order, allocated on first access.
     resolved: Vec<Option<ResolvedMember>>,
-    /// Whether local record validation accepts version 1.0 directories.
-    allow_version_1_directories: bool,
+    /// Policy used to validate local records on member access.
+    policy: IndexPolicy,
     /// The parse budget. This is debited against when parsing local
     /// file entries and reconciling local/central metadata.
     budget: Budget,
@@ -328,7 +343,7 @@ impl Index {
 
         Ok(Self {
             resolved: Vec::new(),
-            allow_version_1_directories: policy.allow_version_1_directories,
+            policy,
             entries,
             budget,
             buffer: Vec::new(),
@@ -367,11 +382,7 @@ impl Index {
                 // again on retry. Publish the cache and budget only after success.
                 let mut pending_budget = self.budget;
                 let resolved = indexed
-                    .read_local(
-                        &mut buffered,
-                        &mut pending_budget,
-                        self.allow_version_1_directories,
-                    )
+                    .read_local(&mut buffered, &mut pending_budget, &self.policy)
                     .await?;
                 self.budget = pending_budget;
                 slot.insert(resolved)

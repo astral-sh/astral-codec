@@ -41,6 +41,12 @@ local headers and the central directory.
 cargo run -p ziptie -- logical --allow-known-extras archive.zip
 ```
 
+Older versions of Python's `zipfile` could repeat both 32-bit sizes in a
+local ZIP64 extra field when writing with `force_zip64=True`. Pass
+`--allow-redundant-zip64-sizes` to any command to accept matching copies
+on members without a data descriptor. `--allow-known-extras` alone does
+not enable this option.
+
 Info-ZIP 3.0 can write empty, uncompressed directory entries that declare
 extraction version 1.0. Pass `--allow-version-1-directories` to any command
 to accept these entries. Combine it with `--allow-known-extras` if the archive

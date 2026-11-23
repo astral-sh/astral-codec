@@ -41,6 +41,7 @@ fn all_features() -> IndexPolicy {
             per_member: AllowAll,
             archive: AllowAll,
         })
+        .allow_redundant_zip64_sizes(true)
         .allow_stored_data_descriptors(true)
         .allow_ambiguous_symlink_modes(true)
         .allow_backslashes(true)
@@ -150,6 +151,69 @@ async fn resolves_classic_local_header_with_zip64_central_offset() -> TestResult
         b"payload"
     );
     Ok(())
+}
+
+#[tokio::test]
+async fn checks_redundant_local_zip64_sizes_at_full_width() -> TestResult {
+    let mut archive = Fixture {
+        method: 8,
+        local_extra: field(1, &[17_u64.to_le_bytes(), 7_u64.to_le_bytes()].concat()),
+        ..Fixture::default()
+    }
+    .build();
+    set32(&mut archive.bytes, 22, 17);
+    set32(&mut archive.bytes, archive.central + 24, 17);
+    read_validated(&archive.bytes).await?;
+
+    let mismatch = "redundant local ZIP64 sizes disagree";
+    for (offset, expected) in [
+        (archive.payload.start - 16, mismatch), // ZIP64 uncompressed size
+        (archive.payload.start - 1, mismatch),  // High byte of the ZIP64 compressed size
+        (
+            archive.central + 24,
+            "local and central CRC or sizes disagree",
+        ),
+    ] {
+        let mut bytes = archive.bytes.clone();
+        bytes[offset] ^= 1;
+        assert!(matches!(
+            read_validated(&bytes).await,
+            Err(FrameError::Invalid { position: 0, reason }) if reason == expected
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+async fn rejects_other_superfluous_zip64_sizes() {
+    let mut descriptor = Fixture {
+        zip64: true,
+        descriptor: Some(true),
+        ..Fixture::default()
+    }
+    .build();
+    // Both the fixed fields and the ZIP64 extra now contain zero placeholders.
+    set32(&mut descriptor.bytes, 18, 0);
+    set32(&mut descriptor.bytes, 22, 0);
+
+    let sizes = 7_u64.to_le_bytes().repeat(2);
+    for archive in [
+        descriptor,
+        Fixture::default()
+            .with_extra(false, field(1, &sizes))
+            .build(),
+        Fixture::default()
+            .with_extra(true, field(1, &sizes[..8]))
+            .build(),
+    ] {
+        assert!(matches!(
+            read_validated(&archive.bytes).await,
+            Err(FrameError::Invalid {
+                reason: "missing or superfluous ZIP64 values",
+                ..
+            })
+        ));
+    }
 }
 
 #[tokio::test]

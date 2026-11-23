@@ -19,6 +19,9 @@ struct Cli {
     /// Accept all known ZIP extra fields. By default, only ZIP64 is accepted.
     #[arg(long, global = true)]
     allow_known_extras: bool,
+    /// Accept local ZIP64 extras that repeat both 32-bit sizes on members without a data descriptor.
+    #[arg(long, global = true)]
+    allow_redundant_zip64_sizes: bool,
     /// Accept empty, uncompressed directory entries that declare extraction version 1.0.
     #[arg(long, global = true)]
     allow_version_1_directories: bool,
@@ -80,11 +83,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     };
     let decode_policy = DecodePolicy::default()
         .extra_field_policy(extras)
+        .allow_redundant_zip64_sizes(cli.allow_redundant_zip64_sizes)
         .allow_version_1_directories(cli.allow_version_1_directories);
     match cli.command {
         Command::Frames { archive } => {
             let index_policy = IndexPolicy::default()
                 .extra_field_policy(extras)
+                .allow_redundant_zip64_sizes(cli.allow_redundant_zip64_sizes)
                 .allow_version_1_directories(cli.allow_version_1_directories);
             dump_frames(&archive, index_policy, &mut io::stdout().lock()).await
         }

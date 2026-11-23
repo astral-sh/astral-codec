@@ -9,7 +9,9 @@ use crate::{
     Error, IndexPolicyViolation,
     constants::extra,
     invalid, policy_violation,
-    record::{MemberHeader, MemberPayload, PayloadFields, SizeField, bytes_at},
+    record::{
+        GeneralPurposeFlags, MemberHeader, MemberPayload, PayloadFields, SizeField, bytes_at,
+    },
 };
 
 /// Version of the Info-ZIP Unicode path and comment fields.
@@ -17,14 +19,15 @@ const UNICODE_VERSION: u8 = 1;
 
 /// Which extra fields a reader accepts in local and central member headers.
 ///
-/// All policies accept required ZIP64 values and reject missing or superfluous
-/// values. Known fields must pass the same layout and agreement checks under
+/// All policies accept required ZIP64 values. Redundant local sizes require
+/// [a separate opt-in](crate::IndexPolicy::allow_redundant_zip64_sizes).
+/// Known fields must pass the same layout and agreement checks under
 /// every policy. Timestamps and Windows NT security descriptor sizes need
 /// not agree between headers.
 #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
 #[non_exhaustive]
 pub enum ExtraFieldPolicy {
-    /// Accept only ZIP64 values required by the member header's sentinel fields.
+    /// Accept only ZIP64 extra fields.
     #[default]
     Zip64Only,
     /// Accept only the optional fields in the set. An empty set is equivalent
@@ -140,7 +143,6 @@ pub(crate) struct CentralExtras {
     /// ZIP64 alone needs no copy once its values have been resolved.
     bytes: Box<[u8]>,
     has_zip64: bool,
-    policy: ExtraFieldPolicy,
 }
 
 #[derive(Clone, Copy)]
@@ -171,7 +173,6 @@ impl CentralExtras {
                 bytes.into()
             },
             has_zip64: extras.zip64.is_some(),
-            policy,
         };
         Ok((central, payload, local_offset))
     }
@@ -182,14 +183,16 @@ impl CentralExtras {
         bytes: &[u8],
         header: MemberHeader,
         path: &str,
+        policy: ExtraFieldPolicy,
+        allow_redundant_zip64_sizes: bool,
         position: u64,
     ) -> Result<(PayloadFields, bool, Option<Vec<u8>>), Error> {
-        let extras = Extras::parse(bytes, Header::Local, self.policy, position)?;
-        let payload = extras.local_payload(header, position)?;
-        extras.validate(path, None, self.policy, position)?;
+        let extras = Extras::parse(bytes, Header::Local, policy, position)?;
+        let payload = extras.local_payload(header, allow_redundant_zip64_sizes, position)?;
+        extras.validate(path, None, policy, position)?;
         // A descriptor uses ZIP64 widths if either header has ZIP64 extra values.
         let zip64 = extras.zip64.is_some() || self.has_zip64;
-        let unix_data = extras.resolve(self, position)?;
+        let unix_data = extras.resolve(self, policy, position)?;
         Ok((payload, zip64, unix_data))
     }
 }
@@ -281,15 +284,43 @@ impl<'a> Extras<'a> {
         Ok(extras)
     }
 
-    fn local_payload(&self, header: MemberHeader, position: u64) -> Result<PayloadFields, Error> {
-        if (header.payload.uncompressed == SizeField::Zip64)
-            != (header.payload.compressed == SizeField::Zip64)
-        {
+    fn local_payload(
+        &self,
+        header: MemberHeader,
+        allow_redundant_zip64_sizes: bool,
+        position: u64,
+    ) -> Result<PayloadFields, Error> {
+        let required = header.payload.uncompressed == SizeField::Zip64;
+        if required != (header.payload.compressed == SizeField::Zip64) {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
 
-        self.resolve_payload(header, 0, position)
-            .map(|(payload, _)| payload)
+        // Older CPython repeated the 32-bit sizes without declaring version 4.5.
+        // Set aside that pair and check it against the resolved sizes below.
+        let mut field = self.zip64;
+        let redundant = field.take_if(|data| {
+            !required
+                && data.len() == extra::ZIP64_LOCAL_SIZE
+                && !header
+                    .common
+                    .flags
+                    .contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
+        });
+        let (payload, _) = Self::resolve_payload(field, header, 0, position)?;
+        if let Some(data) = redundant {
+            if data[..8] != payload.uncompressed.to_le_bytes()
+                || data[8..] != payload.compressed.to_le_bytes()
+            {
+                return Err(invalid(position, "redundant local ZIP64 sizes disagree"));
+            }
+            if !allow_redundant_zip64_sizes {
+                return Err(policy_violation(
+                    position,
+                    IndexPolicyViolation::RedundantZip64Sizes,
+                ));
+            }
+        }
+        Ok(payload)
     }
 
     #[inline]
@@ -300,7 +331,8 @@ impl<'a> Extras<'a> {
         disk: u16,
         position: u64,
     ) -> Result<(PayloadFields, u64), Error> {
-        let (payload, bytes) = self.resolve_payload(
+        let (payload, bytes) = Self::resolve_payload(
+            self.zip64,
             header,
             usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
             position,
@@ -330,7 +362,7 @@ impl<'a> Extras<'a> {
 
     #[inline]
     fn resolve_payload(
-        &self,
+        field: Option<&[u8]>,
         header: MemberHeader,
         location_size: usize,
         position: u64,
@@ -338,7 +370,6 @@ impl<'a> Extras<'a> {
         let expected = usize::from(header.payload.uncompressed == SizeField::Zip64) * 8
             + usize::from(header.payload.compressed == SizeField::Zip64) * 8
             + location_size;
-        let field = self.zip64;
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
@@ -399,11 +430,16 @@ impl<'a> Extras<'a> {
     }
 
     /// Reconciles extra fields and returns the UNIX file-type bytes, if present.
-    fn resolve(self, central: &'a CentralExtras, position: u64) -> Result<Option<Vec<u8>>, Error> {
+    fn resolve(
+        self,
+        central: &'a CentralExtras,
+        policy: ExtraFieldPolicy,
+        position: u64,
+    ) -> Result<Option<Vec<u8>>, Error> {
         if self.fields.is_empty() && central.bytes.is_empty() {
             return Ok(None);
         }
-        let central = Self::parse(&central.bytes, Header::Central, central.policy, position)?;
+        let central = Self::parse(&central.bytes, Header::Central, policy, position)?;
         let has = |id| self.fields.contains_key(&id) || central.fields.contains_key(&id);
         let ownership = has(ExtraHeaderId::InfoZipOwnership);
         let ownership16 = has(ExtraHeaderId::InfoZipOwnership16);

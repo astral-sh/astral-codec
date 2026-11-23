@@ -41,6 +41,18 @@ for method, label in [(zipfile.ZIP_STORED, "stored"), (zipfile.ZIP_DEFLATED, "de
         suffix = "-zip64" if zip64 else "-descriptor" if streaming else ""
         (root / f"{label}{suffix}.zip").write_bytes(output.getvalue())
 
+# Reproduce the local-only extra written by older versions with force_zip64
+# (https://github.com/python/cpython/issues/103861).
+output = io.BytesIO()
+with zipfile.ZipFile(output, "w") as archive:
+    entry = zipfile.ZipInfo("text.txt")
+    payload = b"some data"
+    entry.extra = struct.pack("<HHQQ", 1, 16, len(payload), len(payload))
+    archive.writestr(entry, payload)
+    entry.extra = b""  # The central directory is written when the archive closes.
+
+(root / "redundant-zip64.zip").write_bytes(output.getvalue())
+
 # Exercise default extraction of a DEFLATE member with a data descriptor.
 output = Streaming()
 with zipfile.ZipFile(output, "w", compression=zipfile.ZIP_DEFLATED) as archive:
