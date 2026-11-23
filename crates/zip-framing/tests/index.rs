@@ -165,28 +165,22 @@ async fn checks_redundant_local_zip64_sizes_at_full_width() -> TestResult {
     set32(&mut archive.bytes, archive.central + 24, 17);
     read_validated(&archive.bytes).await?;
 
-    // Change the uncompressed size, then only the high bits of the compressed size.
-    for offset in [archive.payload.start - 16, archive.payload.start - 1] {
+    let mismatch = "redundant local ZIP64 sizes disagree";
+    for (offset, expected) in [
+        (archive.payload.start - 16, mismatch), // ZIP64 uncompressed size
+        (archive.payload.start - 1, mismatch),  // High byte of the ZIP64 compressed size
+        (
+            archive.central + 24,
+            "local and central CRC or sizes disagree",
+        ),
+    ] {
         let mut bytes = archive.bytes.clone();
-        bytes[offset] = 1;
+        bytes[offset] ^= 1;
         assert!(matches!(
             read_validated(&bytes).await,
-            Err(FrameError::Invalid {
-                position: 0,
-                reason: "redundant local ZIP64 sizes disagree"
-            })
+            Err(FrameError::Invalid { position: 0, reason }) if reason == expected
         ));
     }
-
-    // Even matching local copies must agree with the directory.
-    set32(&mut archive.bytes, archive.central + 24, 18);
-    assert!(matches!(
-        read_validated(&archive.bytes).await,
-        Err(FrameError::Invalid {
-            position: 0,
-            reason: "local and central CRC or sizes disagree"
-        })
-    ));
     Ok(())
 }
 

@@ -290,27 +290,27 @@ impl<'a> Extras<'a> {
         allow_redundant_zip64_sizes: bool,
         position: u64,
     ) -> Result<PayloadFields, Error> {
-        if (header.payload.uncompressed == SizeField::Zip64)
-            != (header.payload.compressed == SizeField::Zip64)
-        {
+        let required = header.payload.uncompressed == SizeField::Zip64;
+        if required != (header.payload.compressed == SizeField::Zip64) {
             return Err(invalid(position, "local ZIP64 must contain both sizes"));
         }
 
-        // Older CPython wrote both sizes twice without raising the extraction
-        // version to 4.5. Only an exact copy can bypass the ZIP64 version check.
-        if let (SizeField::Value(uncompressed), SizeField::Value(compressed), Some(data)) = (
-            header.payload.uncompressed,
-            header.payload.compressed,
-            self.zip64,
-        ) && data.len() == extra::ZIP64_LOCAL_SIZE
-            && !header
-                .common
-                .flags
-                .contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
-        {
-            let uncompressed = u64::from(uncompressed);
-            let compressed = u64::from(compressed);
-            if data[..8] != uncompressed.to_le_bytes() || data[8..] != compressed.to_le_bytes() {
+        // Older CPython repeated the 32-bit sizes without declaring version 4.5.
+        // Set aside that pair and check it against the resolved sizes below.
+        let mut field = self.zip64;
+        let redundant = field.take_if(|data| {
+            !required
+                && data.len() == extra::ZIP64_LOCAL_SIZE
+                && !header
+                    .common
+                    .flags
+                    .contains(GeneralPurposeFlags::DATA_DESCRIPTOR)
+        });
+        let (payload, _) = Self::resolve_payload(field, header, 0, position)?;
+        if let Some(data) = redundant {
+            if data[..8] != payload.uncompressed.to_le_bytes()
+                || data[8..] != payload.compressed.to_le_bytes()
+            {
                 return Err(invalid(position, "redundant local ZIP64 sizes disagree"));
             }
             if !allow_redundant_zip64_sizes {
@@ -319,15 +319,8 @@ impl<'a> Extras<'a> {
                     IndexPolicyViolation::RedundantZip64Sizes,
                 ));
             }
-            return Ok(PayloadFields {
-                crc: header.payload.crc,
-                compressed,
-                uncompressed,
-            });
         }
-
-        self.resolve_payload(header, 0, position)
-            .map(|(payload, _)| payload)
+        Ok(payload)
     }
 
     #[inline]
@@ -338,7 +331,8 @@ impl<'a> Extras<'a> {
         disk: u16,
         position: u64,
     ) -> Result<(PayloadFields, u64), Error> {
-        let (payload, bytes) = self.resolve_payload(
+        let (payload, bytes) = Self::resolve_payload(
+            self.zip64,
             header,
             usize::from(offset == u32::MAX) * 8 + usize::from(disk == u16::MAX) * 4,
             position,
@@ -368,7 +362,7 @@ impl<'a> Extras<'a> {
 
     #[inline]
     fn resolve_payload(
-        &self,
+        field: Option<&[u8]>,
         header: MemberHeader,
         location_size: usize,
         position: u64,
@@ -376,7 +370,6 @@ impl<'a> Extras<'a> {
         let expected = usize::from(header.payload.uncompressed == SizeField::Zip64) * 8
             + usize::from(header.payload.compressed == SizeField::Zip64) * 8
             + location_size;
-        let field = self.zip64;
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
