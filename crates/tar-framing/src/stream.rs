@@ -284,6 +284,7 @@ impl HeaderFrame {
     }
 }
 
+/// Numeric fields in a UStar/pax or GNU header.
 struct NumericFields {
     mode: Option<u64>,
     uid: Option<u64>,
