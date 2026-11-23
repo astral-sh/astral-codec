@@ -26,8 +26,8 @@ fn unicode_data(value: &[u8]) -> Vec<u8> {
     data
 }
 
-fn ntfs_data() -> Vec<u8> {
-    let mut data = vec![0; 32];
+fn ntfs_data(fill: u8) -> Vec<u8> {
+    let mut data = vec![fill; 32];
     set16(&mut data, 4, 1);
     set16(&mut data, 6, 24);
     data
@@ -650,7 +650,6 @@ async fn rejects_redundant_header_disagreements_and_unsupported_flags() -> TestR
     let mut archive = Fixture::default().build();
     // Even invalid packed DOS times and dates may differ between headers.
     set32(&mut archive.bytes, 10, u32::MAX);
-    set32(&mut archive.bytes, archive.central + 12, 0);
     read_validated_with(&mut Cursor::new(&archive.bytes), IndexPolicy::default()).await?;
 
     let mut archive = Fixture::default().build();
@@ -777,7 +776,8 @@ async fn checks_extraction_versions_independently() -> TestResult {
 #[tokio::test]
 async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult {
     for (identifier, local, directory) in [
-        (0x000a, ntfs_data(), ntfs_data()),
+        // With NTFS enabled, reserved bytes and timestamps may differ.
+        (0x000a, ntfs_data(0), ntfs_data(0xff)),
         (0x000d, vec![0; 12], vec![0; 12]),
         (0x5455, vec![0], vec![0]),
         (0x5855, vec![0; 12], vec![0; 8]),
@@ -820,6 +820,10 @@ async fn rejects_optional_extras_by_default_even_alongside_zip64() -> TestResult
     }
 
     for (fixture, expected) in [
+        (
+            Fixture::default().with_extra(false, field(0x000a, &ntfs_data(0)[..31])),
+            "invalid NTFS extra field layout",
+        ),
         (
             Fixture::default().with_extra(false, field(0x000d, &[0; 11])),
             "truncated UNIX extra field",
@@ -1699,51 +1703,31 @@ async fn resolves_unix_extension_data_and_checks_redundant_values() -> TestResul
 
 #[tokio::test]
 async fn validates_ntfs_timestamp_layout_in_each_header() -> TestResult {
-    let policy = IndexPolicy::default().extra_field_policy(AllowListed([Ntfs].into()));
-    let mut data = ntfs_data();
+    let policy =
+        IndexPolicy::default().extra_field_policy(AllowListed([Ntfs, ExtendedTimestamp].into()));
+    let extras = [field(0x000a, &ntfs_data(0)), field(0x5455, &[1; 5])].concat();
     for local in [false, true] {
-        let archive = Fixture::default()
-            .with_extra(local, field(0x000a, &data))
-            .build();
+        let archive = Fixture::default().with_extra(local, extras.clone()).build();
         read_validated_with(&mut Cursor::new(archive.bytes), policy).await?;
     }
 
-    let central_extra = field(0x000a, &data);
-    data[..4].fill(1); // Reserved bytes are ignored.
-    data[8..].fill(0xff);
-    let archive = Fixture {
-        local_extra: [field(0x000a, &data), field(0x5455, &[1; 5])].concat(),
-        central_extra,
-        ..Fixture::default()
-    }
-    .build();
-    read_validated(&archive.bytes).await?;
-
     let policy = IndexPolicy::default().extra_field_policy(Permissive);
-    for (length, tag, size) in [(31, 1, 24), (36, 1, 24), (32, 2, 24), (32, 1, 16)] {
+    for (length, tag, size) in [(36, 1, 24), (32, 2, 24), (32, 1, 16)] {
         let mut data = vec![0; length];
         set16(&mut data, 4, tag);
         set16(&mut data, 6, size);
-        for local in [false, true] {
-            let archive = Fixture::default()
-                .with_extra(local, field(0x000a, &data))
-                .build();
-            let offset = if local { 0 } else { archive.central as u64 };
-            let mut reader = Cursor::new(archive.bytes);
-            let result = if local {
-                let mut index = Index::read_with_policy(&mut reader, policy).await?;
-                index.validate_all(&mut reader).await
-            } else {
-                Index::read_with_policy(&mut reader, policy)
-                    .await
-                    .map(|_| ())
-            };
-            assert!(matches!(
-                result,
-                Err(FrameError::Invalid { position, reason: "invalid NTFS extra field layout" })
-                    if position == offset
-            ));
-        }
+        let archive = Fixture::default()
+            .with_extra(true, field(0x000a, &data))
+            .build();
+        let mut reader = Cursor::new(archive.bytes);
+        let mut index = Index::read_with_policy(&mut reader, policy).await?;
+        assert!(matches!(
+            index.entry(&mut reader, 0).await,
+            Err(FrameError::Invalid {
+                position: 0,
+                reason: "invalid NTFS extra field layout"
+            })
+        ));
     }
     Ok(())
 }
@@ -2189,7 +2173,7 @@ async fn rejects_malformed_extras_and_zip64_version_two() {
         vec![1, 0, 8, 0, 0, 0, 0, 0, 0, 0, 0],
         field(1, &[]),
         field(0xcafe, &[0]),
-        field(0x000a, &ntfs_data()).repeat(2),
+        field(0x000a, &ntfs_data(0)).repeat(2),
         [field(0x5455, &[0]), field(0x5455, &[0])].concat(),
     ] {
         for local in [false, true] {
