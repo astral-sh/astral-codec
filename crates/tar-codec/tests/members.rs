@@ -263,6 +263,56 @@ async fn pax_hard_link_payloads_require_opt_in() -> TestResult {
     Ok(())
 }
 
+/// Builds a file member whose pax `size` record of 7 overrides `declared_size`.
+fn pax_sized_file(declared_size: u64) -> Vec<u8> {
+    let file = header(ArchiveFormat::Pax, "file", b'0', declared_size, "", 0o644);
+    let mut payload = [0; BLOCK_SIZE];
+    payload[..7].copy_from_slice(b"payload");
+    let mut archive = ArchiveBuilder::new();
+    archive
+        .pax(b'x', &pax_record(PaxKeyword::Size, "7"))
+        .block(&file)
+        .block(&payload);
+    archive.finish()
+}
+
+#[tokio::test]
+async fn pax_size_mismatches_are_policy_controlled() -> TestResult {
+    let pax_policy = PaxDecodePolicy::default().allow_size_mismatch(false);
+    let strict = DecodePolicy::default().pax_policy(pax_policy);
+    for declared_size in [0, 3] {
+        let bytes = pax_sized_file(declared_size);
+        let mut members = TarArchive::new(bytes.as_slice()).members();
+        let Some(Member::File { size, payload, .. }) = members.next().await? else {
+            return Err(io::Error::other("expected file member").into());
+        };
+        assert_eq!(size, 7);
+        assert_eq!(read_payload(payload).await?, b"payload");
+
+        let mut members = TarArchive::new(bytes.as_slice())
+            .with_policy(strict.clone())
+            .members();
+        let expected = DecodePolicyViolation::PaxSizeMismatch {
+            declared_size,
+            effective_size: 7,
+        };
+        assert!(matches!(
+            members.next().await,
+            Err(DecodeError::PolicyViolation { position: 1024, violation }) if violation == expected
+        ));
+    }
+
+    let bytes = pax_sized_file(7);
+    let mut members = TarArchive::new(bytes.as_slice())
+        .with_policy(strict)
+        .members();
+    assert!(matches!(
+        members.next().await?,
+        Some(Member::File { size: 7, .. })
+    ));
+    Ok(())
+}
+
 const NUMERIC_FIELDS: [(&str, Range<usize>); 4] = [
     ("mode", MODE_RANGE),
     ("uid", UID_RANGE),

@@ -110,6 +110,7 @@ pub struct PaxDecodePolicy {
     allow_global_pax_member_metadata: bool,
     allow_hardlink_linkdata: bool,
     allow_base256_uid_and_gid: bool,
+    allow_size_mismatch: bool,
 }
 
 /// Controls which vendor-namespaced pax records may be ignored during decoding.
@@ -159,6 +160,7 @@ impl Default for PaxDecodePolicy {
             allow_global_pax_member_metadata: false,
             allow_hardlink_linkdata: false,
             allow_base256_uid_and_gid: false,
+            allow_size_mismatch: true,
         }
     }
 }
@@ -269,6 +271,18 @@ impl DecodePolicy {
                 ));
             }
             MemberExtensions::Gnu { .. } => {}
+        }
+
+        let declared_size = frame.header.declared_size;
+        let effective_size = frame.header.effective_size;
+        if !self.pax_policy.allow_size_mismatch && declared_size != effective_size {
+            return Err(DecodeError::policy_violation(
+                frame.header.position,
+                DecodePolicyViolation::PaxSizeMismatch {
+                    declared_size,
+                    effective_size,
+                },
+            ));
         }
         Ok(())
     }
@@ -399,6 +413,20 @@ impl PaxDecodePolicy {
         self
     }
 
+    /// Configures whether a pax `size` record may differ from the header `size` field.
+    ///
+    /// Pax permits the record to override the header field, and writers rely
+    /// on this for members of 8 GiB or more. Readers that frame members by the
+    /// header field, such as the `tar` crate before 0.4.45, see different
+    /// members than this decoder does. Disabling this option rejects such
+    /// members, including those whose header field is zero.
+    ///
+    /// Size mismatches are **allowed by default**.
+    pub fn allow_size_mismatch(mut self, allow: bool) -> Self {
+        self.allow_size_mismatch = allow;
+        self
+    }
+
     fn check_extension(&self, extension: &PaxExtension) -> Result<(), DecodeError> {
         let position = extension.position;
         if extension.kind == PaxKind::Global && !self.allow_global_pax_extensions {
@@ -520,6 +548,14 @@ pub enum DecodePolicyViolation {
     GlobalPaxMemberMetadata {
         /// The restricted global record keyword.
         keyword: &'static str,
+    },
+    /// A POSIX pax `size` record differs from the member header's `size` field.
+    #[error("pax size {effective_size} does not match header size {declared_size}")]
+    PaxSizeMismatch {
+        /// The size encoded in the member header field.
+        declared_size: u64,
+        /// The size supplied by the pax `size` record.
+        effective_size: u64,
     },
 }
 
