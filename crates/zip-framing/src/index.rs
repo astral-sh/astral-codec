@@ -175,8 +175,7 @@ impl IndexPolicy {
     ///
     /// [Older CPython versions] wrote these extras with `force_zip64` even
     /// when the extraction version was below 4.5. Both sizes must match
-    /// exactly. This option does not waive the minimum version for required
-    /// ZIP64 fields.
+    /// exactly.
     ///
     /// [Older CPython versions]: https://github.com/python/cpython/issues/103861
     pub fn allow_redundant_zip64_sizes(mut self, allow: bool) -> Self {
@@ -203,10 +202,12 @@ impl IndexPolicy {
 
     /// Allows local and central member headers to declare an extraction version
     /// below the minimum for their compression method, ZIP64 fields, or member
-    /// kind (APPNOTE 4.4.3.2). Disabled by default.
+    /// kind (APPNOTE 4.4.3.2). Disabled by default. Versions above 4.5
+    /// remain unsupported.
     ///
-    /// Versions above 4.5 remain unsupported. This option has no effect on
-    /// ZIP64 end records or [redundant ZIP64 sizes](Self::allow_redundant_zip64_sizes).
+    /// Info-ZIP 3.0 can declare version 1.0 for directories, which require 2.0.
+    /// Go's [`zip.Writer.CreateRaw`](https://pkg.go.dev/archive/zip#Writer.CreateRaw)
+    /// can write version 0 if the caller leaves `FileHeader.ReaderVersion` unset.
     pub fn allow_incompatible_extraction_versions(mut self, allow: bool) -> Self {
         self.allow_incompatible_extraction_versions = allow;
         self
