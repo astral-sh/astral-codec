@@ -142,7 +142,7 @@ struct Extras<'a> {
 pub(crate) struct CentralExtras {
     /// ZIP64 alone needs no copy once its values have been resolved.
     bytes: Box<[u8]>,
-    has_zip64: bool,
+    pub(crate) has_zip64: bool,
 }
 
 #[derive(Clone, Copy)]
@@ -373,7 +373,6 @@ impl<'a> Extras<'a> {
         if field.map(<[u8]>::len) != (expected != 0).then_some(expected) {
             return Err(invalid(position, "missing or superfluous ZIP64 values"));
         }
-        header.check_zip64(field.is_some(), position)?;
 
         let mut bytes = field.unwrap_or_default();
         let mut take_size = |size: SizeField| -> Result<u64, Error> {

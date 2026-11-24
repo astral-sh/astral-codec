@@ -130,7 +130,7 @@ pub struct IndexPolicy {
     allow_redundant_zip64_sizes: bool,
     allow_stored_data_descriptors: bool,
     allow_empty_deflate_streams: bool,
-    allow_version_1_directories: bool,
+    allow_incompatible_extraction_versions: bool,
     allow_ambiguous_symlink_modes: bool,
     allow_backslashes: bool,
 }
@@ -144,7 +144,7 @@ impl Default for IndexPolicy {
             allow_redundant_zip64_sizes: false,
             allow_stored_data_descriptors: false,
             allow_empty_deflate_streams: true,
-            allow_version_1_directories: false,
+            allow_incompatible_extraction_versions: false,
             allow_ambiguous_symlink_modes: false,
             allow_backslashes: false,
         }
@@ -175,7 +175,7 @@ impl IndexPolicy {
     ///
     /// [Older CPython versions] wrote these extras with `force_zip64` even
     /// when the extraction version was below 4.5. Both sizes must match
-    /// exactly. Required ZIP64 fields still need version 4.5.
+    /// exactly.
     ///
     /// [Older CPython versions]: https://github.com/python/cpython/issues/103861
     pub fn allow_redundant_zip64_sizes(mut self, allow: bool) -> Self {
@@ -200,11 +200,16 @@ impl IndexPolicy {
         self
     }
 
-    /// Allows empty Stored directories that declare extraction version 1.0.
-    /// Info-ZIP 3.0 writes these even though APPNOTE 4.4.3.2 requires 2.0 for
-    /// directories. Disabled by default.
-    pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
-        self.allow_version_1_directories = allow;
+    /// Allows local and central member headers to declare an extraction version
+    /// below the minimum for their compression method, ZIP64 fields, or member
+    /// kind (APPNOTE 4.4.3.2). Disabled by default. Versions above 4.5
+    /// remain unsupported.
+    ///
+    /// Info-ZIP 3.0 can declare version 1.0 for directories, which require 2.0.
+    /// Go's [`zip.Writer.CreateRaw`](https://pkg.go.dev/archive/zip#Writer.CreateRaw)
+    /// can write version 0 if the caller leaves `FileHeader.ReaderVersion` unset.
+    pub fn allow_incompatible_extraction_versions(mut self, allow: bool) -> Self {
+        self.allow_incompatible_extraction_versions = allow;
         self
     }
 
@@ -221,6 +226,16 @@ impl IndexPolicy {
     pub fn allow_backslashes(mut self, allow: bool) -> Self {
         self.allow_backslashes = allow;
         self
+    }
+
+    fn check_version(&self, declared: u16, minimum: u16, position: u64) -> Result<(), Error> {
+        if declared < minimum && !self.allow_incompatible_extraction_versions {
+            return Err(policy_violation(
+                position,
+                IndexPolicyViolation::IncompatibleExtractionVersion { declared, minimum },
+            ));
+        }
+        Ok(())
     }
 }
 

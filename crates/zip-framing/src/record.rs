@@ -362,16 +362,6 @@ impl MemberHeader {
             });
         }
 
-        if version
-            < if method == CompressionMethod::Deflate {
-                version::V2_0
-            } else {
-                version::BASE
-            }
-        {
-            return Err(invalid(position, "extraction version is too low"));
-        }
-
         Ok(Self {
             version,
             common: Common { flags, method },
@@ -399,12 +389,15 @@ impl MemberHeader {
         bytes
     }
 
-    pub(crate) fn check_zip64(self, zip64: bool, position: u64) -> Result<(), Error> {
-        if zip64 && self.version < version::ZIP64 {
-            return Err(invalid(position, "ZIP64 requires extraction version 4.5"));
+    /// Minimum extraction version for the features used in this header.
+    pub(crate) fn minimum_version(self, requires_zip64: bool) -> u16 {
+        if requires_zip64 {
+            return version::ZIP64;
         }
-
-        Ok(())
+        match self.common.method {
+            CompressionMethod::Stored => version::BASE,
+            CompressionMethod::Deflate => version::V2_0,
+        }
     }
 }
 

@@ -42,6 +42,7 @@ fn all_features() -> IndexPolicy {
             archive: AllowAll,
         })
         .allow_redundant_zip64_sizes(true)
+        .allow_incompatible_extraction_versions(true)
         .allow_stored_data_descriptors(true)
         .allow_ambiguous_symlink_modes(true)
         .allow_backslashes(true)
@@ -137,13 +138,16 @@ async fn resolves_classic_local_header_with_zip64_central_offset() -> TestResult
     }
     .build();
     assert!(matches!(
-        read_validated(&archive.bytes).await,
-        Err(FrameError::Invalid { position, reason: "ZIP64 requires extraction version 4.5" })
-            if position == archive.central as u64
+        Index::read(&mut Cursor::new(&archive.bytes)).await,
+        Err(FrameError::PolicyViolation {
+            position,
+            violation: IndexPolicyViolation::IncompatibleExtractionVersion { declared: 20, minimum: 45 },
+        }) if position == archive.central as u64
     ));
 
     set16(&mut archive.bytes, archive.central + 6, 45);
-    let index = read_validated(&archive.bytes).await?;
+    let index =
+        read_validated_with(&mut Cursor::new(&archive.bytes), IndexPolicy::default()).await?;
     let entry = index.resolved(0).ok_or("unresolved entry")?;
     assert_eq!(entry.directory().version_needed(), 45);
     assert_eq!(
@@ -528,38 +532,35 @@ async fn resolves_kinds_and_reconciled_unix_data() -> TestResult {
 }
 
 #[tokio::test]
-async fn version_1_directories_require_opt_in() -> TestResult {
-    let mut archive = Fixture {
-        version: Some(10),
-        ..Fixture::member("empty/", (0o040755 << 16) | 0x10, b"")
+async fn checks_kind_versions_on_member_access() -> TestResult {
+    let policy = IndexPolicy::default().allow_incompatible_extraction_versions(true);
+    for (name, attributes, kind, local, central, minimum) in [
+        ("empty/", 0x10, EntryKind::Directory, 20, 10, 20),
+        ("empty/", 0x10, EntryKind::Directory, 11, 20, 20),
+        ("volume", 0x08, EntryKind::VolumeLabel, 10, 10, 11),
+    ] {
+        let mut archive = Fixture {
+            made_by: Some(20),
+            version: Some(central),
+            ..Fixture::member(name, attributes, b"")
+        }
+        .build();
+        set16(&mut archive.bytes, 4, local);
+        let mut source = Cursor::new(&archive.bytes);
+        let mut index = Index::read(&mut source).await?;
+        let expected = IndexPolicyViolation::IncompatibleExtractionVersion {
+            declared: local.min(central),
+            minimum,
+        };
+        assert!(matches!(
+            index.entry(&mut source, 0).await,
+            Err(FrameError::PolicyViolation { position: 0, violation }) if violation == expected
+        ));
+        let index = read_validated_with(&mut source, policy).await?;
+        let entry = index.resolved(0).ok_or("unresolved entry")?;
+        assert_eq!(entry.kind(), &kind);
+        assert_eq!(entry.directory().version_needed(), central);
     }
-    .build();
-    let mut source = Cursor::new(&archive.bytes);
-    let mut index = Index::read(&mut source).await?;
-    assert!(matches!(
-        index.entry(&mut source, 0).await,
-        Err(FrameError::PolicyViolation {
-            position: 0,
-            violation: IndexPolicyViolation::Version1Directory
-        })
-    ));
-
-    let policy = IndexPolicy::default().allow_version_1_directories(true);
-    let index = read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
-    let entry = index.resolved(0).ok_or("unresolved entry")?;
-    assert_eq!(entry.kind(), &EntryKind::Directory);
-    assert_eq!(entry.directory().version_needed(), 10);
-
-    // Only the local header declares version 1.0.
-    set16(&mut archive.bytes, archive.central + 6, 20);
-    assert!(matches!(
-        read_validated(&archive.bytes).await,
-        Err(FrameError::PolicyViolation {
-            violation: IndexPolicyViolation::Version1Directory,
-            ..
-        })
-    ));
-    read_validated_with(&mut Cursor::new(&archive.bytes), policy).await?;
     Ok(())
 }
 
@@ -594,21 +595,6 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         (directory(b"data"), non_file),
         (fifo(b"data"), non_file),
         (volume(b"data"), non_file),
-        (
-            Fixture {
-                version: Some(11),
-                ..directory(b"")
-            },
-            "directory requires extraction version 2.0",
-        ),
-        (
-            Fixture {
-                made_by: Some(20),
-                version: Some(10),
-                ..volume(b"")
-            },
-            "volume label requires extraction version 1.1",
-        ),
         (link(b""), "empty symbolic-link target"),
         (
             link(b"target").with_unix_data(b""),
@@ -651,7 +637,7 @@ async fn rejects_inconsistent_kind_metadata_before_caching_or_charging_it() -> T
         let mut index = Index::read_with_policy(
             &mut source,
             IndexPolicy::default()
-                .allow_version_1_directories(true)
+                .allow_incompatible_extraction_versions(true)
                 .limits(Limits {
                     metadata_size: (archive.end - archive.payload.len()) as u64,
                     ..Limits::default()
@@ -792,43 +778,46 @@ async fn rejects_nonempty_deflate_member_with_zero_compressed_size_at_open() -> 
 
 #[tokio::test]
 async fn checks_extraction_versions_independently() -> TestResult {
-    for (method, minimum) in [(0, 10), (8, 20)] {
+    let policy = IndexPolicy::default().allow_incompatible_extraction_versions(true);
+    for (method, zip64, minimum) in [(0, false, 10), (8, false, 20), (0, true, 45)] {
         let archive = Fixture {
             method,
+            zip64,
             ..Fixture::default()
         }
         .build();
         for (offset, position) in [(4, 0), (archive.central + 6, archive.central as u64)] {
             for (version, high_byte) in [
+                (0, 0),
                 (minimum - 1, 0),
-                (minimum, 0),
+                (minimum, 3), // p7zip stores the host system in the high byte.
                 (45, 0),
-                (46, 0),
-                (19, 3),
-                (20, 3),
                 (46, 3),
             ] {
                 let mut bytes = archive.bytes.clone();
                 bytes[offset..offset + 2].copy_from_slice(&[version, high_byte]);
-                let result = read_validated(&bytes).await;
+                let mut reader = Cursor::new(bytes);
                 if version < minimum {
+                    let expected = IndexPolicyViolation::IncompatibleExtractionVersion {
+                        declared: u16::from(version),
+                        minimum: u16::from(minimum),
+                    };
                     assert!(matches!(
-                        result,
-                        Err(FrameError::Invalid {
-                            reason: "extraction version is too low",
-                            position: actual,
-                        }) if actual == position
+                        read_validated_with(&mut reader, IndexPolicy::default()).await,
+                        Err(FrameError::PolicyViolation { position: actual, violation })
+                            if actual == position && violation == expected
                     ));
+                    read_validated_with(&mut reader, policy).await?;
                 } else if version > 45 {
                     assert!(matches!(
-                        result,
+                        read_validated_with(&mut reader, policy).await,
                         Err(FrameError::Unsupported {
                             feature: "extraction version",
                             position: actual,
                         }) if actual == position
                     ));
                 } else {
-                    result?;
+                    read_validated_with(&mut reader, IndexPolicy::default()).await?;
                 }
             }
         }
