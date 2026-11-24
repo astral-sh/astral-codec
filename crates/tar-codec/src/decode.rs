@@ -2,8 +2,12 @@
 //!
 //! The decoder applies format extensions to member paths and link targets.
 //! It does not normalize these values for extraction. Do not use them directly
-//! as file-system paths. [`ArchiveTrait::extract_in`] validates and normalizes
-//! them as specified by [`crate::extract::ExtractPolicy`].
+//! as file-system paths.
+#![cfg_attr(
+    feature = "fs",
+    doc = "[`ArchiveTrait::extract_in`] validates and normalizes them as",
+    doc = "specified by [`crate::extract::ExtractPolicy`]."
+)]
 
 use std::collections::HashSet;
 
@@ -27,7 +31,6 @@ pub use tar_framing::{
 ///
 /// Member paths and link targets are not normalized for extraction. A direct
 /// consumer must validate them before it uses them as file-system paths.
-/// [`ArchiveTrait::extract_in`] does this validation.
 ///
 /// By default, member iteration validates final record padding and waits for
 /// EOF before reporting the end of the archive. See [`DecodePolicy::trailing_data_policy`].
@@ -35,6 +38,12 @@ pub use tar_framing::{
 /// After a member or payload read returns an error, subsequent reads return
 /// [`DecodeError::Poisoned`]. At the end of the archive, member iteration
 /// returns `Ok(None)`. Cancelled reads can be retried.
+#[cfg_attr(
+    feature = "fs",
+    doc = "",
+    doc = "[`ArchiveTrait::extract_in`] validates member paths and link targets",
+    doc = "during extraction."
+)]
 pub struct TarArchive<R> {
     reader: TarReader<R>,
     policy: DecodePolicy,
@@ -370,8 +379,12 @@ impl PaxDecodePolicy {
     /// This is **disabled by default** because readers disagree on whether the
     /// block after a hard link contains file data or the next member header.
     /// When enabled, the effective pax size determines the payload length.
-    /// If [hard-link extraction](crate::extract::LinkPolicy::allow_hard_links)
-    /// is also enabled, a nonempty payload replaces the target file's contents.
+    /// If hard-link extraction is also enabled, a nonempty payload replaces the
+    /// target file's contents.
+    #[cfg_attr(
+        feature = "fs",
+        doc = "See [`crate::extract::LinkPolicy::allow_hard_links`]."
+    )]
     pub fn allow_hardlink_linkdata(mut self, allow: bool) -> Self {
         self.allow_hardlink_linkdata = allow;
         self
