@@ -1,7 +1,7 @@
 //! Filesystem-backed archive construction.
 //!
 //! This module provides [`Builder::add_directory_all`] and the filesystem
-//! constructors for [`FilePayload`].
+//! constructors for [`FilePayload`]. It requires the `fs` feature.
 
 use std::{
     collections::VecDeque,
