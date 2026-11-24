@@ -83,11 +83,12 @@ impl DecodePolicy {
         self
     }
 
-    /// Allows empty Stored directories with extraction version 1.0. Disabled by default.
+    /// Allows member headers to declare an extraction version below the required
+    /// minimum. Disabled by default. Versions above 4.5 remain unsupported.
     ///
-    /// See [`IndexPolicy::allow_version_1_directories`].
-    pub fn allow_version_1_directories(mut self, allow: bool) -> Self {
-        self.framing = self.framing.allow_version_1_directories(allow);
+    /// See [`IndexPolicy::allow_incompatible_extraction_versions`].
+    pub fn allow_incompatible_extraction_versions(mut self, allow: bool) -> Self {
+        self.framing = self.framing.allow_incompatible_extraction_versions(allow);
         self
     }
 

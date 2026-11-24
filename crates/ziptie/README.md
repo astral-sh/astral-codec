@@ -47,11 +47,12 @@ local ZIP64 extra field when writing with `force_zip64=True`. Pass
 on members without a data descriptor. `--allow-known-extras` alone does
 not enable this option.
 
-Info-ZIP 3.0 can write empty, uncompressed directory entries that declare
-extraction version 1.0. Pass `--allow-version-1-directories` to any command
-to accept these entries. Combine it with `--allow-known-extras` if the archive
-also contains fields such as extended timestamps.
+Pass `--allow-incompatible-extraction-versions` to any command to accept
+member headers that declare an extraction version below the required minimum.
+Examples include Stored files declaring version 0 and Info-ZIP 3.0 directories
+declaring version 1.0. Versions above 4.5 remain unsupported. This flag leaves
+ZIP64 end-record checks and the rules for redundant sizes unchanged.
 
 ```shell
-cargo run -p ziptie -- logical --allow-version-1-directories --allow-known-extras archive.zip
+cargo run -p ziptie -- logical --allow-incompatible-extraction-versions --allow-known-extras archive.zip
 ```

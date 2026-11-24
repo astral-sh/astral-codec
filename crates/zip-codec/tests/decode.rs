@@ -291,10 +291,35 @@ async fn limits_symbolic_link_targets_in_the_codec() -> TestResult {
 }
 
 #[tokio::test]
+async fn opts_in_to_version_zero_stored_files() -> TestResult {
+    let archive = ZipArchive::open(Cursor::new(STORED)).await?;
+    let mut bytes = STORED.to_vec();
+    bytes[archive.entries()[2].directory().position() as usize + 4] = 0;
+
+    let mut archive = ZipArchive::open(Cursor::new(&bytes)).await?;
+    assert_policy_violation(
+        archive.member(2).await,
+        IndexPolicyViolation::IncompatibleExtractionVersion {
+            declared: 0,
+            minimum: 10,
+        },
+    );
+    let policy = DecodePolicy::default().allow_incompatible_extraction_versions(true);
+    let mut archive = ZipArchive::open_with_policy(Cursor::new(&bytes), policy).await?;
+    let payload = file_payload(archive.member(2).await?)?;
+    assert_eq!(contents(payload).await?, b"UTF-8 filename");
+    Ok(())
+}
+
+#[tokio::test]
 async fn opts_in_to_redundant_local_zip64_sizes() -> TestResult {
     let bytes = include_bytes!("fixtures/redundant-zip64.zip");
-    for extras in [ExtraFieldPolicy::Zip64Only, ExtraFieldPolicy::Permissive] {
-        let policy = DecodePolicy::default().extra_field_policy(extras);
+    for policy in [
+        DecodePolicy::default(),
+        DecodePolicy::default()
+            .extra_field_policy(ExtraFieldPolicy::Permissive)
+            .allow_incompatible_extraction_versions(true),
+    ] {
         let mut archive = ZipArchive::open_with_policy(Cursor::new(bytes), policy).await?;
         assert_policy_violation(
             archive.member(0).await,

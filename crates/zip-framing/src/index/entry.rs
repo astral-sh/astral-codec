@@ -12,7 +12,7 @@ use crate::{
     policy_violation,
     record::{
         Common, GeneralPurposeFlags, MemberHeader, MemberPayload, PayloadFields, RecordReader,
-        array_at, bytes_at, parse_name,
+        SizeField, array_at, bytes_at, parse_name,
     },
 };
 
@@ -210,6 +210,11 @@ impl CentralDirectoryEntry {
             path,
             comment,
             policy.extra_fields,
+            position,
+        )?;
+        policy.check_version(
+            header_fields.version,
+            header_fields.minimum_version(extra.has_zip64),
             position,
         )?;
         if common.method == CompressionMethod::Stored
@@ -411,11 +416,13 @@ impl IndexedEntry {
             kind: EntryKind::resolve(directory, unix_data, &attributes)?,
             unix_mode: attributes.unix_mode,
         };
-        for version in [directory.version_needed(), header_fields.version] {
-            resolved
-                .kind
-                .check_version(version, policy.allow_version_1_directories, position)?;
-        }
+        let minimum = resolved.kind.minimum_version();
+        policy.check_version(directory.version_needed(), minimum, position)?;
+        // Both local sizes use sentinels or neither does. A redundant pair
+        // or a central-only ZIP64 offset does not raise the local minimum.
+        let local_minimum =
+            header_fields.minimum_version(header_fields.payload.uncompressed == SizeField::Zip64);
+        policy.check_version(header_fields.version, minimum.max(local_minimum), position)?;
         Ok(resolved)
     }
 

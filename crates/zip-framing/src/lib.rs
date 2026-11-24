@@ -47,6 +47,10 @@
 //!   Redundant local ZIP64 sizes require a separate opt-in through
 //!   [`IndexPolicy::allow_redundant_zip64_sizes`].
 //!
+//! - By default, each member header must declare at least the extraction
+//!   version required by its features. See
+//!   [`IndexPolicy::allow_incompatible_extraction_versions`].
+//!
 //! - Timestamps may differ between headers and across formats. zip-framing
 //!   accepts any packed DOS date and time and checks the layout of supported
 //!   timestamp extras. It does not interpret or expose timestamp values.
@@ -138,9 +142,14 @@ pub enum IndexPolicyViolation {
     /// A DEFLATE member with zero uncompressed size declares compressed bytes.
     #[error("empty DEFLATE stream")]
     EmptyDeflateStream,
-    /// An empty Stored directory declares extraction version 1.0.
-    #[error("directory declares extraction version 1.0")]
-    Version1Directory,
+    /// A member header declares an extraction version below the required minimum.
+    #[error("extraction version {}.{} is below the required {}.{}", declared / 10, declared % 10, minimum / 10, minimum % 10)]
+    IncompatibleExtractionVersion {
+        /// The version declared by the header, in tenths.
+        declared: u16,
+        /// The minimum version required by the member's features, in tenths.
+        minimum: u16,
+    },
     /// A non-Unix creator supplied Unix symlink mode bits.
     #[error("symlink mode from a non-Unix creator system")]
     AmbiguousSymlinkMode,

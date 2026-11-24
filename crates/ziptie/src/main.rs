@@ -22,9 +22,9 @@ struct Cli {
     /// Accept local ZIP64 extras that repeat both 32-bit sizes on members without a data descriptor.
     #[arg(long, global = true)]
     allow_redundant_zip64_sizes: bool,
-    /// Accept empty, uncompressed directory entries that declare extraction version 1.0.
+    /// Accept member extraction versions below the required minimum. Versions above 4.5 remain unsupported.
     #[arg(long, global = true)]
-    allow_version_1_directories: bool,
+    allow_incompatible_extraction_versions: bool,
     #[command(subcommand)]
     command: Command,
 }
@@ -84,13 +84,13 @@ async fn run(cli: Cli) -> Result<(), CliError> {
     let decode_policy = DecodePolicy::default()
         .extra_field_policy(extras)
         .allow_redundant_zip64_sizes(cli.allow_redundant_zip64_sizes)
-        .allow_version_1_directories(cli.allow_version_1_directories);
+        .allow_incompatible_extraction_versions(cli.allow_incompatible_extraction_versions);
     match cli.command {
         Command::Frames { archive } => {
             let index_policy = IndexPolicy::default()
                 .extra_field_policy(extras)
                 .allow_redundant_zip64_sizes(cli.allow_redundant_zip64_sizes)
-                .allow_version_1_directories(cli.allow_version_1_directories);
+                .allow_incompatible_extraction_versions(cli.allow_incompatible_extraction_versions);
             dump_frames(&archive, index_policy, &mut io::stdout().lock()).await
         }
         Command::Logical { archive } => {
