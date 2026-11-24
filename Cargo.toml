@@ -15,14 +15,14 @@ edition = "2024"
 repository = "https://github.com/astral-sh/astral-codec"
 authors = ["William Woodruff <william@astral.sh>"]
 license = "MIT OR Apache-2.0"
-version = "0.0.16"
+version = "0.0.17"
 
 [workspace.dependencies]
-archive-trait = { path = "crates/archive-trait", version = "0.0.16", default-features = false }
-tar-codec = { path = "crates/tar-codec", version = "0.0.16", default-features = false }
-tar-framing = { path = "crates/tar-framing", version = "0.0.16" }
-zip-framing = { path = "crates/zip-framing", version = "0.0.16" }
-zip-codec = { path = "crates/zip-codec", version = "0.0.16" }
+archive-trait = { path = "crates/archive-trait", version = "0.0.17", default-features = false }
+tar-codec = { path = "crates/tar-codec", version = "0.0.17", default-features = false }
+tar-framing = { path = "crates/tar-framing", version = "0.0.17" }
+zip-framing = { path = "crates/zip-framing", version = "0.0.17" }
+zip-codec = { path = "crates/zip-codec", version = "0.0.17" }
 
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
 astral_async_zip = { version = "0.0.21", default-features = false, features = ["deflate", "tokio"] }

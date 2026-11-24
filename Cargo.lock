@@ -90,7 +90,7 @@ dependencies = [
 
 [[package]]
 name = "archive-trait"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "cap-std",
  "junction",
@@ -935,7 +935,7 @@ dependencies = [
 
 [[package]]
 name = "tar-codec"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "archive-trait",
  "astral-tokio-tar",
@@ -949,7 +949,7 @@ dependencies = [
 
 [[package]]
 name = "tar-framing"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "codspeed-divan-compat",
  "thiserror",
@@ -958,7 +958,7 @@ dependencies = [
 
 [[package]]
 name = "tarpit"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "async-compression",
  "clap",
@@ -1495,7 +1495,7 @@ dependencies = [
 
 [[package]]
 name = "zip-codec"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "archive-trait",
  "astral_async_zip",
@@ -1513,7 +1513,7 @@ dependencies = [
 
 [[package]]
 name = "zip-framing"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "codspeed-divan-compat",
  "crc32fast",
@@ -1524,7 +1524,7 @@ dependencies = [
 
 [[package]]
 name = "ziptie"
-version = "0.0.16"
+version = "0.0.17"
 dependencies = [
  "clap",
  "thiserror",
