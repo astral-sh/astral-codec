@@ -25,7 +25,7 @@ zip-framing = { path = "crates/zip-framing", version = "0.0.17" }
 zip-codec = { path = "crates/zip-codec", version = "0.0.17" }
 
 async-compression = { version = "0.4", features = ["gzip", "tokio"] }
-astral_async_zip = { version = "0.0.21", default-features = false, features = ["deflate", "tokio"] }
+astral_async_zip = { version = "0.0.24", default-features = false, features = ["deflate", "tokio"] }
 astral-tokio-tar = "0.7"
 cap-std = "4.0.2"
 clap = "4.6"
